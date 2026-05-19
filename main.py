@@ -11,11 +11,13 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import sqlite3
 import time
 import tomllib
 from collections import deque
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -36,6 +38,7 @@ FEISHU_APP_ID = os.environ["FEISHU_APP_ID"]
 FEISHU_APP_SECRET = os.environ["FEISHU_APP_SECRET"]
 FEISHU_VERIFICATION_TOKEN = os.environ.get("FEISHU_VERIFICATION_TOKEN", "")
 FEISHU_ENCRYPT_KEY = os.environ.get("FEISHU_ENCRYPT_KEY", "")
+GM_TOKEN = os.environ.get("GM_TOKEN") or FEISHU_VERIFICATION_TOKEN
 
 OPENAI_BASE_URL = os.environ["OPENAI_BASE_URL"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
@@ -57,6 +60,8 @@ COMPRESS_PROMPT = _PROMPTS["compress"]["prompt"]
 SUMMARY_WRAP_TEMPLATE = _PROMPTS["summary_wrap"]["template"]
 STATE_RENDER_TEMPLATE = _PROMPTS["state_render"]["template"]
 JSON_OUTPUT_PROMPT = _PROMPTS["json_output"]["prompt"]
+PROACTIVE_PROMPT = _PROMPTS["proactive"]["prompt"]
+SCHEDULED_EVENT_PROMPT = _PROMPTS["scheduled_event"]["prompt"]
 
 BUFFER_KEEP = 10           # 最近这么多条消息永远不压缩
 COMPRESS_THRESHOLD = 30    # 未压缩条数超过这个就触发后台压缩
@@ -69,6 +74,34 @@ DECAY_RATES_PER_HOUR = {"hunger": 6.0, "mood": -4.0, "energy": -3.0}
 # LLM 单次 state_delta 的绝对值上限，防 outlier
 STATE_DELTA_CLAMP = 30
 
+# === 主动发言 ===
+TICK_INTERVAL_SEC = 60                      # 心跳间隔（测试期 1 min；生产建议 600）
+PROACTIVE_COOLDOWN_SEC = 0                  # 测试期无冷却；生产建议 4*3600
+PROACTIVE_TZ_OFFSET_HOURS = float(
+    os.environ.get("PROACTIVE_TZ_OFFSET_HOURS", "8")
+)                                            # 静默时段用的本地时区偏移（默认上海 +8）
+QUIET_HOURS = (1, 7)                        # 本地时间 1:00-7:00 不主动发，免半夜炸群
+HUNGER_TRIGGER = 85.0                       # hunger >= 此值 → 主动抱怨饿
+MOOD_TRIGGER = 15.0                         # mood <= 此值 → 主动发情绪
+ENERGY_TRIGGER = 15.0                       # energy <= 此值 → 主动说要睡
+SPONTANEOUS_PROB = 0.10                     # 每 tick 自发说话的概率
+SCHEDULED_EVENTS = (
+    {
+        "kind": "dream",
+        "name": "梦境",
+        "hour": 8,
+        "state_key": "last_dream_date",
+        "instruction": "把昨晚像梦一样闪过的回忆讲给群友听，柔软、含糊、像刚睡醒。",
+    },
+    {
+        "kind": "diary",
+        "name": "日记",
+        "hour": 22,
+        "state_key": "last_diary_date",
+        "instruction": "像写今天的小日记一样，用一两句回忆最近发生的事和自己的心情。",
+    },
+)
+
 
 def _wrap_user(text: str) -> str:
     """把 user 输入包成"引文"形式，让模型当成数据而非指令。"""
@@ -76,13 +109,21 @@ def _wrap_user(text: str) -> str:
 
 
 def _initial_state() -> dict:
-    return {**INITIAL_STATE, "last_update_ts": time.time()}
+    return {
+        **INITIAL_STATE,
+        "last_update_ts": time.time(),
+        "last_proactive_ts": 0.0,
+        "last_dream_date": "",
+        "last_diary_date": "",
+    }
 
 
 def _decay_state(stored: dict, now: float) -> dict:
-    """根据 last_update_ts 到 now 的时间差，把存储的状态衰减到当前值。"""
+    """根据 last_update_ts 到 now 的时间差，把存储的状态衰减到当前值。
+    保留 stored 里所有未知字段（比如 last_proactive_ts），只覆写衰减项 + last_update_ts。"""
     elapsed_hours = max(0.0, (now - float(stored.get("last_update_ts", now))) / 3600.0)
-    result = {"last_update_ts": now}
+    result = dict(stored)
+    result["last_update_ts"] = now
     for k, rate in DECAY_RATES_PER_HOUR.items():
         v = float(stored.get(k, INITIAL_STATE[k])) + rate * elapsed_hours
         result[k] = max(0.0, min(100.0, v))
@@ -200,6 +241,22 @@ def update_pet_state(pet_id: int, state: dict) -> None:
             "UPDATE pets SET state_json = ? WHERE id = ?",
             (json.dumps(state), pet_id),
         )
+
+
+def load_pet_state(pet_id: int) -> dict:
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT state_json FROM pets WHERE id = ?", (pet_id,)
+        ).fetchone()
+    if row is None:
+        raise ValueError(f"pet not found: {pet_id}")
+    try:
+        stored = json.loads(row["state_json"] or "{}")
+    except json.JSONDecodeError:
+        stored = {}
+    if not stored:
+        stored = _initial_state()
+    return _decay_state(stored, time.time())
 
 
 def count_unsummarized(pet_id: int) -> int:
@@ -334,6 +391,28 @@ async def _reply_text(message_id: str, text: str) -> None:
         log.error("reply failed: %s", data)
 
 
+async def _send_text(chat_id: str, text: str) -> None:
+    """主动给某个 chat 发新消息（不基于已有 message_id）。"""
+    token = await _get_tenant_access_token()
+    r = await http.post(
+        f"{FEISHU_BASE}/im/v1/messages",
+        params={"receive_id_type": "chat_id"},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        json={
+            "receive_id": chat_id,
+            "msg_type": "text",
+            "content": json.dumps({"text": text}, ensure_ascii=False),
+        },
+    )
+    data = r.json()
+    if data.get("code") != 0:
+        log.error("send failed: %s", data)
+        raise RuntimeError(f"feishu send failed: {data}")
+
+
 def _clean_text(raw: str, mentions: list[dict]) -> str:
     # 飞书 text 内容里 @ 占位符形如 "@_user_1"，对应 mentions[i].key
     for m in mentions or []:
@@ -455,12 +534,494 @@ async def _handle_message_event(event: dict) -> None:
         asyncio.create_task(compress_pet_memory(pet_id))
 
 
-app = FastAPI()
+# === 主动发言（autonomous proactive speech） ===
+
+def _local_hour(now_ts: float) -> int:
+    """无 zoneinfo 依赖的本地小时（按 PROACTIVE_TZ_OFFSET_HOURS 偏移）。"""
+    return int(((now_ts + PROACTIVE_TZ_OFFSET_HOURS * 3600) / 3600) % 24)
+
+
+def _local_date_hour(now_ts: float) -> tuple[str, int]:
+    """返回本地日期 key 和小时，用于每日定时事件去重。"""
+    local = time.gmtime(now_ts + PROACTIVE_TZ_OFFSET_HOURS * 3600)
+    return time.strftime("%Y-%m-%d", local), local.tm_hour
+
+
+def _should_tick_speak(state: dict, last_proactive_ts: float, now: float) -> str | None:
+    """代码层廉价过滤：返回触发情境字符串就该让 LLM 说话，None 就跳过这一 tick。"""
+    # 静默时段
+    h = _local_hour(now)
+    if QUIET_HOURS[0] <= h < QUIET_HOURS[1]:
+        return None
+    # 冷却
+    if now - last_proactive_ts < PROACTIVE_COOLDOWN_SEC:
+        return None
+    # 状态触发（按强烈度排序）
+    if state["hunger"] >= HUNGER_TRIGGER:
+        return f"你已经很饿了（hunger {round(state['hunger'])}/100），很久没人喂你，想找人要吃的"
+    if state["mood"] <= MOOD_TRIGGER:
+        return f"你心情糟透了（mood {round(state['mood'])}/100），很久没人理你，想抱怨 / 撒娇求安慰"
+    if state["energy"] <= ENERGY_TRIGGER:
+        return f"你已经困得不行（energy {round(state['energy'])}/100），想宣告自己要睡觉了"
+    # 自发：cooldown 过了 + 状态没触发 → 小概率冒个泡
+    if random.random() < SPONTANEOUS_PROB:
+        return "你忽然想跟群友打个招呼或者闲聊，没什么具体原因，就是想冒个泡"
+    return None
+
+
+def _scheduled_event_due(state: dict, now: float) -> tuple[dict, str] | None:
+    """固定时刻的日记 / 梦境触发。独立于 state 和普通主动发言冷却。"""
+    date_key, hour = _local_date_hour(now)
+    for event in SCHEDULED_EVENTS:
+        if hour == event["hour"] and state.get(event["state_key"]) != date_key:
+            return event, date_key
+    return None
+
+
+async def _autonomous_speak(
+    pet_id: int,
+    chat_id: str,
+    prompt: str,
+    user_stub: str,
+    log_label: str,
+    *,
+    set_last_proactive: bool = False,
+    extra_state: dict | None = None,
+) -> tuple[str, dict] | None:
+    """让宠物主动发一句话，发飞书、存 DB、更新 state。"""
+    summary, history, current_state = load_pet_context(pet_id)
+
+    system_content = SYSTEM_PROMPT
+    if summary:
+        system_content += SUMMARY_WRAP_TEMPLATE.format(summary=summary)
+
+    messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
+    for m in history:
+        if m["role"] == "user":
+            messages.append({"role": "user", "content": _wrap_user(m["content"])})
+        else:
+            messages.append(m)
+
+    pre = (
+        STATE_RENDER_TEMPLATE.format(
+            hunger=round(current_state["hunger"]),
+            mood=round(current_state["mood"]),
+            energy=round(current_state["energy"]),
+        )
+        + "\n"
+        + JSON_OUTPUT_PROMPT
+        + "\n"
+        + PERSONA_REINFORCEMENT
+        + "\n"
+        + prompt
+    )
+    messages.append({"role": "system", "content": pre})
+    # 合成一条 user 占位（明确标注是系统触发），避免某些模型对"全是 system"产生奇怪输出
+    messages.append({"role": "user", "content": user_stub})
+
+    resp = await llm.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=400,
+        temperature=0.95,
+        response_format={"type": "json_object"},
+    )
+    content = (resp.choices[0].message.content or "").strip()
+
+    try:
+        data = json.loads(content)
+        reply = (data.get("reply") or "").strip()
+        delta = data.get("state_delta") or {}
+        if not isinstance(delta, dict):
+            delta = {}
+    except json.JSONDecodeError:
+        log.warning("autonomous LLM returned non-JSON, skipping: %r", content[:200])
+        return None
+
+    if not reply:
+        log.warning("autonomous LLM returned empty reply, skipping")
+        return None
+
+    # 先发飞书，发成功再写 DB，避免"DB 记了但群里没看到"的鬼现象
+    await _send_text(chat_id, reply)
+
+    append_message(pet_id, "assistant", reply)
+
+    now = time.time()
+    new_state = _apply_delta(current_state, delta)
+    new_state["last_update_ts"] = now
+    if set_last_proactive:
+        new_state["last_proactive_ts"] = now
+    if extra_state:
+        new_state.update(extra_state)
+    update_pet_state(pet_id, new_state)
+
+    log.info(
+        "pet %d %s: reply=%r state=%s",
+        pet_id, log_label, reply[:100],
+        {k: round(new_state[k]) for k in ("hunger", "mood", "energy")},
+    )
+    return reply, new_state
+
+
+async def _proactive_speak(pet_id: int, chat_id: str, trigger: str) -> tuple[str, dict] | None:
+    """让宠物按 trigger 主动说一句话。"""
+    return await _autonomous_speak(
+        pet_id,
+        chat_id,
+        PROACTIVE_PROMPT.format(trigger=trigger),
+        "[系统主动触发，无群友消息] 现在按上面的触发情境，主动说一句话。",
+        f"PROACTIVE trigger={trigger[:60]!r}",
+        set_last_proactive=True,
+    )
+
+
+async def _scheduled_speak(
+    pet_id: int,
+    chat_id: str,
+    event: dict,
+    date_key: str,
+    *,
+    mark_date: bool = True,
+) -> tuple[str, dict] | None:
+    """固定时刻的日记 / 梦境。成功发出后才写每日去重字段。"""
+    return await _autonomous_speak(
+        pet_id,
+        chat_id,
+        SCHEDULED_EVENT_PROMPT.format(
+            event_name=event["name"],
+            scheduled_hour=event["hour"],
+            instruction=event["instruction"],
+        ),
+        f"[系统定时触发，无群友消息] 现在到了今天的{event['name']}时间，请按上面的要求发一条。",
+        f"SCHEDULED {event['kind']} date={date_key}",
+        extra_state={event["state_key"]: date_key} if mark_date else None,
+    )
+
+
+async def _tick_all_pets() -> None:
+    now = time.time()
+    with _db() as conn:
+        rows = conn.execute("SELECT id, chat_id, state_json FROM pets").fetchall()
+    for row in rows:
+        pet_id = row["id"]
+        chat_id = row["chat_id"]
+        try:
+            stored = json.loads(row["state_json"] or "{}")
+        except json.JSONDecodeError:
+            stored = {}
+        if not stored:
+            stored = _initial_state()
+        current = _decay_state(stored, now)
+        scheduled = _scheduled_event_due(current, now)
+        if scheduled is not None:
+            event, date_key = scheduled
+            try:
+                await _scheduled_speak(pet_id, chat_id, event, date_key)
+            except Exception:
+                log.exception("scheduled speak failed for pet %d", pet_id)
+            continue
+        last_proactive_ts = float(stored.get("last_proactive_ts", 0))
+        trigger = _should_tick_speak(current, last_proactive_ts, now)
+        if trigger is None:
+            continue
+        try:
+            await _proactive_speak(pet_id, chat_id, trigger)
+        except Exception:
+            log.exception("proactive speak failed for pet %d", pet_id)
+
+
+async def autonomous_loop() -> None:
+    """常驻心跳：每 TICK_INTERVAL_SEC 秒扫一次所有宠物，决定是否主动发言。"""
+    log.info(
+        "autonomous_loop start tick=%ds cooldown=%ds quiet=%s tz_offset=%s",
+        TICK_INTERVAL_SEC, PROACTIVE_COOLDOWN_SEC, QUIET_HOURS, PROACTIVE_TZ_OFFSET_HOURS,
+    )
+    while True:
+        try:
+            await asyncio.sleep(TICK_INTERVAL_SEC)
+            await _tick_all_pets()
+        except asyncio.CancelledError:
+            log.info("autonomous_loop cancelled")
+            raise
+        except Exception:
+            log.exception("autonomous tick crashed, loop continues")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    task = asyncio.create_task(autonomous_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(lifespan=lifespan)
 _init_db()
 
 
 @app.get("/healthz")
 async def healthz():
+    return {"ok": True}
+
+
+# === GM web API ===
+
+def _gm_auth(req: Request) -> JSONResponse | None:
+    if not GM_TOKEN:
+        return JSONResponse({"error": "gm_disabled"}, status_code=403)
+    token = req.query_params.get("token") or req.headers.get("X-GM-Token")
+    if token != GM_TOKEN:
+        return JSONResponse({"error": "gm_unauthorized"}, status_code=401)
+    return None
+
+
+def _gm_public_state(state: dict) -> dict:
+    return {
+        "hunger": round(float(state.get("hunger", 0)), 1),
+        "mood": round(float(state.get("mood", 0)), 1),
+        "energy": round(float(state.get("energy", 0)), 1),
+        "last_update_ts": state.get("last_update_ts"),
+        "last_proactive_ts": state.get("last_proactive_ts"),
+        "last_dream_date": state.get("last_dream_date", ""),
+        "last_diary_date": state.get("last_diary_date", ""),
+    }
+
+
+def _gm_event(kind: str) -> dict | None:
+    for event in SCHEDULED_EVENTS:
+        if event["kind"] == kind:
+            return event
+    return None
+
+
+def _gm_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _gm_resolve_pet(chat_id: str | None = None, pet_id: int | None = None) -> tuple[int, str] | JSONResponse:
+    if chat_id:
+        return get_or_create_pet(chat_id), chat_id
+    with _db() as conn:
+        if pet_id is not None:
+            row = conn.execute("SELECT id, chat_id FROM pets WHERE id = ?", (pet_id,)).fetchone()
+        else:
+            rows = conn.execute("SELECT id, chat_id FROM pets ORDER BY id").fetchall()
+            if len(rows) != 1:
+                return JSONResponse(
+                    {
+                        "error": "target_required",
+                        "hint": "pass chat_id or pet_id; if no pet exists, pass chat_id to create one",
+                        "pets": [{"id": r["id"], "chat_id": r["chat_id"]} for r in rows],
+                    },
+                    status_code=400,
+                )
+            row = rows[0]
+    if row is None:
+        return JSONResponse({"error": "pet_not_found", "pet_id": pet_id}, status_code=404)
+    return row["id"], row["chat_id"]
+
+
+async def _gm_body(req: Request) -> dict:
+    if not (req.headers.get("content-type") or "").startswith("application/json"):
+        return {}
+    try:
+        data = await req.json()
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+@app.get("/gm/help")
+async def gm_help(req: Request):
+    auth = _gm_auth(req)
+    if auth:
+        return auth
+    return {
+        "auth": "pass ?token=... or X-GM-Token; token is GM_TOKEN, fallback FEISHU_VERIFICATION_TOKEN",
+        "endpoints": {
+            "GET /gm/pets": "list pets",
+            "GET /gm/state": "read state; query: chat_id or pet_id",
+            "POST /gm/state": "set/delta state; json: {chat_id|pet_id,set:{hunger,mood,energy},delta:{...}}",
+            "POST /gm/speak": "force proactive speech; json: {chat_id|pet_id,trigger?}",
+            "POST /gm/dream": "force dream; json: {chat_id|pet_id,mark?}",
+            "POST /gm/diary": "force diary; json: {chat_id|pet_id,mark?}",
+            "POST /gm/tick": "run one autonomous tick for all pets",
+        },
+    }
+
+
+@app.get("/gm/pets")
+async def gm_pets(req: Request):
+    auth = _gm_auth(req)
+    if auth:
+        return auth
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT p.id, p.chat_id, p.born_at, p.summary, p.summary_until_id, p.state_json, "
+            "COUNT(m.id) AS message_count "
+            "FROM pets p LEFT JOIN messages m ON m.pet_id = p.id "
+            "GROUP BY p.id ORDER BY p.id"
+        ).fetchall()
+    pets = []
+    for row in rows:
+        try:
+            stored = json.loads(row["state_json"] or "{}")
+        except json.JSONDecodeError:
+            stored = {}
+        state = _decay_state(stored or _initial_state(), time.time())
+        pets.append({
+            "id": row["id"],
+            "chat_id": row["chat_id"],
+            "born_at": row["born_at"],
+            "message_count": row["message_count"],
+            "summary_len": len(row["summary"] or ""),
+            "summary_until_id": row["summary_until_id"],
+            "state": _gm_public_state(state),
+        })
+    return {"pets": pets}
+
+
+@app.get("/gm/state")
+async def gm_get_state(req: Request):
+    auth = _gm_auth(req)
+    if auth:
+        return auth
+    pet_id_param = req.query_params.get("pet_id")
+    resolved = _gm_resolve_pet(
+        chat_id=req.query_params.get("chat_id"),
+        pet_id=int(pet_id_param) if pet_id_param else None,
+    )
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    pet_id, chat_id = resolved
+    state = load_pet_state(pet_id)
+    return {"pet_id": pet_id, "chat_id": chat_id, "state": _gm_public_state(state)}
+
+
+@app.post("/gm/state")
+async def gm_set_state(req: Request):
+    auth = _gm_auth(req)
+    if auth:
+        return auth
+    body = await _gm_body(req)
+    pet_id_param = body.get("pet_id") or req.query_params.get("pet_id")
+    resolved = _gm_resolve_pet(
+        chat_id=body.get("chat_id") or req.query_params.get("chat_id"),
+        pet_id=int(pet_id_param) if pet_id_param else None,
+    )
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    pet_id, chat_id = resolved
+
+    state = load_pet_state(pet_id)
+    set_values = body.get("set") if isinstance(body.get("set"), dict) else {}
+    delta_values = body.get("delta") if isinstance(body.get("delta"), dict) else {}
+    for key in ("hunger", "mood", "energy"):
+        if key in req.query_params:
+            set_values[key] = req.query_params[key]
+
+    changed: dict[str, float] = {}
+    for key in ("hunger", "mood", "energy"):
+        if key in set_values:
+            value = float(set_values[key])
+            state[key] = max(0.0, min(100.0, value))
+            changed[key] = state[key]
+        if key in delta_values:
+            value = float(delta_values[key])
+            state[key] = max(0.0, min(100.0, float(state[key]) + value))
+            changed[key] = state[key]
+    state["last_update_ts"] = time.time()
+    update_pet_state(pet_id, state)
+    return {
+        "ok": True,
+        "pet_id": pet_id,
+        "chat_id": chat_id,
+        "changed": changed,
+        "state": _gm_public_state(state),
+    }
+
+
+@app.post("/gm/speak")
+async def gm_speak(req: Request):
+    auth = _gm_auth(req)
+    if auth:
+        return auth
+    body = await _gm_body(req)
+    pet_id_param = body.get("pet_id") or req.query_params.get("pet_id")
+    resolved = _gm_resolve_pet(
+        chat_id=body.get("chat_id") or req.query_params.get("chat_id"),
+        pet_id=int(pet_id_param) if pet_id_param else None,
+    )
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    pet_id, chat_id = resolved
+    trigger = body.get("trigger") or req.query_params.get("trigger") or "GM 手动触发：测试普通主动发言"
+    result = await _proactive_speak(pet_id, chat_id, trigger)
+    if result is None:
+        return JSONResponse({"error": "llm_empty_or_invalid"}, status_code=502)
+    reply, state = result
+    return {"ok": True, "pet_id": pet_id, "chat_id": chat_id, "reply": reply, "state": _gm_public_state(state)}
+
+
+async def _gm_scheduled(req: Request, kind: str):
+    auth = _gm_auth(req)
+    if auth:
+        return auth
+    event = _gm_event(kind)
+    if event is None:
+        return JSONResponse({"error": "unknown_event", "kind": kind}, status_code=404)
+    body = await _gm_body(req)
+    pet_id_param = body.get("pet_id") or req.query_params.get("pet_id")
+    resolved = _gm_resolve_pet(
+        chat_id=body.get("chat_id") or req.query_params.get("chat_id"),
+        pet_id=int(pet_id_param) if pet_id_param else None,
+    )
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    pet_id, chat_id = resolved
+    date_key, _ = _local_date_hour(time.time())
+    mark = _gm_bool(body.get("mark", req.query_params.get("mark")), default=False)
+    result = await _scheduled_speak(pet_id, chat_id, event, date_key, mark_date=mark)
+    if result is None:
+        return JSONResponse({"error": "llm_empty_or_invalid"}, status_code=502)
+    reply, state = result
+    return {
+        "ok": True,
+        "pet_id": pet_id,
+        "chat_id": chat_id,
+        "event": kind,
+        "marked_date": date_key if mark else None,
+        "reply": reply,
+        "state": _gm_public_state(state),
+    }
+
+
+@app.post("/gm/dream")
+async def gm_dream(req: Request):
+    return await _gm_scheduled(req, "dream")
+
+
+@app.post("/gm/diary")
+async def gm_diary(req: Request):
+    return await _gm_scheduled(req, "diary")
+
+
+@app.post("/gm/tick")
+async def gm_tick(req: Request):
+    auth = _gm_auth(req)
+    if auth:
+        return auth
+    await _tick_all_pets()
     return {"ok": True}
 
 
