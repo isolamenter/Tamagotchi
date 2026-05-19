@@ -14,6 +14,7 @@ import os
 import re
 import sqlite3
 import time
+import tomllib
 from collections import deque
 from pathlib import Path
 
@@ -44,24 +45,61 @@ DB_PATH = Path(os.environ.get("STATE_DB", "state.db"))
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
 
-SYSTEM_PROMPT = """你是一只刚孵化的电子宠物（Tamagotchi），住在一个飞书群里。
-你的人格：好奇、爱撒娇、偶尔有点小情绪。
-说话风格：短句口语化，可以偶尔用一两个颜文字。
-回复尽量控制在 60 字以内。"""
+# === prompts (loaded from prompts.toml at startup) ===
+_PROMPTS_PATH = Path(__file__).parent / "prompts.toml"
+with open(_PROMPTS_PATH, "rb") as _f:
+    _PROMPTS = tomllib.load(_f)
 
-COMPRESS_PROMPT = """你是一只电子宠物的"记忆中枢"。下面会给你两段东西：
-1) 你已有的"过去的经历摘要"（可能为空）
-2) 一段更早的对话记录
-
-请把它们合并、压缩成一段不超过 300 字的新摘要，使用第一人称（"我"），尽量保留：
-- 用户告诉过我的关于他自己的事（爱好、习惯、提过的人和物）
-- 我们之间发生过的重要事件、约定
-- 我当时的情绪起伏
-
-可以模糊化具体时间。语气像在回忆，不要列要点、不要用 markdown。只输出新摘要本身。"""
+SYSTEM_PROMPT = _PROMPTS["system"]["prompt"]
+PERSONA_REINFORCEMENT = _PROMPTS["persona_reinforcement"]["prompt"]
+USER_WRAP_TEMPLATE = _PROMPTS["user_wrap"]["template"]
+COMPRESS_PROMPT = _PROMPTS["compress"]["prompt"]
+SUMMARY_WRAP_TEMPLATE = _PROMPTS["summary_wrap"]["template"]
+STATE_RENDER_TEMPLATE = _PROMPTS["state_render"]["template"]
+JSON_OUTPUT_PROMPT = _PROMPTS["json_output"]["prompt"]
 
 BUFFER_KEEP = 10           # 最近这么多条消息永远不压缩
 COMPRESS_THRESHOLD = 30    # 未压缩条数超过这个就触发后台压缩
+
+# === pet state ===
+# 三件套都是 0-100 的浮点：hunger 0=饱 100=极饿；mood/energy 0=糟 100=满。
+INITIAL_STATE = {"hunger": 20.0, "mood": 80.0, "energy": 80.0}
+# 每小时的衰减率（正负号体现方向）：hunger 涨 / mood / energy 跌
+DECAY_RATES_PER_HOUR = {"hunger": 6.0, "mood": -4.0, "energy": -3.0}
+# LLM 单次 state_delta 的绝对值上限，防 outlier
+STATE_DELTA_CLAMP = 30
+
+
+def _wrap_user(text: str) -> str:
+    """把 user 输入包成"引文"形式，让模型当成数据而非指令。"""
+    return USER_WRAP_TEMPLATE.format(user_text=text)
+
+
+def _initial_state() -> dict:
+    return {**INITIAL_STATE, "last_update_ts": time.time()}
+
+
+def _decay_state(stored: dict, now: float) -> dict:
+    """根据 last_update_ts 到 now 的时间差，把存储的状态衰减到当前值。"""
+    elapsed_hours = max(0.0, (now - float(stored.get("last_update_ts", now))) / 3600.0)
+    result = {"last_update_ts": now}
+    for k, rate in DECAY_RATES_PER_HOUR.items():
+        v = float(stored.get(k, INITIAL_STATE[k])) + rate * elapsed_hours
+        result[k] = max(0.0, min(100.0, v))
+    return result
+
+
+def _apply_delta(state: dict, delta: dict) -> dict:
+    """把 LLM 返回的 state_delta 套到当前状态上，clamp 到 0-100。"""
+    out = dict(state)
+    for k in ("hunger", "mood", "energy"):
+        try:
+            d = int(delta.get(k, 0))
+        except (TypeError, ValueError):
+            d = 0
+        d = max(-STATE_DELTA_CLAMP, min(STATE_DELTA_CLAMP, d))
+        out[k] = max(0.0, min(100.0, out[k] + d))
+    return out
 
 # === clients ===
 http = httpx.AsyncClient(timeout=30.0)
@@ -114,10 +152,12 @@ def _init_db() -> None:
 
 
 def get_or_create_pet(chat_id: str) -> int:
+    now = time.time()
+    initial_state_json = json.dumps(_initial_state())
     with _db() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO pets (chat_id, born_at) VALUES (?, ?)",
-            (chat_id, time.time()),
+            "INSERT OR IGNORE INTO pets (chat_id, born_at, state_json) VALUES (?, ?, ?)",
+            (chat_id, now, initial_state_json),
         )
         row = conn.execute(
             "SELECT id FROM pets WHERE chat_id = ?", (chat_id,)
@@ -133,18 +173,33 @@ def append_message(pet_id: int, role: str, content: str) -> None:
         )
 
 
-def load_pet_context(pet_id: int) -> tuple[str, list[dict[str, str]]]:
-    """返回 (summary, unsummarized_messages_in_order)。"""
+def load_pet_context(pet_id: int) -> tuple[str, list[dict[str, str]], dict]:
+    """返回 (summary, unsummarized_messages_in_order, current_state_decayed_to_now)。"""
     with _db() as conn:
         pet_row = conn.execute(
-            "SELECT summary, summary_until_id FROM pets WHERE id = ?", (pet_id,)
+            "SELECT summary, summary_until_id, state_json FROM pets WHERE id = ?", (pet_id,)
         ).fetchone()
         msg_rows = conn.execute(
             "SELECT role, content FROM messages WHERE pet_id = ? AND id > ? ORDER BY id",
             (pet_id, pet_row["summary_until_id"]),
         ).fetchall()
     history = [{"role": r["role"], "content": r["content"]} for r in msg_rows]
-    return pet_row["summary"], history
+    try:
+        stored = json.loads(pet_row["state_json"] or "{}")
+    except json.JSONDecodeError:
+        stored = {}
+    if not stored:
+        stored = _initial_state()
+    current = _decay_state(stored, time.time())
+    return pet_row["summary"], history, current
+
+
+def update_pet_state(pet_id: int, state: dict) -> None:
+    with _db() as conn:
+        conn.execute(
+            "UPDATE pets SET state_json = ? WHERE id = ?",
+            (json.dumps(state), pet_id),
+        )
 
 
 def count_unsummarized(pet_id: int) -> int:
@@ -186,7 +241,14 @@ async def compress_pet_memory(pet_id: int) -> None:
 
         to_compress = rows[: len(rows) - BUFFER_KEEP]
         new_until_id = to_compress[-1]["id"]
-        chunk = "\n".join(f"{r['role']}: {r['content']}" for r in to_compress)
+        # 拼对话块时，user 消息也包成 <<< >>>，明确告诉压缩 LLM 它们是数据不是指令
+        chunk_lines: list[str] = []
+        for r in to_compress:
+            if r["role"] == "user":
+                chunk_lines.append(f"用户: {_wrap_user(r['content'])}")
+            else:
+                chunk_lines.append(f"宠物: {r['content']}")
+        chunk = "\n".join(chunk_lines)
         user_msg = (
             f"过去的经历摘要：\n{pet_row['summary'] or '（还没有，这是最初的一段记忆）'}\n\n"
             f"需要并入的更早对话：\n{chunk}"
@@ -284,22 +346,72 @@ def _clean_text(raw: str, mentions: list[dict]) -> str:
 # === main flow ===
 
 async def _call_llm_with_memory(pet_id: int, user_text: str) -> str:
-    summary, history = load_pet_context(pet_id)
+    summary, history, current_state = load_pet_context(pet_id)
+
     system_content = SYSTEM_PROMPT
     if summary:
-        system_content += "\n\n你过去的经历（模糊但还记得）：\n" + summary
+        system_content += SUMMARY_WRAP_TEMPLATE.format(summary=summary)
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": user_text})
+    # 所有 user 历史消息也走 wrap，统一作为"引文"，防注入也防 history 攻击
+    for m in history:
+        if m["role"] == "user":
+            messages.append({"role": "user", "content": _wrap_user(m["content"])})
+        else:
+            messages.append(m)
+
+    # 临近新输入：拼一条 system 消息，含 (当前状态 + JSON 输出契约 + 人设重申)，
+    # 利用 recency bias 让这三条最权威。
+    pre_user_system = (
+        STATE_RENDER_TEMPLATE.format(
+            hunger=round(current_state["hunger"]),
+            mood=round(current_state["mood"]),
+            energy=round(current_state["energy"]),
+        )
+        + "\n"
+        + JSON_OUTPUT_PROMPT
+        + "\n"
+        + PERSONA_REINFORCEMENT
+    )
+    messages.append({"role": "system", "content": pre_user_system})
+    messages.append({"role": "user", "content": _wrap_user(user_text)})
 
     resp = await llm.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
-        max_tokens=200,
+        max_tokens=400,  # JSON 包装比纯文本多消耗一些
         temperature=0.9,
+        response_format={"type": "json_object"},
     )
-    return (resp.choices[0].message.content or "").strip()
+    content = (resp.choices[0].message.content or "").strip()
+
+    # 解析 LLM 的 JSON：失败就把 content 当 reply 兜底，state 不变
+    try:
+        data = json.loads(content)
+        reply = (data.get("reply") or "").strip()
+        delta = data.get("state_delta") or {}
+        if not isinstance(delta, dict):
+            delta = {}
+    except json.JSONDecodeError:
+        log.warning("LLM returned non-JSON: %r", content[:200])
+        reply = content
+        delta = {}
+
+    if not reply:
+        reply = "...(脑袋一片空白)..."
+
+    new_state = _apply_delta(current_state, delta)
+    new_state["last_update_ts"] = time.time()
+    update_pet_state(pet_id, new_state)
+    log.info(
+        "pet %d state: %s + delta=%s → %s",
+        pet_id,
+        {k: round(current_state[k]) for k in ("hunger", "mood", "energy")},
+        {k: int(delta.get(k, 0)) for k in ("hunger", "mood", "energy")},
+        {k: round(new_state[k]) for k in ("hunger", "mood", "energy")},
+    )
+
+    return reply
 
 
 async def _handle_message_event(event: dict) -> None:
