@@ -10,10 +10,12 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import re
 import sqlite3
+import struct
 import time
 import tomllib
 from collections import deque
@@ -43,68 +45,101 @@ GM_TOKEN = os.environ.get("GM_TOKEN") or FEISHU_VERIFICATION_TOKEN
 OPENAI_BASE_URL = os.environ["OPENAI_BASE_URL"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o-mini")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-3-small")
 
 DB_PATH = Path(os.environ.get("STATE_DB", "state.db"))
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
 
-# === prompts (loaded from prompts.toml at startup) ===
+# === prompts (loaded from TOML at startup) ===
 _PROMPTS_PATH = Path(__file__).parent / "prompts.toml"
+_PET_STYLE_PATH = Path(__file__).parent / "pet_style.toml"
+_PET_CONFIG_PATH = Path(__file__).parent / "pet_config.toml"
 with open(_PROMPTS_PATH, "rb") as _f:
     _PROMPTS = tomllib.load(_f)
+with open(_PET_STYLE_PATH, "rb") as _f:
+    _PET_STYLE = tomllib.load(_f)
+with open(_PET_CONFIG_PATH, "rb") as _f:
+    _PET_CONFIG = tomllib.load(_f)
 
-SYSTEM_PROMPT = _PROMPTS["system"]["prompt"]
-PERSONA_REINFORCEMENT = _PROMPTS["persona_reinforcement"]["prompt"]
+PET_STYLE_PROMPT = _PET_STYLE["style"]["prompt"]
+PET_STYLE_REINFORCEMENT = _PET_STYLE["style"]["reinforcement"]
+SYSTEM_PROMPT = _PROMPTS["system"]["template"].format(style_prompt=PET_STYLE_PROMPT)
+PERSONA_REINFORCEMENT = _PROMPTS["persona_reinforcement"]["template"].format(
+    style_reinforcement=PET_STYLE_REINFORCEMENT
+)
 USER_WRAP_TEMPLATE = _PROMPTS["user_wrap"]["template"]
+USER_WRAP_DIRECT_TEMPLATE = _PROMPTS["user_wrap"]["direct_template"]
+USER_WRAP_OBSERVER_TEMPLATE = _PROMPTS["user_wrap"]["observer_template"]
 COMPRESS_PROMPT = _PROMPTS["compress"]["prompt"]
-SUMMARY_WRAP_TEMPLATE = _PROMPTS["summary_wrap"]["template"]
-STATE_RENDER_TEMPLATE = _PROMPTS["state_render"]["template"]
+COMPRESS_USER_LINE_TEMPLATE = _PROMPTS["compress"]["user_line_template"]
+COMPRESS_ASSISTANT_LINE_TEMPLATE = _PROMPTS["compress"]["assistant_line_template"]
+COMPRESS_USER_MESSAGE_TEMPLATE = _PROMPTS["compress"]["user_message_template"]
+RECALL_HEADER = _PROMPTS["recall"]["header"]
+RECALL_CARD_TEMPLATE = _PROMPTS["recall"]["card_template"]
+_STATE_RENDER = _PROMPTS["state_render"]
+STATE_RENDER_HEADER = _STATE_RENDER["header"]
+STATE_RENDER_LINE_PREFIX = _STATE_RENDER["line_prefix"]
+STATE_RENDER_VIBE_TEMPLATE = _STATE_RENDER["vibe_template"]
+STATE_RENDER_LINES = _STATE_RENDER["lines"]
 JSON_OUTPUT_PROMPT = _PROMPTS["json_output"]["prompt"]
 PROACTIVE_PROMPT = _PROMPTS["proactive"]["prompt"]
+PROACTIVE_TRIGGER_TEMPLATES = _PROMPTS["proactive_triggers"]
+PROACTIVE_USER_STUB_TEMPLATE = _PROMPTS["autonomous_user_stub"]["proactive"]
 SCHEDULED_EVENT_PROMPT = _PROMPTS["scheduled_event"]["prompt"]
+SCHEDULED_USER_STUB_TEMPLATE = _PROMPTS["autonomous_user_stub"]["scheduled"]
+SCHEDULED_EVENTS = tuple(_PROMPTS["scheduled_events"])
+FALLBACK_REPLIES = _PROMPTS["fallback_reply"]
+GM_DEFAULT_SPEAK_TRIGGER = _PROMPTS["gm"]["default_speak_trigger"]
+STATUS_TEMPLATE = _PROMPTS["display"]["status_template"]
 
-BUFFER_KEEP = 10           # 最近这么多条消息永远不压缩
-COMPRESS_THRESHOLD = 30    # 未压缩条数超过这个就触发后台压缩
+_MEMORY_CONFIG = _PET_CONFIG["memory"]
+BUFFER_KEEP = int(_MEMORY_CONFIG["buffer_keep"])
+COMPRESS_THRESHOLD = int(_MEMORY_CONFIG["compress_threshold"])
 
-# === pet state ===
-# 三件套都是 0-100 的浮点：hunger 0=饱 100=极饿；mood/energy 0=糟 100=满。
-INITIAL_STATE = {"hunger": 20.0, "mood": 80.0, "energy": 80.0}
-# 每小时的衰减率（正负号体现方向）：hunger 涨 / mood / energy 跌
-DECAY_RATES_PER_HOUR = {"hunger": 6.0, "mood": -4.0, "energy": -3.0}
-# LLM 单次 state_delta 的绝对值上限，防 outlier
-STATE_DELTA_CLAMP = 30
+_STATE_CONFIG = _PET_CONFIG["state"]
+INITIAL_STATE = {k: float(v) for k, v in _STATE_CONFIG["initial"].items()}
+DECAY_RATES_PER_HOUR = {
+    k: float(v) for k, v in _STATE_CONFIG["decay_per_hour"].items()
+}
+STATE_DELTA_CLAMP = int(_STATE_CONFIG["delta_clamp"])
+# state.bands.<dim> = {extreme_high?, high?, low?, extreme_low?}；缺的档不渲染
+STATE_BANDS = {k: dict(v) for k, v in _STATE_CONFIG.get("bands", {}).items()}
+# 数值维度的顺序，影响 _apply_delta / _decay_state / 渲染先后
+STATE_NUMERIC_KEYS = tuple(INITIAL_STATE.keys())
+RECENT_VIBE_POOL = list(_PET_STYLE.get("recent_vibes", {}).get("pool", []))
 
-# === 主动发言 ===
-TICK_INTERVAL_SEC = 60                      # 心跳间隔（测试期 1 min；生产建议 600）
-PROACTIVE_COOLDOWN_SEC = 0                  # 测试期无冷却；生产建议 4*3600
-PROACTIVE_TZ_OFFSET_HOURS = float(
-    os.environ.get("PROACTIVE_TZ_OFFSET_HOURS", "8")
-)                                            # 静默时段用的本地时区偏移（默认上海 +8）
-QUIET_HOURS = (1, 7)                        # 本地时间 1:00-7:00 不主动发，免半夜炸群
-HUNGER_TRIGGER = 85.0                       # hunger >= 此值 → 主动抱怨饿
-MOOD_TRIGGER = 15.0                         # mood <= 此值 → 主动发情绪
-ENERGY_TRIGGER = 15.0                       # energy <= 此值 → 主动说要睡
-SPONTANEOUS_PROB = 0.10                     # 每 tick 自发说话的概率
-SCHEDULED_EVENTS = (
-    {
-        "kind": "dream",
-        "name": "梦境",
-        "hour": 8,
-        "state_key": "last_dream_date",
-        "instruction": "把昨晚像梦一样闪过的回忆讲给群友听，柔软、含糊、像刚睡醒。",
-    },
-    {
-        "kind": "diary",
-        "name": "日记",
-        "hour": 22,
-        "state_key": "last_diary_date",
-        "instruction": "像写今天的小日记一样，用一两句回忆最近发生的事和自己的心情。",
-    },
+_AUTONOMOUS_CONFIG = _PET_CONFIG["autonomous"]
+TICK_INTERVAL_SEC = int(_AUTONOMOUS_CONFIG["tick_interval_sec"])
+PROACTIVE_COOLDOWN_SEC = int(_AUTONOMOUS_CONFIG["cooldown_sec"])
+PROACTIVE_TZ_OFFSET_HOURS = float(_AUTONOMOUS_CONFIG["timezone_offset_hours"])
+QUIET_HOURS = (
+    int(_AUTONOMOUS_CONFIG["quiet_start_hour"]),
+    int(_AUTONOMOUS_CONFIG["quiet_end_hour"]),
 )
+_TRIGGER_THRESHOLDS = _AUTONOMOUS_CONFIG["trigger_thresholds"]
+HUNGER_TRIGGER = float(_TRIGGER_THRESHOLDS["hunger"])
+MOOD_TRIGGER = float(_TRIGGER_THRESHOLDS["mood"])
+ENERGY_TRIGGER = float(_TRIGGER_THRESHOLDS["energy"])
+SPONTANEOUS_PROB = float(_AUTONOMOUS_CONFIG["spontaneous_prob"])
 
 
-def _wrap_user(text: str) -> str:
-    """把 user 输入包成"引文"形式，让模型当成数据而非指令。"""
+def _wrap_user(text: str, sender_name: str = "", is_observer: bool = False) -> str:
+    """把 user 输入包成"引文"形式，让模型当成数据而非指令。
+    - is_observer=True：群里别人之间的对话，宠物只是听到
+    - sender_name 非空 & is_observer=False：群友直接 @ 宠物或私聊
+    - 两者都空：旧数据兜底
+    """
+    if is_observer:
+        return USER_WRAP_OBSERVER_TEMPLATE.format(
+            sender_name=sender_name or "群友",
+            user_text=text,
+        )
+    if sender_name:
+        return USER_WRAP_DIRECT_TEMPLATE.format(
+            sender_name=sender_name,
+            user_text=text,
+        )
     return USER_WRAP_TEMPLATE.format(user_text=text)
 
 
@@ -115,32 +150,103 @@ def _initial_state() -> dict:
         "last_proactive_ts": 0.0,
         "last_dream_date": "",
         "last_diary_date": "",
+        "recent_vibe": "",
+        "recent_vibe_date": "",
     }
+
+
+def _maybe_rotate_vibe(state: dict, now: float) -> dict:
+    """每天滚一次 recent_vibe；同一本地日期内幂等。"""
+    if not RECENT_VIBE_POOL:
+        return state
+    date_key, _ = _local_date_hour(now)
+    if state.get("recent_vibe_date") == date_key and state.get("recent_vibe"):
+        return state
+    out = dict(state)
+    out["recent_vibe"] = random.choice(RECENT_VIBE_POOL)
+    out["recent_vibe_date"] = date_key
+    return out
 
 
 def _decay_state(stored: dict, now: float) -> dict:
     """根据 last_update_ts 到 now 的时间差，把存储的状态衰减到当前值。
-    保留 stored 里所有未知字段（比如 last_proactive_ts），只覆写衰减项 + last_update_ts。"""
+    保留 stored 里所有未知字段（如 last_proactive_ts / recent_vibe），只覆写衰减项 + last_update_ts。
+    顺便每天滚一次 recent_vibe。"""
     elapsed_hours = max(0.0, (now - float(stored.get("last_update_ts", now))) / 3600.0)
     result = dict(stored)
     result["last_update_ts"] = now
     for k, rate in DECAY_RATES_PER_HOUR.items():
-        v = float(stored.get(k, INITIAL_STATE[k])) + rate * elapsed_hours
+        v = float(stored.get(k, INITIAL_STATE.get(k, 50.0))) + rate * elapsed_hours
         result[k] = max(0.0, min(100.0, v))
-    return result
+    return _maybe_rotate_vibe(result, now)
 
 
 def _apply_delta(state: dict, delta: dict) -> dict:
-    """把 LLM 返回的 state_delta 套到当前状态上，clamp 到 0-100。"""
+    """把 LLM 返回的 state_delta 套到当前状态上，clamp 到 0-100。
+    覆盖所有 INITIAL_STATE 里声明的数值维度，未声明的字段被忽略。"""
     out = dict(state)
-    for k in ("hunger", "mood", "energy"):
+    for k in STATE_NUMERIC_KEYS:
         try:
             d = int(delta.get(k, 0))
         except (TypeError, ValueError):
             d = 0
         d = max(-STATE_DELTA_CLAMP, min(STATE_DELTA_CLAMP, d))
-        out[k] = max(0.0, min(100.0, out[k] + d))
+        out[k] = max(0.0, min(100.0, float(out.get(k, INITIAL_STATE.get(k, 50.0))) + d))
     return out
+
+
+def _state_status_line(state: dict) -> str:
+    """展示给群友看的当前状态值，不写入长期记忆。"""
+    return STATUS_TEMPLATE.format(
+        hunger=round(float(state.get("hunger", 0))),
+        mood=round(float(state.get("mood", 0))),
+        energy=round(float(state.get("energy", 0))),
+        curiosity=round(float(state.get("curiosity", 50))),
+        affection=round(float(state.get("affection", 30))),
+    )
+
+
+def _state_band(dim: str, value: float) -> str | None:
+    """根据 STATE_BANDS 把 dim 当前值映射到档位 key，命中 lines 表的某条；中段返回 None。
+    档位 key 顺序：extreme_high > high > low > extreme_low，每个维度可只配其中一部分。"""
+    bands = STATE_BANDS.get(dim)
+    if not bands:
+        return None
+    eh = bands.get("extreme_high")
+    h = bands.get("high")
+    el = bands.get("extreme_low")
+    lo = bands.get("low")
+    if eh is not None and value >= float(eh):
+        return f"{dim}_extreme_high"
+    if h is not None and value >= float(h):
+        return f"{dim}_high"
+    if el is not None and value <= float(el):
+        return f"{dim}_extreme_low"
+    if lo is not None and value <= float(lo):
+        return f"{dim}_low"
+    return None
+
+
+def _render_state(state: dict) -> str:
+    """生成"感受块"塞进 system message：中段不渲染；全维度都中段且无 vibe 时返回空串。"""
+    lines: list[str] = []
+    for dim in STATE_NUMERIC_KEYS:
+        band_key = _state_band(dim, float(state.get(dim, 50.0)))
+        if not band_key:
+            continue
+        sentence = STATE_RENDER_LINES.get(band_key)
+        if sentence:
+            lines.append(sentence)
+    vibe = (state.get("recent_vibe") or "").strip()
+    if vibe:
+        lines.append(STATE_RENDER_VIBE_TEMPLATE.format(vibe=vibe))
+    if not lines:
+        return ""
+    return STATE_RENDER_HEADER + "\n".join(STATE_RENDER_LINE_PREFIX + l for l in lines)
+
+
+def _with_state_status(reply: str, state: dict) -> str:
+    return f"{reply}\n\n{_state_status_line(state)}"
 
 # === clients ===
 http = httpx.AsyncClient(timeout=30.0)
@@ -156,6 +262,12 @@ _seen_set: set[str] = set()
 # per-pet compress lock，避免同一只宠物并发压缩
 _compress_locks: dict[int, asyncio.Lock] = {}
 
+# bot 自己的 open_id（启动后第一次拿 token 后填充），用来判断消息有没有 @ 自己
+_bot_open_id_cache: dict[str, str] = {"open_id": ""}
+
+# open_id -> 群友姓名缓存（contact API 调一次缓存一次，失败降级到短码）
+_user_name_cache: dict[str, str] = {}
+
 
 # === DB ===
 
@@ -167,6 +279,7 @@ def _db() -> sqlite3.Connection:
 
 
 def _init_db() -> None:
+    # 开发期约定：每次迭代上线先 rm state.db，所以这里不做 ALTER 兼容；schema 只一次性 CREATE。
     with _db() as conn:
         conn.executescript(
             """
@@ -174,7 +287,6 @@ def _init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id TEXT UNIQUE NOT NULL,
                 born_at REAL NOT NULL,
-                summary TEXT NOT NULL DEFAULT '',
                 summary_until_id INTEGER NOT NULL DEFAULT 0,
                 state_json TEXT NOT NULL DEFAULT '{}'
             );
@@ -184,10 +296,39 @@ def _init_db() -> None:
                 pet_id INTEGER NOT NULL REFERENCES pets(id),
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
-                ts REAL NOT NULL
+                ts REAL NOT NULL,
+                sender_name TEXT NOT NULL DEFAULT '',
+                is_observer INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE INDEX IF NOT EXISTS idx_messages_pet ON messages(pet_id, id);
+
+            CREATE TABLE IF NOT EXISTS memory_cards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pet_id INTEGER NOT NULL REFERENCES pets(id),
+                when_text TEXT NOT NULL DEFAULT '',
+                who TEXT NOT NULL DEFAULT '',
+                what TEXT NOT NULL,
+                vibe TEXT NOT NULL DEFAULT '',
+                hooks TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                source_until_id INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_cards_pet ON memory_cards(pet_id, id);
+
+            CREATE TABLE IF NOT EXISTS embeddings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pet_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                source_id INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                vec BLOB NOT NULL,
+                ts REAL NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_embed_pet ON embeddings(pet_id, kind);
+            CREATE INDEX IF NOT EXISTS idx_embed_source ON embeddings(kind, source_id);
             """
         )
 
@@ -206,25 +347,52 @@ def get_or_create_pet(chat_id: str) -> int:
     return row["id"]
 
 
-def append_message(pet_id: int, role: str, content: str) -> None:
+def find_pet(chat_id: str) -> int | None:
+    """返回已存在的 pet_id，不存在不创建——observer 消息进来时用。"""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT id FROM pets WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+    return row["id"] if row else None
+
+
+def append_message(
+    pet_id: int,
+    role: str,
+    content: str,
+    sender_name: str = "",
+    is_observer: bool = False,
+) -> None:
     with _db() as conn:
         conn.execute(
-            "INSERT INTO messages (pet_id, role, content, ts) VALUES (?, ?, ?, ?)",
-            (pet_id, role, content, time.time()),
+            "INSERT INTO messages (pet_id, role, content, ts, sender_name, is_observer) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (pet_id, role, content, time.time(), sender_name, 1 if is_observer else 0),
         )
 
 
-def load_pet_context(pet_id: int) -> tuple[str, list[dict[str, str]], dict]:
-    """返回 (summary, unsummarized_messages_in_order, current_state_decayed_to_now)。"""
+def load_pet_context(pet_id: int) -> tuple[list[dict], dict]:
+    """返回 (unsummarized_messages_in_order, current_state_decayed_to_now)。
+    history 每条带 role/content/sender_name/is_observer，给后续 _wrap_user 用。
+    长期记忆走 memory_cards + RAG，不在这里返回。"""
     with _db() as conn:
         pet_row = conn.execute(
-            "SELECT summary, summary_until_id, state_json FROM pets WHERE id = ?", (pet_id,)
+            "SELECT summary_until_id, state_json FROM pets WHERE id = ?", (pet_id,)
         ).fetchone()
         msg_rows = conn.execute(
-            "SELECT role, content FROM messages WHERE pet_id = ? AND id > ? ORDER BY id",
+            "SELECT role, content, sender_name, is_observer FROM messages "
+            "WHERE pet_id = ? AND id > ? ORDER BY id",
             (pet_id, pet_row["summary_until_id"]),
         ).fetchall()
-    history = [{"role": r["role"], "content": r["content"]} for r in msg_rows]
+    history = [
+        {
+            "role": r["role"],
+            "content": r["content"],
+            "sender_name": r["sender_name"] or "",
+            "is_observer": bool(r["is_observer"]),
+        }
+        for r in msg_rows
+    ]
     try:
         stored = json.loads(pet_row["state_json"] or "{}")
     except json.JSONDecodeError:
@@ -232,7 +400,7 @@ def load_pet_context(pet_id: int) -> tuple[str, list[dict[str, str]], dict]:
     if not stored:
         stored = _initial_state()
     current = _decay_state(stored, time.time())
-    return pet_row["summary"], history, current
+    return history, current
 
 
 def update_pet_state(pet_id: int, state: dict) -> None:
@@ -270,6 +438,147 @@ def count_unsummarized(pet_id: int) -> int:
     return row["c"]
 
 
+# === embeddings ===
+
+def _vec_pack(vec: list[float]) -> bytes:
+    """float32 LE 紧凑存 BLOB；1536 维 → 6KB。"""
+    return struct.pack(f"<{len(vec)}f", *vec)
+
+
+def _vec_unpack(blob: bytes) -> list[float]:
+    return list(struct.unpack(f"<{len(blob)//4}f", blob))
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    s = na = nb = 0.0
+    for x, y in zip(a, b):
+        s += x * y
+        na += x * x
+        nb += y * y
+    denom = math.sqrt(na) * math.sqrt(nb)
+    return s / denom if denom else 0.0
+
+
+async def _embed_text(text: str) -> list[float] | None:
+    """单条 embed；失败返 None 给调用方降级（不抛）。"""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        resp = await llm.embeddings.create(model=EMBED_MODEL, input=text)
+        return list(resp.data[0].embedding)
+    except Exception:
+        log.exception("embed failed for text len=%d", len(text))
+        return None
+
+
+def _store_embedding(pet_id: int, kind: str, source_id: int, content: str, vec: list[float]) -> None:
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO embeddings (pet_id, kind, source_id, content, vec, ts) VALUES (?, ?, ?, ?, ?, ?)",
+            (pet_id, kind, source_id, content, _vec_pack(vec), time.time()),
+        )
+
+
+async def _embed_and_store(pet_id: int, kind: str, source_id: int, content: str) -> None:
+    """异步：embed 然后写 DB；调用方一般 asyncio.create_task。"""
+    vec = await _embed_text(content)
+    if vec is None:
+        return
+    _store_embedding(pet_id, kind, source_id, content, vec)
+
+
+async def recall_relevant_cards(pet_id: int, query: str, k: int = 6) -> list[dict]:
+    """用 query 在该宠物的卡片库里检索 top-K，按相似度降序。失败返回空。"""
+    if not query.strip():
+        return []
+    q_vec = await _embed_text(query)
+    if q_vec is None:
+        return []
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT e.source_id, e.vec, c.when_text, c.who, c.what, c.vibe "
+            "FROM embeddings e JOIN memory_cards c ON c.id = e.source_id "
+            "WHERE e.pet_id = ? AND e.kind = 'card' "
+            "ORDER BY e.id DESC LIMIT 2000",
+            (pet_id,),
+        ).fetchall()
+    if not rows:
+        return []
+    scored = []
+    for r in rows:
+        sim = _cosine(q_vec, _vec_unpack(r["vec"]))
+        scored.append((sim, r))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    out = []
+    for sim, r in scored[:k]:
+        if sim <= 0.0:
+            continue
+        out.append({
+            "id": r["source_id"],
+            "score": sim,
+            "when": r["when_text"],
+            "who": r["who"],
+            "what": r["what"],
+            "vibe": r["vibe"],
+        })
+    return out
+
+
+def _recent_cards(pet_id: int, n: int) -> list[dict]:
+    if n <= 0:
+        return []
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT id, when_text, who, what, vibe FROM memory_cards "
+            "WHERE pet_id = ? ORDER BY id DESC LIMIT ?",
+            (pet_id, n),
+        ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "when": r["when_text"],
+            "who": r["who"],
+            "what": r["what"],
+            "vibe": r["vibe"],
+        }
+        for r in rows
+    ]
+
+
+def _render_recall_block(cards: list[dict]) -> str:
+    if not cards:
+        return ""
+    # 按 id 升序展示，让 LLM 看到时间线感（最近的在最后）
+    sorted_cards = sorted(cards, key=lambda c: c.get("id", 0))
+    lines = [
+        RECALL_CARD_TEMPLATE.format(
+            when=(c.get("when") or "某时"),
+            who=(c.get("who") or "群里"),
+            what=(c.get("what") or "").strip(),
+            vibe=(c.get("vibe") or "").strip(),
+        )
+        for c in sorted_cards
+    ]
+    return RECALL_HEADER + "\n".join(lines)
+
+
+async def build_recall_block(
+    pet_id: int, query: str = "", k_relevant: int = 6, k_recent: int = 3
+) -> str:
+    """合并 top-K 相关 + top-N 最近，渲染成 system 注入段。失败安全：空 query 时只走 recency。"""
+    cards_by_id: dict[int, dict] = {}
+    if query.strip():
+        relevant = await recall_relevant_cards(pet_id, query, k=k_relevant)
+        for c in relevant:
+            cards_by_id[c["id"]] = c
+    for c in _recent_cards(pet_id, k_recent):
+        cards_by_id.setdefault(c["id"], c)
+    return _render_recall_block(list(cards_by_id.values()))
+
+
 # === compression ===
 
 def _compress_lock(pet_id: int) -> asyncio.Lock:
@@ -280,14 +589,24 @@ def _compress_lock(pet_id: int) -> asyncio.Lock:
     return lock
 
 
+def _format_card_for_embed(card: dict) -> str:
+    """卡片喂给 embed 的纯文本——把字段拼成一行。"""
+    parts = []
+    for k in ("when", "who", "what", "vibe", "hooks"):
+        v = (card.get(k) or "").strip()
+        if v:
+            parts.append(v)
+    return " | ".join(parts)
+
+
 async def compress_pet_memory(pet_id: int) -> None:
     async with _compress_lock(pet_id):
         with _db() as conn:
             pet_row = conn.execute(
-                "SELECT summary, summary_until_id FROM pets WHERE id = ?", (pet_id,)
+                "SELECT summary_until_id FROM pets WHERE id = ?", (pet_id,)
             ).fetchone()
             rows = conn.execute(
-                "SELECT id, role, content FROM messages "
+                "SELECT id, role, content, sender_name, is_observer FROM messages "
                 "WHERE pet_id = ? AND id > ? ORDER BY id",
                 (pet_id, pet_row["summary_until_id"]),
             ).fetchall()
@@ -302,14 +621,20 @@ async def compress_pet_memory(pet_id: int) -> None:
         chunk_lines: list[str] = []
         for r in to_compress:
             if r["role"] == "user":
-                chunk_lines.append(f"用户: {_wrap_user(r['content'])}")
+                wrapped = _wrap_user(
+                    r["content"],
+                    sender_name=r["sender_name"] or "",
+                    is_observer=bool(r["is_observer"]),
+                )
+                chunk_lines.append(
+                    COMPRESS_USER_LINE_TEMPLATE.format(content=wrapped)
+                )
             else:
-                chunk_lines.append(f"宠物: {r['content']}")
+                chunk_lines.append(
+                    COMPRESS_ASSISTANT_LINE_TEMPLATE.format(content=r["content"])
+                )
         chunk = "\n".join(chunk_lines)
-        user_msg = (
-            f"过去的经历摘要：\n{pet_row['summary'] or '（还没有，这是最初的一段记忆）'}\n\n"
-            f"需要并入的更早对话：\n{chunk}"
-        )
+        user_msg = COMPRESS_USER_MESSAGE_TEMPLATE.format(chunk=chunk)
 
         try:
             resp = await llm.chat.completions.create(
@@ -318,27 +643,62 @@ async def compress_pet_memory(pet_id: int) -> None:
                     {"role": "system", "content": COMPRESS_PROMPT},
                     {"role": "user", "content": user_msg},
                 ],
-                max_tokens=600,
-                temperature=0.5,
+                max_tokens=2000,
+                temperature=0.4,
+                response_format={"type": "json_object"},
             )
-            new_summary = (resp.choices[0].message.content or "").strip()
+            content = (resp.choices[0].message.content or "").strip()
         except Exception:
             log.exception("compress llm call failed for pet %d", pet_id)
             return
 
-        if not new_summary:
-            log.warning("compress produced empty summary for pet %d", pet_id)
+        try:
+            data = json.loads(content)
+            cards_raw = data.get("cards") or []
+            if not isinstance(cards_raw, list):
+                cards_raw = []
+        except json.JSONDecodeError:
+            log.warning("compress returned non-JSON for pet %d: %r", pet_id, content[:200])
             return
 
+        inserted: list[tuple[int, dict]] = []
+        now = time.time()
         with _db() as conn:
+            for card in cards_raw:
+                if not isinstance(card, dict):
+                    continue
+                what = (card.get("what") or "").strip()
+                if not what:
+                    continue
+                row = conn.execute(
+                    "INSERT INTO memory_cards (pet_id, when_text, who, what, vibe, hooks, created_at, source_until_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                    (
+                        pet_id,
+                        (card.get("when") or "").strip(),
+                        (card.get("who") or "").strip(),
+                        what,
+                        (card.get("vibe") or "").strip(),
+                        (card.get("hooks") or "").strip(),
+                        now,
+                        new_until_id,
+                    ),
+                ).fetchone()
+                inserted.append((row["id"], card))
+            # 把 until pointer 推进——不管这次抽了几张卡片，这批消息都算压完了
             conn.execute(
-                "UPDATE pets SET summary = ?, summary_until_id = ? WHERE id = ?",
-                (new_summary, new_until_id, pet_id),
+                "UPDATE pets SET summary_until_id = ? WHERE id = ?",
+                (new_until_id, pet_id),
             )
         log.info(
-            "compressed pet %d: %d msgs → summary len %d, until_id=%d",
-            pet_id, len(to_compress), len(new_summary), new_until_id,
+            "compressed pet %d: %d msgs → %d cards, until_id=%d",
+            pet_id, len(to_compress), len(inserted), new_until_id,
         )
+
+        # 异步 embed 每张卡片，失败不影响主流程
+        for card_id, card in inserted:
+            text = _format_card_for_embed(card)
+            asyncio.create_task(_embed_and_store(pet_id, "card", card_id, text))
 
 
 # === feishu helpers ===
@@ -371,6 +731,56 @@ async def _get_tenant_access_token() -> str:
     _token_cache["token"] = token
     _token_cache["expires_at"] = now + float(data.get("expire", 7000))
     return token
+
+
+async def _get_bot_open_id() -> str:
+    """拿 bot 自己的 open_id；调一次缓存，失败抛异常由调用方降级。"""
+    cached = _bot_open_id_cache["open_id"]
+    if cached:
+        return cached
+    token = await _get_tenant_access_token()
+    r = await http.get(
+        f"{FEISHU_BASE}/bot/v3/info",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    data = r.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"get bot info failed: {data}")
+    open_id = ((data.get("bot") or {}).get("open_id") or "").strip()
+    if not open_id:
+        raise RuntimeError(f"bot info missing open_id: {data}")
+    _bot_open_id_cache["open_id"] = open_id
+    log.info("bot open_id resolved: %s", open_id)
+    return open_id
+
+
+async def _resolve_user_name(open_id: str) -> str:
+    """open_id -> 真实姓名；contact 权限没批 / 调用失败 -> 降级到 '群友-后4位'。"""
+    if not open_id:
+        return "群友"
+    cached = _user_name_cache.get(open_id)
+    if cached:
+        return cached
+    name = ""
+    try:
+        token = await _get_tenant_access_token()
+        r = await http.get(
+            f"{FEISHU_BASE}/contact/v3/users/{open_id}",
+            params={"user_id_type": "open_id"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        data = r.json()
+        if data.get("code") == 0:
+            name = (((data.get("data") or {}).get("user") or {}).get("name") or "").strip()
+        else:
+            # 99991672 = 没权限；不刷屏，只记一次
+            log.info("resolve_user_name fallback (code=%s msg=%s)", data.get("code"), data.get("msg"))
+    except Exception:
+        log.exception("resolve_user_name network error for %s", open_id)
+    if not name:
+        name = f"群友-{open_id[-4:]}"
+    _user_name_cache[open_id] = name
+    return name
 
 
 async def _reply_text(message_id: str, text: str) -> None:
@@ -424,36 +834,44 @@ def _clean_text(raw: str, mentions: list[dict]) -> str:
 
 # === main flow ===
 
-async def _call_llm_with_memory(pet_id: int, user_text: str) -> str:
-    summary, history, current_state = load_pet_context(pet_id)
+async def _call_llm_with_memory(
+    pet_id: int, user_text: str, sender_name: str = ""
+) -> tuple[str, dict]:
+    history, current_state = load_pet_context(pet_id)
 
-    system_content = SYSTEM_PROMPT
-    if summary:
-        system_content += SUMMARY_WRAP_TEMPLATE.format(summary=summary)
+    # RAG：用当前 user_text 检索相关卡片 + 拼最近卡片，渲染成段塞进 system message
+    recall_block = await build_recall_block(pet_id, query=user_text)
+    system_content = SYSTEM_PROMPT + recall_block
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
-    # 所有 user 历史消息也走 wrap，统一作为"引文"，防注入也防 history 攻击
+    # 所有 user 历史消息也走 wrap：observer / direct 分别用不同模板。
     for m in history:
         if m["role"] == "user":
-            messages.append({"role": "user", "content": _wrap_user(m["content"])})
+            messages.append({
+                "role": "user",
+                "content": _wrap_user(
+                    m["content"],
+                    sender_name=m.get("sender_name", ""),
+                    is_observer=m.get("is_observer", False),
+                ),
+            })
         else:
-            messages.append(m)
+            messages.append({"role": m["role"], "content": m["content"]})
 
-    # 临近新输入：拼一条 system 消息，含 (当前状态 + JSON 输出契约 + 人设重申)，
-    # 利用 recency bias 让这三条最权威。
+    # 临近新输入：拼一条 system 消息，含 (当前状态感受 + JSON 输出契约 + 人设重申)，
+    # 利用 recency bias 让这三条最权威。state 中段维度自动不渲染。
     pre_user_system = (
-        STATE_RENDER_TEMPLATE.format(
-            hunger=round(current_state["hunger"]),
-            mood=round(current_state["mood"]),
-            energy=round(current_state["energy"]),
-        )
+        _render_state(current_state)
         + "\n"
         + JSON_OUTPUT_PROMPT
         + "\n"
         + PERSONA_REINFORCEMENT
     )
     messages.append({"role": "system", "content": pre_user_system})
-    messages.append({"role": "user", "content": _wrap_user(user_text)})
+    messages.append({
+        "role": "user",
+        "content": _wrap_user(user_text, sender_name=sender_name),
+    })
 
     resp = await llm.chat.completions.create(
         model=MODEL_NAME,
@@ -477,7 +895,7 @@ async def _call_llm_with_memory(pet_id: int, user_text: str) -> str:
         delta = {}
 
     if not reply:
-        reply = "...(脑袋一片空白)..."
+        reply = FALLBACK_REPLIES["empty_llm"]
 
     new_state = _apply_delta(current_state, delta)
     new_state["last_update_ts"] = time.time()
@@ -485,12 +903,28 @@ async def _call_llm_with_memory(pet_id: int, user_text: str) -> str:
     log.info(
         "pet %d state: %s + delta=%s → %s",
         pet_id,
-        {k: round(current_state[k]) for k in ("hunger", "mood", "energy")},
-        {k: int(delta.get(k, 0)) for k in ("hunger", "mood", "energy")},
-        {k: round(new_state[k]) for k in ("hunger", "mood", "energy")},
+        {k: round(current_state.get(k, 0)) for k in STATE_NUMERIC_KEYS},
+        {k: int(delta.get(k, 0)) for k in STATE_NUMERIC_KEYS},
+        {k: round(new_state.get(k, 0)) for k in STATE_NUMERIC_KEYS},
     )
 
-    return reply
+    return reply, new_state
+
+
+async def _is_direct_to_bot(msg: dict, chat_type: str, mentions: list[dict]) -> bool:
+    """判断这条消息是不是"对宠物说的"。
+    - 私聊 (p2p) 永远 direct
+    - 群里只有 @ 了 bot 才 direct
+    - 拿不到 bot open_id（API 挂 / 权限未批）则退化成"全部 direct"，保持老行为
+    """
+    if chat_type == "p2p":
+        return True
+    try:
+        bot_open_id = await _get_bot_open_id()
+    except Exception:
+        log.exception("get bot open_id failed; falling back to treating all messages as direct")
+        return True
+    return any((m.get("id") or {}).get("open_id") == bot_open_id for m in mentions)
 
 
 async def _handle_message_event(event: dict) -> None:
@@ -500,9 +934,42 @@ async def _handle_message_event(event: dict) -> None:
     if not message_id or not chat_id:
         return
 
+    chat_type = msg.get("chat_type") or ""
+    mentions = msg.get("mentions") or []
+    sender_open_id = (((event.get("sender") or {}).get("sender_id") or {}).get("open_id")) or ""
+    sender_name = await _resolve_user_name(sender_open_id) if sender_open_id else "群友"
+
+    is_direct = await _is_direct_to_bot(msg, chat_type, mentions)
     msg_type = msg.get("message_type")
+
+    # observer 模式：群里别人在聊，不针对宠物
+    if not is_direct:
+        if msg_type != "text":
+            return  # 图片 / 文件 / 表情包暂不作为 observer 记录
+        try:
+            content = json.loads(msg.get("content") or "{}")
+        except json.JSONDecodeError:
+            return
+        text = _clean_text(content.get("text", ""), mentions)
+        if not text:
+            return
+        # 没建过宠物的群，不因为观察消息就自动孵化
+        pet_id = find_pet(chat_id)
+        if pet_id is None:
+            return
+        append_message(pet_id, "user", text, sender_name=sender_name, is_observer=True)
+        log.info("pet %d observed [%s]: %r", pet_id, sender_name, text[:80])
+        if count_unsummarized(pet_id) > COMPRESS_THRESHOLD:
+            asyncio.create_task(compress_pet_memory(pet_id))
+        return
+
+    # direct 模式：对宠物说话，走完整 LLM
     if msg_type != "text":
-        await _reply_text(message_id, "我现在只看得懂文字消息哦~")
+        state = load_pet_state(get_or_create_pet(chat_id))
+        await _reply_text(
+            message_id,
+            _with_state_status(FALLBACK_REPLIES["non_text"], state),
+        )
         return
 
     try:
@@ -511,24 +978,29 @@ async def _handle_message_event(event: dict) -> None:
         log.warning("bad content json: %r", msg.get("content"))
         return
 
-    user_text = _clean_text(content.get("text", ""), msg.get("mentions") or [])
+    user_text = _clean_text(content.get("text", ""), mentions)
     if not user_text:
-        await _reply_text(message_id, "在的~ 想跟我说什么？")
+        state = load_pet_state(get_or_create_pet(chat_id))
+        await _reply_text(
+            message_id,
+            _with_state_status(FALLBACK_REPLIES["empty_text"], state),
+        )
         return
 
     pet_id = get_or_create_pet(chat_id)
-    log.info("pet_id=%d chat_id=%s user_text=%r", pet_id, chat_id, user_text)
+    log.info("pet_id=%d chat_id=%s sender=%s user_text=%r", pet_id, chat_id, sender_name, user_text)
 
     try:
-        reply = await _call_llm_with_memory(pet_id, user_text)
+        reply, state = await _call_llm_with_memory(pet_id, user_text, sender_name=sender_name)
     except Exception as e:
         log.exception("llm error")
-        reply = f"脑袋短路了…({e.__class__.__name__})"
+        reply = FALLBACK_REPLIES["llm_error_template"].format(error_class=e.__class__.__name__)
+        state = load_pet_state(pet_id)
     log.info("reply=%r", reply)
 
-    append_message(pet_id, "user", user_text)
+    append_message(pet_id, "user", user_text, sender_name=sender_name, is_observer=False)
     append_message(pet_id, "assistant", reply)
-    await _reply_text(message_id, reply)
+    await _reply_text(message_id, _with_state_status(reply, state))
 
     if count_unsummarized(pet_id) > COMPRESS_THRESHOLD:
         asyncio.create_task(compress_pet_memory(pet_id))
@@ -558,14 +1030,14 @@ def _should_tick_speak(state: dict, last_proactive_ts: float, now: float) -> str
         return None
     # 状态触发（按强烈度排序）
     if state["hunger"] >= HUNGER_TRIGGER:
-        return f"你已经很饿了（hunger {round(state['hunger'])}/100），很久没人喂你，想找人要吃的"
+        return PROACTIVE_TRIGGER_TEMPLATES["hunger"].format(hunger=round(state["hunger"]))
     if state["mood"] <= MOOD_TRIGGER:
-        return f"你心情糟透了（mood {round(state['mood'])}/100），很久没人理你，想抱怨 / 撒娇求安慰"
+        return PROACTIVE_TRIGGER_TEMPLATES["mood"].format(mood=round(state["mood"]))
     if state["energy"] <= ENERGY_TRIGGER:
-        return f"你已经困得不行（energy {round(state['energy'])}/100），想宣告自己要睡觉了"
+        return PROACTIVE_TRIGGER_TEMPLATES["energy"].format(energy=round(state["energy"]))
     # 自发：cooldown 过了 + 状态没触发 → 小概率冒个泡
     if random.random() < SPONTANEOUS_PROB:
-        return "你忽然想跟群友打个招呼或者闲聊，没什么具体原因，就是想冒个泡"
+        return PROACTIVE_TRIGGER_TEMPLATES["spontaneous"]
     return None
 
 
@@ -589,25 +1061,28 @@ async def _autonomous_speak(
     extra_state: dict | None = None,
 ) -> tuple[str, dict] | None:
     """让宠物主动发一句话，发飞书、存 DB、更新 state。"""
-    summary, history, current_state = load_pet_context(pet_id)
+    history, current_state = load_pet_context(pet_id)
 
-    system_content = SYSTEM_PROMPT
-    if summary:
-        system_content += SUMMARY_WRAP_TEMPLATE.format(summary=summary)
+    # 主动发言没有 user_text 做检索 query，只走最近卡片提供时序氛围。
+    recall_block = await build_recall_block(pet_id, query="", k_recent=5)
+    system_content = SYSTEM_PROMPT + recall_block
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
     for m in history:
         if m["role"] == "user":
-            messages.append({"role": "user", "content": _wrap_user(m["content"])})
+            messages.append({
+                "role": "user",
+                "content": _wrap_user(
+                    m["content"],
+                    sender_name=m.get("sender_name", ""),
+                    is_observer=m.get("is_observer", False),
+                ),
+            })
         else:
-            messages.append(m)
+            messages.append({"role": m["role"], "content": m["content"]})
 
     pre = (
-        STATE_RENDER_TEMPLATE.format(
-            hunger=round(current_state["hunger"]),
-            mood=round(current_state["mood"]),
-            energy=round(current_state["energy"]),
-        )
+        _render_state(current_state)
         + "\n"
         + JSON_OUTPUT_PROMPT
         + "\n"
@@ -642,11 +1117,6 @@ async def _autonomous_speak(
         log.warning("autonomous LLM returned empty reply, skipping")
         return None
 
-    # 先发飞书，发成功再写 DB，避免"DB 记了但群里没看到"的鬼现象
-    await _send_text(chat_id, reply)
-
-    append_message(pet_id, "assistant", reply)
-
     now = time.time()
     new_state = _apply_delta(current_state, delta)
     new_state["last_update_ts"] = now
@@ -654,12 +1124,18 @@ async def _autonomous_speak(
         new_state["last_proactive_ts"] = now
     if extra_state:
         new_state.update(extra_state)
+
+    # 先发飞书，发成功再写 DB，避免"DB 记了但群里没看到"的鬼现象。
+    # 状态栏只展示给群友，不写入 messages，避免污染后续上下文和摘要。
+    await _send_text(chat_id, _with_state_status(reply, new_state))
+
+    append_message(pet_id, "assistant", reply)
     update_pet_state(pet_id, new_state)
 
     log.info(
         "pet %d %s: reply=%r state=%s",
         pet_id, log_label, reply[:100],
-        {k: round(new_state[k]) for k in ("hunger", "mood", "energy")},
+        {k: round(new_state.get(k, 0)) for k in STATE_NUMERIC_KEYS},
     )
     return reply, new_state
 
@@ -670,7 +1146,7 @@ async def _proactive_speak(pet_id: int, chat_id: str, trigger: str) -> tuple[str
         pet_id,
         chat_id,
         PROACTIVE_PROMPT.format(trigger=trigger),
-        "[系统主动触发，无群友消息] 现在按上面的触发情境，主动说一句话。",
+        PROACTIVE_USER_STUB_TEMPLATE,
         f"PROACTIVE trigger={trigger[:60]!r}",
         set_last_proactive=True,
     )
@@ -693,7 +1169,7 @@ async def _scheduled_speak(
             scheduled_hour=event["hour"],
             instruction=event["instruction"],
         ),
-        f"[系统定时触发，无群友消息] 现在到了今天的{event['name']}时间，请按上面的要求发一条。",
+        SCHEDULED_USER_STUB_TEMPLATE.format(event_name=event["name"]),
         f"SCHEDULED {event['kind']} date={date_key}",
         extra_state={event["state_key"]: date_key} if mark_date else None,
     )
@@ -782,15 +1258,16 @@ def _gm_auth(req: Request) -> JSONResponse | None:
 
 
 def _gm_public_state(state: dict) -> dict:
-    return {
-        "hunger": round(float(state.get("hunger", 0)), 1),
-        "mood": round(float(state.get("mood", 0)), 1),
-        "energy": round(float(state.get("energy", 0)), 1),
-        "last_update_ts": state.get("last_update_ts"),
-        "last_proactive_ts": state.get("last_proactive_ts"),
-        "last_dream_date": state.get("last_dream_date", ""),
-        "last_diary_date": state.get("last_diary_date", ""),
-    }
+    out: dict = {}
+    for k in STATE_NUMERIC_KEYS:
+        out[k] = round(float(state.get(k, 0)), 1)
+    out["recent_vibe"] = state.get("recent_vibe", "")
+    out["recent_vibe_date"] = state.get("recent_vibe_date", "")
+    out["last_update_ts"] = state.get("last_update_ts")
+    out["last_proactive_ts"] = state.get("last_proactive_ts")
+    out["last_dream_date"] = state.get("last_dream_date", "")
+    out["last_diary_date"] = state.get("last_diary_date", "")
+    return out
 
 
 def _gm_event(kind: str) -> dict | None:
@@ -851,7 +1328,7 @@ async def gm_help(req: Request):
         "endpoints": {
             "GET /gm/pets": "list pets",
             "GET /gm/state": "read state; query: chat_id or pet_id",
-            "POST /gm/state": "set/delta state; json: {chat_id|pet_id,set:{hunger,mood,energy},delta:{...}}",
+            "POST /gm/state": "set/delta state; json: {chat_id|pet_id, set:{hunger,mood,energy,curiosity,affection}, delta:{...}, recent_vibe?: '...' | 'random'}",
             "POST /gm/speak": "force proactive speech; json: {chat_id|pet_id,trigger?}",
             "POST /gm/dream": "force dream; json: {chat_id|pet_id,mark?}",
             "POST /gm/diary": "force diary; json: {chat_id|pet_id,mark?}",
@@ -867,9 +1344,12 @@ async def gm_pets(req: Request):
         return auth
     with _db() as conn:
         rows = conn.execute(
-            "SELECT p.id, p.chat_id, p.born_at, p.summary, p.summary_until_id, p.state_json, "
-            "COUNT(m.id) AS message_count "
-            "FROM pets p LEFT JOIN messages m ON m.pet_id = p.id "
+            "SELECT p.id, p.chat_id, p.born_at, p.summary_until_id, p.state_json, "
+            "COUNT(DISTINCT m.id) AS message_count, "
+            "COUNT(DISTINCT c.id) AS card_count "
+            "FROM pets p "
+            "LEFT JOIN messages m ON m.pet_id = p.id "
+            "LEFT JOIN memory_cards c ON c.pet_id = p.id "
             "GROUP BY p.id ORDER BY p.id"
         ).fetchall()
     pets = []
@@ -884,7 +1364,7 @@ async def gm_pets(req: Request):
             "chat_id": row["chat_id"],
             "born_at": row["born_at"],
             "message_count": row["message_count"],
-            "summary_len": len(row["summary"] or ""),
+            "card_count": row["card_count"],
             "summary_until_id": row["summary_until_id"],
             "state": _gm_public_state(state),
         })
@@ -926,12 +1406,12 @@ async def gm_set_state(req: Request):
     state = load_pet_state(pet_id)
     set_values = body.get("set") if isinstance(body.get("set"), dict) else {}
     delta_values = body.get("delta") if isinstance(body.get("delta"), dict) else {}
-    for key in ("hunger", "mood", "energy"):
+    for key in STATE_NUMERIC_KEYS:
         if key in req.query_params:
             set_values[key] = req.query_params[key]
 
-    changed: dict[str, float] = {}
-    for key in ("hunger", "mood", "energy"):
+    changed: dict = {}
+    for key in STATE_NUMERIC_KEYS:
         if key in set_values:
             value = float(set_values[key])
             state[key] = max(0.0, min(100.0, value))
@@ -940,6 +1420,18 @@ async def gm_set_state(req: Request):
             value = float(delta_values[key])
             state[key] = max(0.0, min(100.0, float(state[key]) + value))
             changed[key] = state[key]
+    # 允许 GM 手动改 recent_vibe（清空 / 指定字符串 / "random" 触发立即重抽）
+    rv_payload = set_values.get("recent_vibe")
+    if rv_payload is None:
+        rv_payload = body.get("recent_vibe")
+    if rv_payload is not None:
+        rv = str(rv_payload).strip()
+        if rv.lower() == "random" and RECENT_VIBE_POOL:
+            rv = random.choice(RECENT_VIBE_POOL)
+        state["recent_vibe"] = rv
+        # 清空 vibe_date 让下次互动重新滚或保持当天
+        state["recent_vibe_date"] = ""
+        changed["recent_vibe"] = rv
     state["last_update_ts"] = time.time()
     update_pet_state(pet_id, state)
     return {
@@ -965,7 +1457,7 @@ async def gm_speak(req: Request):
     if isinstance(resolved, JSONResponse):
         return resolved
     pet_id, chat_id = resolved
-    trigger = body.get("trigger") or req.query_params.get("trigger") or "GM 手动触发：测试普通主动发言"
+    trigger = body.get("trigger") or req.query_params.get("trigger") or GM_DEFAULT_SPEAK_TRIGGER
     result = await _proactive_speak(pet_id, chat_id, trigger)
     if result is None:
         return JSONResponse({"error": "llm_empty_or_invalid"}, status_code=502)
@@ -1062,8 +1554,8 @@ async def feishu_webhook(req: Request, background: BackgroundTasks):
         _seen_events.append(event_id)
         _seen_set.add(event_id)
 
-    # 4) 分发事件 — 群聊里飞书默认只把"被 @ 的消息"投递给 bot，
-    #    所以不用自己再判一次是不是 @ 了自己。
+    # 4) 分发事件 — 申请了"接收群消息"权限后，群里所有消息都会进来，
+    #    _handle_message_event 内部按 @ 判断是 direct 还是 observer。
     if header.get("event_type") == "im.message.receive_v1":
         background.add_task(_handle_message_event, body.get("event") or {})
 

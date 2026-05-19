@@ -1,0 +1,73 @@
+# 电子宠物运行参数配置。
+# 放数值和开关类配置；不要放密钥、部署路径或大段 prompt。
+
+[memory]
+# 最近这么多条消息永远不压缩。
+# 接入全群消息 + RAG 卡片后，verbatim 窗口可以再放大，让最近上下文更厚。
+buffer_keep = 80
+# 未压缩消息数超过这个值后触发后台压缩。
+compress_threshold = 200
+
+[state]
+# LLM 单次 state_delta 的绝对值上限，防 outlier。
+delta_clamp = 30
+
+[state.initial]
+# 0-100 浮点：hunger 0=饱 100=极饿；mood/energy/curiosity/affection 0=糟 100=满。
+hunger = 20.0
+mood = 80.0
+energy = 80.0
+curiosity = 60.0
+affection = 30.0
+
+[state.decay_per_hour]
+# 每小时的衰减率（正负号体现方向）。
+hunger = 6.0      # 越来越饿
+mood = -4.0       # 心情会跌
+energy = -3.0     # 精力会跌
+curiosity = -2.0  # 探索欲慢慢淡掉，需要互动重新点燃
+affection = -0.3  # 对群的感情衰减很慢；正向积累靠互动
+
+# 极端档 / 高档 / 低档判定（不在范围内 = 中段，state_render 直接不渲染该维度）。
+[state.bands.hunger]
+extreme_high = 85
+high = 60
+
+[state.bands.mood]
+extreme_low = 15
+low = 40
+high = 80
+
+[state.bands.energy]
+extreme_low = 15
+low = 40
+high = 80
+
+[state.bands.curiosity]
+high = 80
+low = 25
+
+[state.bands.affection]
+high = 75
+low = 20
+
+[autonomous]
+# 心跳间隔（测试期 1 min；生产建议 600）。
+tick_interval_sec = 60
+# 普通主动发言冷却（测试期 0；生产建议 14400，即 4h）。
+cooldown_sec = 600
+# 静默时段用的本地时区偏移（默认上海 +8）。
+timezone_offset_hours = 8.0
+# 本地时间 quiet_start_hour <= hour < quiet_end_hour 时不普通主动发言。
+quiet_start_hour = 1
+quiet_end_hour = 7
+# 状态没触发时，每 tick 自发说话的概率。
+spontaneous_prob = 0.30
+
+[autonomous.trigger_thresholds]
+# hunger >= 此值 -> 主动抱怨饿。
+hunger = 85.0
+# mood <= 此值 -> 主动发情绪。
+mood = 15.0
+# energy <= 此值 -> 主动说要睡。
+energy = 15.0
