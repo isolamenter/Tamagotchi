@@ -10,6 +10,10 @@ __pycache__/
 venv/
 .venv/
 env/
+state.db
+*.db-journal
+*.db-wal
+*.db-shm
 
 # OS
 .DS_Store
