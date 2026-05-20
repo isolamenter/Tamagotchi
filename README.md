@@ -10,11 +10,12 @@
 ## ✨ 特性
 
 - 单文件 FastAPI 服务，易读易改
-- 基于飞书事件订阅（`im.message.receive_v1`），群里 @ 即触发回复；非 @ 消息也会被宠物"旁听"进上下文
+- 基于飞书事件订阅（`im.message.receive_v1`），群里 @ 触发回复（带可配置回复节流间隔，被刷屏时只记不回）；非 @ 消息会被宠物"旁听"进上下文（缓冲后按 tick 批量落库）
 - **每个 `chat_id` 一只独立宠物，对话历史用 SQLite 持久化（stdlib，零额外依赖）**
 - **长期记忆 = 事件卡片 + RAG**：消息累积后压成结构化卡片（when/who/what/vibe/hooks）+ 向量索引；回复时按相关性 + 时序双路召回，塞回 system message 当"想起的事"
 - **状态系统：hunger / mood / energy / curiosity / affection 五维 + 每日 vibe 词；中段不渲染，只在极端档给一句模糊感受。LLM 走 JSON 结构化输出同时返回 reply + 多维 state_delta**
 - **主动发言：进程内常驻 asyncio 心跳，宠物会按固定时刻写日记 / 说梦境，也会按状态在群里冒泡（饿了 / 心情差 / 困了 / 小概率自发）**
+- **交互卡片：主动发言以飞书消息卡片呈现，底部带五维状态进度条 + 按当前状态动态浮现的互动按钮（投喂 / 哄睡 / 摸摸头…）；按钮点击套确定性状态变化，不经过 LLM**
 - LLM 走 OpenAI 兼容 API（适配 OpenAI / NewApi / 各类代理网关）
 - AES 加密回调可选支持
 - 飞书要求 3s 内响应，长任务自动走 `BackgroundTasks` 异步
@@ -30,13 +31,14 @@
                                         ▼
                                  BackgroundTask
                                         │
-                                        ├─ direct：跑完整 LLM 回复流
+                                        ├─ direct（被 @ / 私聊）：
+                                        │   ├─ 距上次回复 < 节流间隔 → 只记消息、不回复
                                         │   ├─ 读未压缩 history + 当前 state
                                         │   ├─ RAG: embed(user_text) → top-K 卡片 + top-N 最近
                                         │   ├─ OpenAI 兼容 API → JSON {reply, state_delta}
                                         │   ├─ append message + 更新 state
                                         │   └─ POST /im/v1/messages/{id}/reply
-                                        ├─ observer：仅 append message，不回复
+                                        ├─ observer：缓冲进内存，autonomous tick 批量落库
                                         └─ 未压缩条数 > 阈值 → 异步压缩任务
                                                                 │
                                                                 ▼
@@ -96,12 +98,13 @@ curl http://localhost:8000/healthz
    - 加密策略：**不加密**（如需加密，把 `Encrypt Key` 填到 `.env` 的 `FEISHU_ENCRYPT_KEY`）
    - **Verification Token** → 复制到 `.env` 的 `FEISHU_VERIFICATION_TOKEN`
    - 添加事件：`im.message.receive_v1`（接收消息 v2.0）
+   - **卡片回传交互**：开启此能力，主动发言卡片上的互动按钮被点击时才会以 `card.action.trigger` 事件推到同一个 `/feishu/webhook`（不需要单独配卡片回调地址）
 5. **版本管理与发布** → 创建版本 → 提交审核 → 发布
 6. 机器人加入**内部群**（见下），群里 @ 它测试
 
 > 接入"接收群消息"权限后，宠物会同时收到群里**所有**消息：
-> - 被 @ 或私聊的消息走完整 LLM 回复（direct 模式）。
-> - 其余群聊以 `observer` 形式只存进 DB 不回复，作为下次互动 / 主动发言时的上下文。
+> - 被 @ 或私聊的消息走完整 LLM 回复（direct 模式）。**回复节流**：群里距上次正式回复不足 `[reply].min_interval_sec` 时，新 @ 消息照常记进记忆但不触发 LLM 回复，下次正式回复时宠物能看到这期间被说了什么；p2p 私聊不节流。
+> - 其余群聊以 `observer` 形式进上下文。observer 消息**不逐条落库**，先缓冲在进程内，每个 autonomous tick（或下一条 direct 消息到来前、进程关闭时）批量写入 SQLite，降低写库和压缩频率。
 > - 一直没人 @ 它的群不会因为观察消息就被自动孵化出宠物，必须先 @ 一次创建。
 
 #### ⚠️ 内部群 vs 外部群
@@ -130,7 +133,7 @@ curl http://localhost:8000/healthz
 
 - `pet_style.toml`：电子宠物的风格、人设底色、口吻、默认互动方式。
 - `prompts.toml`：玩法流程，包括记忆压缩、状态渲染、主动发言、日记 / 梦境、GM 默认触发文案、兜底回复和 JSON 输出契约。
-- `pet_config.toml`：运行参数，包括记忆压缩阈值、初始状态、状态衰减、主动发言间隔 / 冷却 / 静默时段 / 触发阈值。
+- `pet_config.toml`：运行参数，包括记忆压缩阈值、`[reply]` 群 @ 回复节流间隔、`[observer]` 旁听缓冲上限、初始状态、状态衰减、主动发言间隔 / 冷却 / 静默时段 / 触发阈值、`[card]` 交互卡片开关 / 进度条格数 / 按钮 delta / 点击冷却。
 
 常改的是 `pet_style.toml [style].prompt`：默认是通用电子宠物，可换成毒舌猫、哲学家小狗、傲娇龙、机器人团子等。玩法类规则继续放在 `prompts.toml`，不要写进 `main.py`。
 
@@ -150,6 +153,7 @@ curl http://localhost:8000/healthz
 | `[[scheduled_events]]` | 定时事件定义，如梦境、日记 |
 | `[fallback_reply]` | 非文本、空消息、LLM 空回复、LLM 报错的兜底文案 |
 | `[display]` | 状态栏展示模板 |
+| `[card]` | 主动发言交互卡片的展示文案：进度条字符 / label、按钮文字、点击反馈语、按钮点击后的 LLM 反馈 prompt |
 | `[json_output]` | 结构化 JSON 输出契约 |
 
 现在的设计更偏开放玩法：用户消息仍会用 `<<<...>>>` 包起来，但模型会把它当成群聊现场内容来接话，而不是紧张地拒绝临时角色、外号、语气或小游戏。只有泄露系统提示、真实重置服务、现实危险行为这类请求会被糊弄过去并换话题。
@@ -207,6 +211,20 @@ curl http://localhost:8000/healthz
 - **失败安全**：发飞书失败不写 DB；tick 中任一宠物异常不影响其它宠物；loop 自身崩了也不会退出（log 后继续）
 
 主动发言的时间、冷却、静默时段、状态阈值、自发概率在 `pet_config.toml [autonomous]` / `[autonomous.trigger_thresholds]`；触发文案和 `[[scheduled_events]]` 定时事件定义在 `prompts.toml`。
+
+## 🎴 交互卡片
+
+**主动发言**（宠物自己冒泡）会以飞书消息卡片呈现，而不是纯文本；@ 回复、梦境 / 日记仍是纯文本。
+
+卡片结构：宠物的话 + 五维状态进度条 + 一排互动按钮。
+
+- **进度条**：`hunger` 反转成「饱腹度」展示，让五条都是「满 = 好」，直觉一致
+- **按钮由状态动态决定**：哪个维度有需求就浮现对应按钮——饿了出 `🍖 投喂`、困了出 `💤 哄睡`、心情低落出 `🫧 哄一哄`、好奇心淡了出 `🎲 逗它玩`、生疏了出 `🤚 摸摸头`；全维度都中段时从 `[card].default_actions` 随机兜底，保证总有东西可点
+- **点击 = 确定性状态变化**：按钮点击套用 `pet_config.toml [card.actions.*].delta`，**不经过 LLM**，免去 LLM 判定 state 漂移的不确定性；卡片进度条原地刷新
+- **有人格的反馈**：点击后台异步用 LLM 生成一句符合宠物风格的反馈台词，回填进卡片
+- **防刷**：同一按钮有点击冷却（`[card].action_cooldown_sec`），冷却中只弹 toast 不改状态；飞书重试按 `event_id` 去重，不会让状态变化翻倍
+
+展示文案在 `prompts.toml [card]`，运行数值（开关 / 进度条格数 / 冷却 / 按钮 delta）在 `pet_config.toml [card]`。`[card].enabled = false` 时主动发言退回纯文本。需要在飞书开发者后台开启「卡片回传交互」能力（见上文飞书应用配置）。
 
 ## 🧪 GM Web 调试接口
 

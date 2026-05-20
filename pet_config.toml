@@ -8,6 +8,18 @@ buffer_keep = 80
 # 未压缩消息数超过这个值后触发后台压缩。
 compress_threshold = 200
 
+[reply]
+# 群里被 @ 后，两次正式 LLM 回复之间的最小间隔（秒）。
+# 间隔内的 @ 消息照常记进记忆（is_observer=0），下次正式回复时宠物能看到，
+# 但不会逐条触发 LLM 回复。p2p 私聊不受此限制。设 0 = 关闭节流（每次 @ 都回）。
+min_interval_sec = 10
+
+[observer]
+# 旁听（observer）消息不再逐条落库：先缓冲在进程内，每个 autonomous tick
+# （见 [autonomous].tick_interval_sec）批量写入，下一条 direct 消息到来时也会先 flush。
+# 这里是单只宠物缓冲条数的安全上限，超过则立刻 flush，避免进程内存无界增长。
+flush_max_count = 50
+
 [llm]
 # 普通回复 / 主动发言的 JSON 输出 token 上限。
 reply_max_tokens = 400
@@ -16,6 +28,8 @@ reply_max_tokens = 400
 scheduled_max_tokens = 1000
 # 记忆压缩输出（一组卡片 JSON）的 token 上限。
 compress_max_tokens = 2000
+# 交互卡片按钮被点击后，后台生成那句反馈台词的 token 上限（纯文本一句话，不需要大）。
+card_reply_max_tokens = 150
 
 [state]
 # LLM 单次 state_delta 的绝对值上限，防 outlier。
@@ -89,3 +103,47 @@ hunger = 85.0
 mood = 15.0
 # energy <= 此值 -> 主动说要睡。
 energy = 15.0
+
+[card]
+# 交互卡片总开关。只作用于「主动发言」（宠物自己冒泡）；
+# @ 回复、梦境 / 日记始终是纯文本，不受这里影响。
+# false = 主动发言也退回纯文本。
+enabled = true
+# 状态进度条的格子数。
+bar_width = 10
+# 同一动作按钮两次点击之间的最小间隔（秒），防群里刷按钮；0 = 不限。
+action_cooldown_sec = 60
+# 一张卡片最多显示几个按钮。
+max_buttons = 3
+# 所有状态维度都在中段（宠物没有明显需求）时，兜底随机挑这些按钮里的，保证卡片总有东西可点。
+default_actions = ["play", "pet"]
+
+# 每个互动按钮的运行数值。展示文案（按钮名 / 反馈语）在 prompts.toml [card]。
+# need_dim + need_side 决定按钮何时浮现：该维度进入对应方向的非中段档位才显示。
+#   need_side = "high" -> 维度进入 high / extreme_high 档时浮现（如饿了才出现投喂）
+#   need_side = "low"  -> 维度进入 low / extreme_low 档时浮现
+# delta 是点击后套用的「确定性」状态变化，不经过 LLM，不受 [state].delta_clamp 限制。
+[card.actions.feed]
+need_dim = "hunger"
+need_side = "high"
+delta = { hunger = -35, mood = 3 }
+
+[card.actions.rest]
+need_dim = "energy"
+need_side = "low"
+delta = { energy = 30, hunger = 5 }
+
+[card.actions.soothe]
+need_dim = "mood"
+need_side = "low"
+delta = { mood = 25, affection = 3 }
+
+[card.actions.play]
+need_dim = "curiosity"
+need_side = "low"
+delta = { curiosity = 25, mood = 8, energy = -8, hunger = 5 }
+
+[card.actions.pet]
+need_dim = "affection"
+need_side = "low"
+delta = { affection = 20, mood = 5 }

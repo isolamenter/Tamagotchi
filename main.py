@@ -96,10 +96,17 @@ _MEMORY_CONFIG = _PET_CONFIG["memory"]
 BUFFER_KEEP = int(_MEMORY_CONFIG["buffer_keep"])
 COMPRESS_THRESHOLD = int(_MEMORY_CONFIG["compress_threshold"])
 
+_REPLY_CONFIG = _PET_CONFIG["reply"]
+REPLY_MIN_INTERVAL_SEC = int(_REPLY_CONFIG["min_interval_sec"])
+
+_OBSERVER_CONFIG = _PET_CONFIG["observer"]
+OBSERVER_FLUSH_MAX_COUNT = int(_OBSERVER_CONFIG["flush_max_count"])
+
 _LLM_CONFIG = _PET_CONFIG["llm"]
 REPLY_MAX_TOKENS = int(_LLM_CONFIG["reply_max_tokens"])
 SCHEDULED_MAX_TOKENS = int(_LLM_CONFIG["scheduled_max_tokens"])
 COMPRESS_MAX_TOKENS = int(_LLM_CONFIG["compress_max_tokens"])
+CARD_REPLY_MAX_TOKENS = int(_LLM_CONFIG.get("card_reply_max_tokens", 150))
 
 _STATE_CONFIG = _PET_CONFIG["state"]
 INITIAL_STATE = {k: float(v) for k, v in _STATE_CONFIG["initial"].items()}
@@ -150,6 +157,29 @@ MOOD_TRIGGER = float(_TRIGGER_THRESHOLDS["mood"])
 ENERGY_TRIGGER = float(_TRIGGER_THRESHOLDS["energy"])
 SPONTANEOUS_PROB = float(_AUTONOMOUS_CONFIG["spontaneous_prob"])
 
+# 主动发言交互卡片配置（运行数值在 pet_config [card]，展示文案在 prompts [card]）。
+_CARD_CONFIG = _PET_CONFIG.get("card", {})
+CARD_ENABLED = bool(_CARD_CONFIG.get("enabled", False))
+CARD_BAR_WIDTH = int(_CARD_CONFIG.get("bar_width", 10))
+CARD_ACTION_COOLDOWN_SEC = int(_CARD_CONFIG.get("action_cooldown_sec", 60))
+CARD_MAX_BUTTONS = int(_CARD_CONFIG.get("max_buttons", 3))
+CARD_DEFAULT_ACTIONS = list(_CARD_CONFIG.get("default_actions", []))
+# action_key -> {need_dim, need_side, delta}
+CARD_ACTIONS = {k: dict(v) for k, v in _CARD_CONFIG.get("actions", {}).items()}
+
+_CARD_PROMPTS = _PROMPTS.get("card", {})
+CARD_BAR_FILLED = _CARD_PROMPTS.get("bar_filled", "▰")
+CARD_BAR_EMPTY = _CARD_PROMPTS.get("bar_empty", "▱")
+CARD_BARS_HEADER = _CARD_PROMPTS.get("bars_header", "")
+CARD_TOAST_DONE = _CARD_PROMPTS.get("toast_done", "✓")
+CARD_TOAST_COOLDOWN = _CARD_PROMPTS.get("toast_cooldown", "稍等一下~")
+_CARD_BARS = dict(_CARD_PROMPTS.get("bars", {}))
+CARD_VIBE_TEMPLATE = _CARD_BARS.pop("vibe_template", "✨ {vibe}")
+CARD_BAR_LABELS = _CARD_BARS  # dim -> label（含 emoji）
+# action_key -> {button, pending, did}
+CARD_ACTION_TEXT = {k: dict(v) for k, v in _CARD_PROMPTS.get("actions", {}).items()}
+CARD_ACTION_REPLY_PROMPT = _CARD_PROMPTS.get("action_reply", {}).get("prompt", "")
+
 
 def _wrap_user(text: str, sender_name: str = "", is_observer: bool = False) -> str:
     """把 user 输入包成"引文"形式，让模型当成数据而非指令。
@@ -175,6 +205,7 @@ def _initial_state() -> dict:
         **INITIAL_STATE,
         "last_update_ts": time.time(),
         "last_proactive_ts": 0.0,
+        "last_reply_ts": 0.0,
         "last_dream_date": "",
         "last_diary_date": "",
         "recent_vibe": "",
@@ -325,6 +356,100 @@ def _render_state(state: dict) -> str:
     return STATE_RENDER_HEADER + "\n".join(STATE_RENDER_LINE_PREFIX + l for l in lines)
 
 
+# === 主动发言交互卡片 ===
+
+
+def _state_bar(value: float) -> str:
+    """把 0-100 的值画成方块进度条。"""
+    v = max(0.0, min(100.0, value))
+    filled = int(round(v / 100.0 * CARD_BAR_WIDTH))
+    filled = max(0, min(CARD_BAR_WIDTH, filled))
+    return CARD_BAR_FILLED * filled + CARD_BAR_EMPTY * (CARD_BAR_WIDTH - filled)
+
+
+def _render_state_bars(state: dict) -> str:
+    """渲染卡片底部的状态进度条段（markdown）。hunger 反转成「饱腹度」让满=好。"""
+    lines: list[str] = []
+    if CARD_BARS_HEADER:
+        lines.append(CARD_BARS_HEADER)
+    for dim in STATE_NUMERIC_KEYS:
+        label = CARD_BAR_LABELS.get(dim)
+        if not label:
+            continue
+        raw = float(state.get(dim, 50.0))
+        shown = 100.0 - raw if dim == "hunger" else raw
+        lines.append(f"{label}  {_state_bar(shown)}  `{int(round(shown))}`")
+    vibe = (state.get("recent_vibe") or "").strip()
+    if vibe:
+        lines.append(CARD_VIBE_TEMPLATE.format(vibe=vibe))
+    return "\n".join(lines)
+
+
+def _pick_card_actions(state: dict) -> list[str]:
+    """按当前 state 挑该浮现的互动按钮：哪个维度有需求就出哪个按钮。
+    全维度都在中段（没需求）时，从 default_actions 里随机兜底，保证总有东西可点。"""
+    needed: list[tuple[int, str]] = []  # (severity, key)
+    for key, cfg in CARD_ACTIONS.items():
+        dim = cfg.get("need_dim")
+        side = cfg.get("need_side")
+        if not dim or not side:
+            continue
+        band = _state_band(dim, float(state.get(dim, 50.0)))
+        if not band:
+            continue
+        is_high = band.endswith("_high")
+        is_low = band.endswith("_low")
+        if not ((side == "high" and is_high) or (side == "low" and is_low)):
+            continue
+        severity = 2 if "extreme" in band else 1
+        needed.append((severity, key))
+    if needed:
+        needed.sort(key=lambda t: -t[0])
+        return [k for _, k in needed][:CARD_MAX_BUTTONS]
+    pool = [k for k in CARD_DEFAULT_ACTIONS if k in CARD_ACTIONS]
+    n = min(CARD_MAX_BUTTONS, len(pool))
+    return random.sample(pool, n) if n else []
+
+
+def _build_pet_card(
+    pet_id: int, text: str, state: dict, *, with_actions: bool = True
+) -> dict:
+    """组装飞书 interactive 卡片：宠物的话 + 状态进度条 + state 驱动的互动按钮。
+    with_actions=False 时不带按钮——按钮被点过一次后，卡片就变成结果快照，
+    避免按钮集随状态轮换导致可以无限点。"""
+    elements: list[dict] = [{"tag": "markdown", "content": text or "…"}]
+    bars = _render_state_bars(state)
+    if bars:
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "markdown", "content": bars})
+    if with_actions:
+        buttons = []
+        for key in _pick_card_actions(state):
+            btn_text = CARD_ACTION_TEXT.get(key, {}).get("button", key)
+            buttons.append({
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": btn_text},
+                "type": "primary",
+                "value": {"pet_id": pet_id, "action": key},
+            })
+        if buttons:
+            elements.append({"tag": "hr"})
+            elements.append({"tag": "action", "actions": buttons})
+    return {"config": {"wide_screen_mode": True}, "elements": elements}
+
+
+def _apply_card_delta(state: dict, delta: dict) -> dict:
+    """套用按钮的确定性 delta：只 clamp 到 0-100，不走 LLM 的 ±delta_clamp 限制。"""
+    out = dict(state)
+    for k in STATE_NUMERIC_KEYS:
+        try:
+            d = float(delta.get(k, 0))
+        except (TypeError, ValueError):
+            d = 0.0
+        out[k] = max(0.0, min(100.0, float(out.get(k, INITIAL_STATE.get(k, 50.0))) + d))
+    return out
+
+
 # === clients ===
 http = httpx.AsyncClient(timeout=30.0)
 llm = AsyncOpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
@@ -334,6 +459,10 @@ _token_lock = asyncio.Lock()
 
 # per-pet compress lock (prevents concurrent compression for the same pet)
 _compress_locks: dict[int, asyncio.Lock] = {}
+
+# 旁听消息不逐条落库：先攒在进程内，autonomous tick 或下一条 direct 消息到来时批量写入。
+# {pet_id: [{"content", "sender_name", "ts"}, ...]}
+_observer_buffer: dict[int, list[dict]] = {}
 
 
 # === DB cache & dedup helpers ===
@@ -562,6 +691,43 @@ async def append_message(
     is_observer: bool = False,
 ) -> None:
     return await asyncio.to_thread(_append_message, pet_id, role, content, sender_name, is_observer)
+
+
+def _append_observer_batch(pet_id: int, items: list[dict]) -> None:
+    """把一批缓冲的旁听消息按各自原始 ts 批量写入 messages 表。"""
+    with _db() as conn:
+        conn.executemany(
+            "INSERT INTO messages (pet_id, role, content, ts, sender_name, is_observer) "
+            "VALUES (?, 'user', ?, ?, ?, 1)",
+            [(pet_id, it["content"], it["ts"], it["sender_name"]) for it in items],
+        )
+
+
+async def flush_observer_buffer(pet_id: int) -> int:
+    """把某宠物缓冲的旁听消息批量落库，返回写入条数。
+    落库失败则把消息退回缓冲（保持时序），不抛异常。落库成功后按需触发压缩。"""
+    items = _observer_buffer.pop(pet_id, None)
+    if not items:
+        return 0
+    try:
+        await asyncio.to_thread(_append_observer_batch, pet_id, items)
+    except Exception:
+        log.exception("flush observer batch failed for pet %d; re-buffering %d msgs", pet_id, len(items))
+        _observer_buffer.setdefault(pet_id, [])[:0] = items
+        return 0
+    log.info("pet %d flushed %d buffered observer msgs", pet_id, len(items))
+    if (await count_unsummarized(pet_id)) > COMPRESS_THRESHOLD:
+        asyncio.create_task(compress_pet_memory(pet_id))
+    return len(items)
+
+
+async def flush_all_observer_buffers() -> None:
+    """flush 所有宠物的旁听缓冲——autonomous tick 和进程关闭时调用。"""
+    for pet_id in list(_observer_buffer.keys()):
+        try:
+            await flush_observer_buffer(pet_id)
+        except Exception:
+            log.exception("flush observer buffer failed for pet %d", pet_id)
 
 
 def _decode_state(state_json: str | None) -> dict:
@@ -1088,6 +1254,44 @@ async def _send_text(chat_id: str, text: str) -> None:
         raise RuntimeError(f"feishu send failed: {data}")
 
 
+async def _send_card(chat_id: str, card: dict) -> None:
+    """主动给某个 chat 发一张 interactive 卡片。"""
+    token = await _get_tenant_access_token()
+    r = await http.post(
+        f"{FEISHU_BASE}/im/v1/messages",
+        params={"receive_id_type": "chat_id"},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        json={
+            "receive_id": chat_id,
+            "msg_type": "interactive",
+            "content": json.dumps(card, ensure_ascii=False),
+        },
+    )
+    data = r.json()
+    if data.get("code") != 0:
+        log.error("send card failed: %s", data)
+        raise RuntimeError(f"feishu send card failed: {data}")
+
+
+async def _update_card_message(message_id: str, card: dict) -> None:
+    """原地更新一张已发出的 interactive 卡片（按钮点击后的异步回填用）。"""
+    token = await _get_tenant_access_token()
+    r = await http.patch(
+        f"{FEISHU_BASE}/im/v1/messages/{message_id}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        json={"content": json.dumps(card, ensure_ascii=False)},
+    )
+    data = r.json()
+    if data.get("code") != 0:
+        log.error("update card failed: %s", data)
+
+
 def _clean_text(raw: str, mentions: list[dict]) -> str:
     # 飞书 text 内容里 @ 占位符形如 "@_user_1"，对应 mentions[i].key
     for m in mentions or []:
@@ -1182,6 +1386,13 @@ async def _call_llm_with_memory(
     return reply, new_state
 
 
+async def _mark_replied(pet_id: int) -> None:
+    """记录本次正式回复的时间戳，用于群 @ 回复节流（[reply].min_interval_sec）。"""
+    state = await load_pet_state(pet_id)
+    state["last_reply_ts"] = time.time()
+    await update_pet_state(pet_id, state)
+
+
 async def _is_direct_to_bot(msg: dict, chat_type: str, mentions: list[dict]) -> bool:
     """判断这条消息是不是"对宠物说的"。
     - 私聊 (p2p) 永远 direct
@@ -1228,10 +1439,16 @@ async def _handle_message_event(event: dict) -> None:
         pet_id = await find_pet(chat_id)
         if pet_id is None:
             return
-        await append_message(pet_id, "user", text, sender_name=sender_name, is_observer=True)
-        log.info("pet %d observed [%s]: %r", pet_id, sender_name, text[:80])
-        if (await count_unsummarized(pet_id)) > COMPRESS_THRESHOLD:
-            asyncio.create_task(compress_pet_memory(pet_id))
+        # 不逐条落库：先缓冲在进程内，攒到 tick 或下一条 direct 消息再批量处理
+        buf = _observer_buffer.setdefault(pet_id, [])
+        buf.append({"content": text, "sender_name": sender_name, "ts": time.time()})
+        log.info(
+            "pet %d buffered observer [%s]: %r (buffer=%d)",
+            pet_id, sender_name, text[:80], len(buf),
+        )
+        # 安全上限：缓冲过多立刻 flush，避免进程内存无界增长
+        if len(buf) >= OBSERVER_FLUSH_MAX_COUNT:
+            await flush_observer_buffer(pet_id)
         return
 
     # direct 模式：对宠物说话，走完整 LLM
@@ -1253,6 +1470,26 @@ async def _handle_message_event(event: dict) -> None:
     pet_id = await get_or_create_pet(chat_id)
     log.info("pet_id=%d chat_id=%s sender=%s user_text=%r", pet_id, chat_id, sender_name, user_text)
 
+    # 先把缓冲的旁听消息落库，保证 messages.id 顺序≈真实时间顺序
+    await flush_observer_buffer(pet_id)
+
+    # 回复节流：群里被 @ 时，距上次正式回复不足 min_interval_sec 则只记不回。
+    # p2p 私聊是一对一对话，不受节流限制。
+    if chat_type != "p2p" and REPLY_MIN_INTERVAL_SEC > 0:
+        last_reply_ts = float((await load_pet_state(pet_id)).get("last_reply_ts", 0.0))
+        elapsed = time.time() - last_reply_ts
+        if elapsed < REPLY_MIN_INTERVAL_SEC:
+            await append_message(
+                pet_id, "user", user_text, sender_name=sender_name, is_observer=False
+            )
+            log.info(
+                "pet %d @ within reply cooldown (%.0fs left), recorded without reply",
+                pet_id, REPLY_MIN_INTERVAL_SEC - elapsed,
+            )
+            if (await count_unsummarized(pet_id)) > COMPRESS_THRESHOLD:
+                asyncio.create_task(compress_pet_memory(pet_id))
+            return
+
     try:
         reply, _ = await _call_llm_with_memory(pet_id, user_text, sender_name=sender_name)
     except Exception as e:
@@ -1263,6 +1500,7 @@ async def _handle_message_event(event: dict) -> None:
     await append_message(pet_id, "user", user_text, sender_name=sender_name, is_observer=False)
     await append_message(pet_id, "assistant", reply)
     await _reply_text(message_id, reply)
+    await _mark_replied(pet_id)
 
     if (await count_unsummarized(pet_id)) > COMPRESS_THRESHOLD:
         asyncio.create_task(compress_pet_memory(pet_id))
@@ -1316,8 +1554,10 @@ async def _autonomous_speak(
     max_tokens: int,
     set_last_proactive: bool = False,
     extra_state: dict | None = None,
+    as_card: bool = False,
 ) -> tuple[str, dict] | None:
-    """让宠物主动发一句话，发飞书、存 DB、更新 state。"""
+    """让宠物主动发一句话，发飞书、存 DB、更新 state。
+    as_card=True 时发交互卡片（状态条 + 互动按钮），否则发纯文本。"""
     history, current_state = await load_pet_context(pet_id)
 
     # 主动发言没有 user_text 做检索 query，只走最近卡片提供时序氛围。
@@ -1371,7 +1611,10 @@ async def _autonomous_speak(
         new_state.update(extra_state)
 
     # 先发飞书，发成功再写 DB，避免"DB 记了但群里没看到"的鬼现象。
-    await _send_text(chat_id, reply)
+    if as_card and CARD_ENABLED:
+        await _send_card(chat_id, _build_pet_card(pet_id, reply, new_state))
+    else:
+        await _send_text(chat_id, reply)
 
     await append_message(pet_id, "assistant", reply)
     await update_pet_state(pet_id, new_state)
@@ -1394,6 +1637,7 @@ async def _proactive_speak(pet_id: int, chat_id: str, trigger: str) -> tuple[str
         f"PROACTIVE trigger={trigger[:60]!r}",
         max_tokens=REPLY_MAX_TOKENS,
         set_last_proactive=True,
+        as_card=True,
     )
 
 
@@ -1432,6 +1676,9 @@ async def _tick_all_pets() -> None:
         await clean_old_events()
     except Exception:
         log.exception("clean_old_events failed")
+
+    # 把上个 tick 周期攒下的旁听消息批量落库
+    await flush_all_observer_buffers()
 
     now = time.time()
     rows = await asyncio.to_thread(_load_all_pets)
@@ -1486,6 +1733,8 @@ async def lifespan(_app: FastAPI):
             await task
         except asyncio.CancelledError:
             pass
+        # 进程退出前把还在缓冲里的旁听消息落库，避免 systemd restart 丢上下文
+        await flush_all_observer_buffers()
         await http.aclose()
 
 
@@ -1517,6 +1766,7 @@ def _gm_public_state(state: dict) -> dict:
     out["recent_vibe_date"] = state.get("recent_vibe_date", "")
     out["last_update_ts"] = state.get("last_update_ts")
     out["last_proactive_ts"] = state.get("last_proactive_ts")
+    out["last_reply_ts"] = state.get("last_reply_ts")
     out["last_dream_date"] = state.get("last_dream_date", "")
     out["last_diary_date"] = state.get("last_diary_date", "")
     return out
@@ -1780,6 +2030,132 @@ async def gm_tick(req: Request):
     return {"ok": True}
 
 
+async def _card_action_followup(
+    pet_id: int, action_key: str, message_id: str, clicker_open_id: str
+) -> None:
+    """按钮点击的后台收尾：让 LLM 生成一句有人格的反馈，回填卡片 + 写进记忆。"""
+    try:
+        sender_name = (
+            await _resolve_user_name(clicker_open_id) if clicker_open_id else "群友"
+        )
+        text = CARD_ACTION_TEXT.get(action_key, {})
+        did = text.get("did", "和你互动了一下")
+        pending = text.get("pending", "…")
+
+        # 把这次照料动作记进对话历史，让 LLM 能看到上下文
+        await append_message(
+            pet_id, "user", did, sender_name=sender_name, is_observer=False
+        )
+
+        history, state = await load_pet_context(pet_id)
+        messages = _base_messages(SYSTEM_PROMPT, history)
+        messages.append({
+            "role": "system",
+            "content": _render_state(state) + "\n" + PERSONA_REINFORCEMENT,
+        })
+        messages.append({
+            "role": "user",
+            "content": CARD_ACTION_REPLY_PROMPT.format(sender_name=sender_name, did=did),
+        })
+
+        reaction = ""
+        try:
+            resp = await llm.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                max_tokens=CARD_REPLY_MAX_TOKENS,
+                temperature=0.9,
+            )
+            reaction = (resp.choices[0].message.content or "").strip()
+        except Exception:
+            log.exception("card action LLM reply failed; keeping pending text")
+        if not reaction:
+            reaction = pending
+
+        await append_message(pet_id, "assistant", reaction)
+        new_state = await load_pet_state(pet_id)
+        await _update_card_message(
+            message_id, _build_pet_card(pet_id, reaction, new_state, with_actions=False)
+        )
+
+        if (await count_unsummarized(pet_id)) > COMPRESS_THRESHOLD:
+            asyncio.create_task(compress_pet_memory(pet_id))
+    except Exception:
+        log.exception("card action followup failed")
+
+
+async def _handle_card_action(event: dict, event_id: str | None) -> dict:
+    """处理卡片按钮点击（card.action.trigger）：套确定性 delta、原地刷新卡片。
+    必须在 ~3s 内同步返回更新后的卡片；有人格的反馈台词由后台异步回填。"""
+    try:
+        action = event.get("action") or {}
+        value = action.get("value") or {}
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                value = {}
+        try:
+            pet_id = int(value.get("pet_id"))
+        except (TypeError, ValueError):
+            pet_id = None
+        action_key = value.get("action")
+        context = event.get("context") or {}
+        message_id = context.get("open_message_id")
+        operator = event.get("operator") or {}
+        clicker_open_id = operator.get("open_id") or operator.get("union_id") or ""
+
+        if pet_id is None or action_key not in CARD_ACTIONS:
+            return {"toast": {"type": "error", "content": "这个按钮点不动了…"}}
+
+        try:
+            state = await load_pet_state(pet_id)
+        except ValueError:
+            return {"toast": {"type": "error", "content": "找不到我了…"}}
+
+        # 幂等：飞书重试同一 event_id 不重复套 delta（按钮 delta 是确定性的，重复会翻倍）
+        if event_id and await check_and_register_event(event_id):
+            return {}
+
+        # 动作冷却：冷却中只回 toast，不改 state、不动卡片
+        now = time.time()
+        action_ts = dict(state.get("card_action_ts") or {})
+        last_ts = float(action_ts.get(action_key, 0.0))
+        if CARD_ACTION_COOLDOWN_SEC > 0 and now - last_ts < CARD_ACTION_COOLDOWN_SEC:
+            return {"toast": {"type": "info", "content": CARD_TOAST_COOLDOWN}}
+
+        # 套确定性 delta（不经过 LLM），写回 state
+        delta = CARD_ACTIONS[action_key].get("delta") or {}
+        new_state = _apply_card_delta(state, delta)
+        action_ts[action_key] = now
+        new_state["card_action_ts"] = action_ts
+        new_state["last_update_ts"] = now
+        await update_pet_state(pet_id, new_state)
+
+        pending = CARD_ACTION_TEXT.get(action_key, {}).get("pending", "…")
+        # 点过之后不再带按钮：这张卡片变成结果快照，避免按钮随状态轮换被无限点。
+        card = _build_pet_card(pet_id, pending, new_state, with_actions=False)
+
+        # 后台异步生成有人格的反馈台词，回填卡片
+        if message_id:
+            asyncio.create_task(
+                _card_action_followup(pet_id, action_key, message_id, clicker_open_id)
+            )
+
+        log.info(
+            "pet %d card action %s by %s -> %s",
+            pet_id, action_key, clicker_open_id or "?",
+            {k: round(new_state.get(k, 0)) for k in STATE_NUMERIC_KEYS},
+        )
+        return {
+            "toast": {"type": "success", "content": CARD_TOAST_DONE},
+            "card": {"type": "raw", "data": card},
+        }
+    except Exception:
+        log.exception("card action failed")
+        return {"toast": {"type": "error", "content": "呜…出了点小问题"}}
+
+
 @app.post("/feishu/webhook")
 async def feishu_webhook(req: Request, background: BackgroundTasks):
     raw = await req.json()
@@ -1809,15 +2185,24 @@ async def feishu_webhook(req: Request, background: BackgroundTasks):
         log.warning("verification token mismatch")
         return JSONResponse({"code": 401}, status_code=401)
 
-    # 3) 事件去重
     event_id = header.get("event_id")
+    event_type = header.get("event_type")
+
+    # 3) 卡片按钮点击：必须同步返回更新后的卡片，不能丢进 BackgroundTasks。
+    #    幂等去重在 _handle_card_action 内部按 event_id 处理。
+    if event_type == "card.action.trigger":
+        if not CARD_ENABLED:
+            return {}
+        return await _handle_card_action(body.get("event") or {}, event_id)
+
+    # 4) 其它事件去重
     if event_id:
         if await check_and_register_event(event_id):
             return {"code": 0}
 
-    # 4) 分发事件 — 申请了"接收群消息"权限后，群里所有消息都会进来，
+    # 5) 分发事件 — 申请了"接收群消息"权限后，群里所有消息都会进来，
     #    _handle_message_event 内部按 @ 判断是 direct 还是 observer。
-    if header.get("event_type") == "im.message.receive_v1":
+    if event_type == "im.message.receive_v1":
         background.add_task(_handle_message_event, body.get("event") or {})
 
     return {"code": 0}

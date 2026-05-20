@@ -166,6 +166,62 @@ llm_error_template = "脑袋短路了...({error_class})"
 [gm]
 default_speak_trigger = "GM 手动触发：测试普通主动发言"
 
+[card]
+# 主动发言交互卡片的展示文案。运行数值（开关 / 进度条格数 / 冷却 / delta）在 pet_config.toml [card]。
+bar_filled = "▰"
+bar_empty = "▱"
+# 状态条区域上方的小标题；留空则不渲染。
+bars_header = "—— 我现在的样子 ——"
+# 按钮点击成功 / 处于冷却时的 toast 文案。
+toast_done = "做到啦 ❤️"
+toast_cooldown = "它还在回味上一次的互动，等一下下~"
+
+[card.bars]
+# 五维进度条的 label（含 emoji）。hunger 以「饱腹度」(100-hunger) 展示，让所有条都是「满 = 好」。
+hunger = "🍖 饱腹"
+mood = "😊 心情"
+energy = "⚡ 精力"
+curiosity = "🔍 好奇"
+affection = "❤️ 好感"
+# recent_vibe 的渲染行；为空则不渲染。
+vibe_template = "✨ 今天带着「{vibe}」的小情绪"
+
+# 每个按钮：button=按钮文字，pending=点击后即时显示的占位台词（也是 LLM 失败时的兜底），
+# did=描述这次照料动作、喂给 LLM 生成正式反馈用。
+[card.actions.feed]
+button = "🍖 投喂"
+pending = "（小口小口……有人投喂的感觉真好）"
+did = "给你喂了点吃的"
+
+[card.actions.rest]
+button = "💤 哄睡"
+pending = "（打了个哈欠……被哄着歇一会儿）"
+did = "哄你休息了一会儿"
+
+[card.actions.soothe]
+button = "🫧 哄一哄"
+pending = "（被温柔地哄着，闷闷的心情松开了一点）"
+did = "轻声哄了哄你"
+
+[card.actions.play]
+button = "🎲 逗它玩"
+pending = "（一下蹦起来——有人陪我玩啦！）"
+did = "陪你玩了个小游戏"
+
+[card.actions.pet]
+button = "🤚 摸摸头"
+pending = "（眯起眼睛……被摸头的时候最安心了）"
+did = "摸了摸你的头"
+
+[card.action_reply]
+# 按钮被点击后，后台异步让 LLM 生成一句有人格的反馈，替换 pending 占位文案。
+# 纯文本输出，不要 JSON。
+prompt = """【系统触发——群友刚刚通过卡片上的互动按钮照料了你，不是文字消息】
+群友 {sender_name} 刚刚{did}。
+这不是聊天，是一次直接的照料动作。请按你的风格、结合现在的状态，自然地说一句简短反应。
+要求：一句话、30 字以内，可带颜文字 / 拟声词 / 小动作；不要解释「按钮」、不要提「系统」、不要复述状态数值。
+直接输出那句话本身，不要 JSON、不要加引号。"""
+
 [json_output]
 prompt = """【输出格式——必须严格遵守】
 回复必须是合法的 JSON 对象（不要 markdown 围栏、不要任何额外文字），结构如下：
