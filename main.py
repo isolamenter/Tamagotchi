@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import math
@@ -88,14 +89,17 @@ PROACTIVE_TRIGGER_TEMPLATES = _PROMPTS["proactive_triggers"]
 PROACTIVE_USER_STUB_TEMPLATE = _PROMPTS["autonomous_user_stub"]["proactive"]
 SCHEDULED_EVENT_PROMPT = _PROMPTS["scheduled_event"]["prompt"]
 SCHEDULED_USER_STUB_TEMPLATE = _PROMPTS["autonomous_user_stub"]["scheduled"]
-SCHEDULED_EVENTS = tuple(_PROMPTS["scheduled_events"])
 FALLBACK_REPLIES = _PROMPTS["fallback_reply"]
 GM_DEFAULT_SPEAK_TRIGGER = _PROMPTS["gm"]["default_speak_trigger"]
-STATUS_TEMPLATE = _PROMPTS["display"]["status_template"]
 
 _MEMORY_CONFIG = _PET_CONFIG["memory"]
 BUFFER_KEEP = int(_MEMORY_CONFIG["buffer_keep"])
 COMPRESS_THRESHOLD = int(_MEMORY_CONFIG["compress_threshold"])
+
+_LLM_CONFIG = _PET_CONFIG["llm"]
+REPLY_MAX_TOKENS = int(_LLM_CONFIG["reply_max_tokens"])
+SCHEDULED_MAX_TOKENS = int(_LLM_CONFIG["scheduled_max_tokens"])
+COMPRESS_MAX_TOKENS = int(_LLM_CONFIG["compress_max_tokens"])
 
 _STATE_CONFIG = _PET_CONFIG["state"]
 INITIAL_STATE = {k: float(v) for k, v in _STATE_CONFIG["initial"].items()}
@@ -116,6 +120,13 @@ PROACTIVE_TZ_OFFSET_HOURS = float(_AUTONOMOUS_CONFIG["timezone_offset_hours"])
 QUIET_HOURS = (
     int(_AUTONOMOUS_CONFIG["quiet_start_hour"]),
     int(_AUTONOMOUS_CONFIG["quiet_end_hour"]),
+)
+# 日记锁定在休息开始那一刻，梦境锁定在休息结束那一刻；
+# 二者跟随 quiet_start/quiet_end，prompts.toml 里的 hour 仅作其它 kind 的兜底。
+_SCHEDULED_HOUR_LOCK = {"diary": QUIET_HOURS[0], "dream": QUIET_HOURS[1]}
+SCHEDULED_EVENTS = tuple(
+    {**event, "hour": _SCHEDULED_HOUR_LOCK.get(event["kind"], event["hour"])}
+    for event in _PROMPTS["scheduled_events"]
 )
 _TRIGGER_THRESHOLDS = _AUTONOMOUS_CONFIG["trigger_thresholds"]
 HUNGER_TRIGGER = float(_TRIGGER_THRESHOLDS["hunger"])
@@ -195,17 +206,6 @@ def _apply_delta(state: dict, delta: dict) -> dict:
     return out
 
 
-def _state_status_line(state: dict) -> str:
-    """展示给群友看的当前状态值，不写入长期记忆。"""
-    return STATUS_TEMPLATE.format(
-        hunger=round(float(state.get("hunger", 0))),
-        mood=round(float(state.get("mood", 0))),
-        energy=round(float(state.get("energy", 0))),
-        curiosity=round(float(state.get("curiosity", 50))),
-        affection=round(float(state.get("affection", 30))),
-    )
-
-
 def _state_band(dim: str, value: float) -> str | None:
     """根据 STATE_BANDS 把 dim 当前值映射到档位 key，命中 lines 表的某条；中段返回 None。
     档位 key 顺序：extreme_high > high > low > extreme_low，每个维度可只配其中一部分。"""
@@ -244,9 +244,6 @@ def _render_state(state: dict) -> str:
         return ""
     return STATE_RENDER_HEADER + "\n".join(STATE_RENDER_LINE_PREFIX + l for l in lines)
 
-
-def _with_state_status(reply: str, state: dict) -> str:
-    return f"{reply}\n\n{_state_status_line(state)}"
 
 # === clients ===
 http = httpx.AsyncClient(timeout=30.0)
@@ -371,6 +368,16 @@ def append_message(
         )
 
 
+def _decode_state(state_json: str | None) -> dict:
+    """把 pets.state_json 解析成 dict；坏 JSON / 空值都兜底回 _initial_state()。
+    返回未衰减的存储态，调用方一般再 _decay_state 到当前。"""
+    try:
+        stored = json.loads(state_json or "{}")
+    except json.JSONDecodeError:
+        stored = {}
+    return stored or _initial_state()
+
+
 def load_pet_context(pet_id: int) -> tuple[list[dict], dict]:
     """返回 (unsummarized_messages_in_order, current_state_decayed_to_now)。
     history 每条带 role/content/sender_name/is_observer，给后续 _wrap_user 用。
@@ -393,13 +400,7 @@ def load_pet_context(pet_id: int) -> tuple[list[dict], dict]:
         }
         for r in msg_rows
     ]
-    try:
-        stored = json.loads(pet_row["state_json"] or "{}")
-    except json.JSONDecodeError:
-        stored = {}
-    if not stored:
-        stored = _initial_state()
-    current = _decay_state(stored, time.time())
+    current = _decay_state(_decode_state(pet_row["state_json"]), time.time())
     return history, current
 
 
@@ -418,13 +419,7 @@ def load_pet_state(pet_id: int) -> dict:
         ).fetchone()
     if row is None:
         raise ValueError(f"pet not found: {pet_id}")
-    try:
-        stored = json.loads(row["state_json"] or "{}")
-    except json.JSONDecodeError:
-        stored = {}
-    if not stored:
-        stored = _initial_state()
-    return _decay_state(stored, time.time())
+    return _decay_state(_decode_state(row["state_json"]), time.time())
 
 
 def count_unsummarized(pet_id: int) -> int:
@@ -490,13 +485,9 @@ async def _embed_and_store(pet_id: int, kind: str, source_id: int, content: str)
     _store_embedding(pet_id, kind, source_id, content, vec)
 
 
-async def recall_relevant_cards(pet_id: int, query: str, k: int = 6) -> list[dict]:
-    """用 query 在该宠物的卡片库里检索 top-K，按相似度降序。失败返回空。"""
-    if not query.strip():
-        return []
-    q_vec = await _embed_text(query)
-    if q_vec is None:
-        return []
+def _score_cards(pet_id: int, q_vec: list[float], k: int) -> list[dict]:
+    """同步重活：查卡片库 + 逐条 unpack 向量 + cosine 打分 + 取 top-K。
+    DB 读和纯 Python 余弦都是阻塞操作，由调用方丢进线程池，避免卡住事件循环。"""
     with _db() as conn:
         rows = conn.execute(
             "SELECT e.source_id, e.vec, c.when_text, c.who, c.what, c.vibe "
@@ -525,6 +516,16 @@ async def recall_relevant_cards(pet_id: int, query: str, k: int = 6) -> list[dic
             "vibe": r["vibe"],
         })
     return out
+
+
+async def recall_relevant_cards(pet_id: int, query: str, k: int = 6) -> list[dict]:
+    """用 query 在该宠物的卡片库里检索 top-K，按相似度降序。失败返回空。"""
+    if not query.strip():
+        return []
+    q_vec = await _embed_text(query)
+    if q_vec is None:
+        return []
+    return await asyncio.to_thread(_score_cards, pet_id, q_vec, k)
 
 
 def _recent_cards(pet_id: int, n: int) -> list[dict]:
@@ -643,7 +644,7 @@ async def compress_pet_memory(pet_id: int) -> None:
                     {"role": "system", "content": COMPRESS_PROMPT},
                     {"role": "user", "content": user_msg},
                 ],
-                max_tokens=2000,
+                max_tokens=COMPRESS_MAX_TOKENS,
                 temperature=0.4,
                 response_format={"type": "json_object"},
             )
@@ -834,17 +835,11 @@ def _clean_text(raw: str, mentions: list[dict]) -> str:
 
 # === main flow ===
 
-async def _call_llm_with_memory(
-    pet_id: int, user_text: str, sender_name: str = ""
-) -> tuple[str, dict]:
-    history, current_state = load_pet_context(pet_id)
 
-    # RAG：用当前 user_text 检索相关卡片 + 拼最近卡片，渲染成段塞进 system message
-    recall_block = await build_recall_block(pet_id, query=user_text)
-    system_content = SYSTEM_PROMPT + recall_block
-
+def _base_messages(system_content: str, history: list[dict]) -> list[dict]:
+    """system message + wrap 过的历史消息；回复路径和主动发言路径共用。
+    user 历史按 direct / observer 走不同 wrap 模板，assistant 原样带过。"""
     messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
-    # 所有 user 历史消息也走 wrap：observer / direct 分别用不同模板。
     for m in history:
         if m["role"] == "user":
             messages.append({
@@ -857,6 +852,18 @@ async def _call_llm_with_memory(
             })
         else:
             messages.append({"role": m["role"], "content": m["content"]})
+    return messages
+
+async def _call_llm_with_memory(
+    pet_id: int, user_text: str, sender_name: str = ""
+) -> tuple[str, dict]:
+    history, current_state = load_pet_context(pet_id)
+
+    # RAG：用当前 user_text 检索相关卡片 + 拼最近卡片，渲染成段塞进 system message
+    recall_block = await build_recall_block(pet_id, query=user_text)
+    system_content = SYSTEM_PROMPT + recall_block
+
+    messages = _base_messages(system_content, history)
 
     # 临近新输入：拼一条 system 消息，含 (当前状态感受 + JSON 输出契约 + 人设重申)，
     # 利用 recency bias 让这三条最权威。state 中段维度自动不渲染。
@@ -876,7 +883,7 @@ async def _call_llm_with_memory(
     resp = await llm.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
-        max_tokens=400,  # JSON 包装比纯文本多消耗一些
+        max_tokens=REPLY_MAX_TOKENS,  # JSON 包装比纯文本多消耗一些
         temperature=0.9,
         response_format={"type": "json_object"},
     )
@@ -965,11 +972,7 @@ async def _handle_message_event(event: dict) -> None:
 
     # direct 模式：对宠物说话，走完整 LLM
     if msg_type != "text":
-        state = load_pet_state(get_or_create_pet(chat_id))
-        await _reply_text(
-            message_id,
-            _with_state_status(FALLBACK_REPLIES["non_text"], state),
-        )
+        await _reply_text(message_id, FALLBACK_REPLIES["non_text"])
         return
 
     try:
@@ -980,27 +983,22 @@ async def _handle_message_event(event: dict) -> None:
 
     user_text = _clean_text(content.get("text", ""), mentions)
     if not user_text:
-        state = load_pet_state(get_or_create_pet(chat_id))
-        await _reply_text(
-            message_id,
-            _with_state_status(FALLBACK_REPLIES["empty_text"], state),
-        )
+        await _reply_text(message_id, FALLBACK_REPLIES["empty_text"])
         return
 
     pet_id = get_or_create_pet(chat_id)
     log.info("pet_id=%d chat_id=%s sender=%s user_text=%r", pet_id, chat_id, sender_name, user_text)
 
     try:
-        reply, state = await _call_llm_with_memory(pet_id, user_text, sender_name=sender_name)
+        reply, _ = await _call_llm_with_memory(pet_id, user_text, sender_name=sender_name)
     except Exception as e:
         log.exception("llm error")
         reply = FALLBACK_REPLIES["llm_error_template"].format(error_class=e.__class__.__name__)
-        state = load_pet_state(pet_id)
     log.info("reply=%r", reply)
 
     append_message(pet_id, "user", user_text, sender_name=sender_name, is_observer=False)
     append_message(pet_id, "assistant", reply)
-    await _reply_text(message_id, _with_state_status(reply, state))
+    await _reply_text(message_id, reply)
 
     if count_unsummarized(pet_id) > COMPRESS_THRESHOLD:
         asyncio.create_task(compress_pet_memory(pet_id))
@@ -1021,9 +1019,11 @@ def _local_date_hour(now_ts: float) -> tuple[str, int]:
 
 def _should_tick_speak(state: dict, last_proactive_ts: float, now: float) -> str | None:
     """代码层廉价过滤：返回触发情境字符串就该让 LLM 说话，None 就跳过这一 tick。"""
-    # 静默时段
+    # 静默时段（支持跨午夜：start > end 时按夜间区间处理）
     h = _local_hour(now)
-    if QUIET_HOURS[0] <= h < QUIET_HOURS[1]:
+    qs, qe = QUIET_HOURS
+    in_quiet = qs <= h < qe if qs < qe else (h >= qs or h < qe)
+    if in_quiet:
         return None
     # 冷却
     if now - last_proactive_ts < PROACTIVE_COOLDOWN_SEC:
@@ -1057,6 +1057,7 @@ async def _autonomous_speak(
     user_stub: str,
     log_label: str,
     *,
+    max_tokens: int,
     set_last_proactive: bool = False,
     extra_state: dict | None = None,
 ) -> tuple[str, dict] | None:
@@ -1067,19 +1068,7 @@ async def _autonomous_speak(
     recall_block = await build_recall_block(pet_id, query="", k_recent=5)
     system_content = SYSTEM_PROMPT + recall_block
 
-    messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
-    for m in history:
-        if m["role"] == "user":
-            messages.append({
-                "role": "user",
-                "content": _wrap_user(
-                    m["content"],
-                    sender_name=m.get("sender_name", ""),
-                    is_observer=m.get("is_observer", False),
-                ),
-            })
-        else:
-            messages.append({"role": m["role"], "content": m["content"]})
+    messages = _base_messages(system_content, history)
 
     pre = (
         _render_state(current_state)
@@ -1097,7 +1086,7 @@ async def _autonomous_speak(
     resp = await llm.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
-        max_tokens=400,
+        max_tokens=max_tokens,
         temperature=0.95,
         response_format={"type": "json_object"},
     )
@@ -1126,8 +1115,7 @@ async def _autonomous_speak(
         new_state.update(extra_state)
 
     # 先发飞书，发成功再写 DB，避免"DB 记了但群里没看到"的鬼现象。
-    # 状态栏只展示给群友，不写入 messages，避免污染后续上下文和摘要。
-    await _send_text(chat_id, _with_state_status(reply, new_state))
+    await _send_text(chat_id, reply)
 
     append_message(pet_id, "assistant", reply)
     update_pet_state(pet_id, new_state)
@@ -1148,6 +1136,7 @@ async def _proactive_speak(pet_id: int, chat_id: str, trigger: str) -> tuple[str
         PROACTIVE_PROMPT.format(trigger=trigger),
         PROACTIVE_USER_STUB_TEMPLATE,
         f"PROACTIVE trigger={trigger[:60]!r}",
+        max_tokens=REPLY_MAX_TOKENS,
         set_last_proactive=True,
     )
 
@@ -1171,6 +1160,7 @@ async def _scheduled_speak(
         ),
         SCHEDULED_USER_STUB_TEMPLATE.format(event_name=event["name"]),
         f"SCHEDULED {event['kind']} date={date_key}",
+        max_tokens=SCHEDULED_MAX_TOKENS,
         extra_state={event["state_key"]: date_key} if mark_date else None,
     )
 
@@ -1182,12 +1172,7 @@ async def _tick_all_pets() -> None:
     for row in rows:
         pet_id = row["id"]
         chat_id = row["chat_id"]
-        try:
-            stored = json.loads(row["state_json"] or "{}")
-        except json.JSONDecodeError:
-            stored = {}
-        if not stored:
-            stored = _initial_state()
+        stored = _decode_state(row["state_json"])
         current = _decay_state(stored, now)
         scheduled = _scheduled_event_due(current, now)
         if scheduled is not None:
@@ -1235,6 +1220,7 @@ async def lifespan(_app: FastAPI):
             await task
         except asyncio.CancelledError:
             pass
+        await http.aclose()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -1252,7 +1238,7 @@ def _gm_auth(req: Request) -> JSONResponse | None:
     if not GM_TOKEN:
         return JSONResponse({"error": "gm_disabled"}, status_code=403)
     token = req.query_params.get("token") or req.headers.get("X-GM-Token")
-    if token != GM_TOKEN:
+    if not hmac.compare_digest(token or "", GM_TOKEN):
         return JSONResponse({"error": "gm_unauthorized"}, status_code=401)
     return None
 
@@ -1354,11 +1340,7 @@ async def gm_pets(req: Request):
         ).fetchall()
     pets = []
     for row in rows:
-        try:
-            stored = json.loads(row["state_json"] or "{}")
-        except json.JSONDecodeError:
-            stored = {}
-        state = _decay_state(stored or _initial_state(), time.time())
+        state = _decay_state(_decode_state(row["state_json"]), time.time())
         pets.append({
             "id": row["id"],
             "chat_id": row["chat_id"],
@@ -1540,7 +1522,9 @@ async def feishu_webhook(req: Request, background: BackgroundTasks):
     header = body.get("header") or {}
 
     # 2) Verification Token 校验（可选但建议开）
-    if FEISHU_VERIFICATION_TOKEN and header.get("token") != FEISHU_VERIFICATION_TOKEN:
+    if FEISHU_VERIFICATION_TOKEN and not hmac.compare_digest(
+        header.get("token") or "", FEISHU_VERIFICATION_TOKEN
+    ):
         log.warning("verification token mismatch")
         return JSONResponse({"code": 401}, status_code=401)
 

@@ -141,17 +141,19 @@ prompt = """【系统定时触发——{event_name}】
 
 照常输出 JSON。reply 是要发到群里的文字。state_delta 反映写完这条日记 / 梦境后的轻微状态变化，通常 mood 可以小幅正向，energy 可以小幅下降。"""
 
+# dream / diary 的 hour 由 main.py 锁定到 pet_config.toml 的 quiet_end / quiet_start，
+# 下面的 hour 仅作记录、不生效；要改时间改 pet_config.toml [autonomous] 的休息时段。
 [[scheduled_events]]
 kind = "dream"
 name = "梦境"
-hour = 8
+hour = 10
 state_key = "last_dream_date"
 instruction = "把昨晚像梦一样闪过的回忆讲给群友听，柔软、含糊、像刚睡醒。"
 
 [[scheduled_events]]
 kind = "diary"
 name = "日记"
-hour = 22
+hour = 19
 state_key = "last_diary_date"
 instruction = "像写今天的小日记一样，用几句回忆最近发生的事和自己的心情。"
 
@@ -163,9 +165,6 @@ llm_error_template = "脑袋短路了...({error_class})"
 
 [gm]
 default_speak_trigger = "GM 手动触发：测试普通主动发言"
-
-[display]
-status_template = "[状态] hunger={hunger} / mood={mood} / energy={energy} / curi={curiosity} / affe={affection}"
 
 [json_output]
 prompt = """【输出格式——必须严格遵守】

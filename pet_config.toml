@@ -8,6 +8,15 @@ buffer_keep = 80
 # 未压缩消息数超过这个值后触发后台压缩。
 compress_threshold = 200
 
+[llm]
+# 普通回复 / 主动发言的 JSON 输出 token 上限。
+reply_max_tokens = 400
+# 日记 / 梦境要写 150-300 字中文，外加 JSON 外壳，需要更大上限，
+# 否则会被截断导致 JSON 解析失败、整条定时事件被静默丢弃。
+scheduled_max_tokens = 1000
+# 记忆压缩输出（一组卡片 JSON）的 token 上限。
+compress_max_tokens = 2000
+
 [state]
 # LLM 单次 state_delta 的绝对值上限，防 outlier。
 delta_clamp = 30
@@ -53,16 +62,17 @@ low = 20
 
 [autonomous]
 # 心跳间隔（测试期 1 min；生产建议 600）。
-tick_interval_sec = 60
+tick_interval_sec = 600
 # 普通主动发言冷却（测试期 0；生产建议 14400，即 4h）。
 cooldown_sec = 600
 # 静默时段用的本地时区偏移（默认上海 +8）。
 timezone_offset_hours = 8.0
-# 本地时间 quiet_start_hour <= hour < quiet_end_hour 时不普通主动发言。
-quiet_start_hour = 1
-quiet_end_hour = 7
+# 休息时段：本地时间落在此区间内不普通主动发言。支持跨午夜（start > end）。
+# 当前 19:00 休息 → 次日 10:00 起床。日记锁定在 quiet_start、梦境锁定在 quiet_end。
+quiet_start_hour = 19
+quiet_end_hour = 10
 # 状态没触发时，每 tick 自发说话的概率。
-spontaneous_prob = 0.30
+spontaneous_prob = 0.10
 
 [autonomous.trigger_thresholds]
 # hunger >= 此值 -> 主动抱怨饿。
