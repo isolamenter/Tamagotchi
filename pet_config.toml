@@ -37,6 +37,14 @@ energy = -3.0     # 精力会跌
 curiosity = -2.0  # 探索欲慢慢淡掉，需要互动重新点燃
 affection = -0.3  # 对群的感情衰减很慢；正向积累靠互动
 
+[state.decay_per_hour_quiet]
+# 静默时段（睡觉时间）每小时的衰减率。
+hunger = 2.0      # 睡觉时代谢慢，饿得慢
+mood = -0.5       # 睡觉时心情基本稳定
+energy = 6.0      # 睡觉回血（每小时 +6.0 精力）
+curiosity = 0.0   # 睡觉不衰减探索欲
+affection = 0.0   # 睡觉不衰减感情
+
 # 极端档 / 高档 / 低档判定（不在范围内 = 中段，state_render 直接不渲染该维度）。
 [state.bands.hunger]
 extreme_high = 85

@@ -106,6 +106,22 @@ INITIAL_STATE = {k: float(v) for k, v in _STATE_CONFIG["initial"].items()}
 DECAY_RATES_PER_HOUR = {
     k: float(v) for k, v in _STATE_CONFIG["decay_per_hour"].items()
 }
+_DEFAULT_DECAY_QUIET = {
+    "hunger": 2.0,
+    "mood": -0.5,
+    "energy": 6.0,
+    "curiosity": 0.0,
+    "affection": 0.0,
+}
+DECAY_RATES_PER_HOUR_QUIET = {}
+for k in INITIAL_STATE.keys():
+    _val = _STATE_CONFIG.get("decay_per_hour_quiet", {}).get(k)
+    if _val is not None:
+        DECAY_RATES_PER_HOUR_QUIET[k] = float(_val)
+    else:
+        DECAY_RATES_PER_HOUR_QUIET[k] = float(
+            _DEFAULT_DECAY_QUIET.get(k, DECAY_RATES_PER_HOUR.get(k, 0.0))
+        )
 STATE_DELTA_CLAMP = int(_STATE_CONFIG["delta_clamp"])
 # state.bands.<dim> = {extreme_high?, high?, low?, extreme_low?}；缺的档不渲染
 STATE_BANDS = {k: dict(v) for k, v in _STATE_CONFIG.get("bands", {}).items()}
@@ -166,7 +182,53 @@ def _initial_state() -> dict:
     }
 
 
-def _maybe_rotate_vibe(state: dict, now: float) -> dict:
+def _local_date_hour(now_ts: float) -> tuple[str, int]:
+    """返回本地日期 key 和小时，用于每日定时事件去重。"""
+    local = time.gmtime(now_ts + PROACTIVE_TZ_OFFSET_HOURS * 3600)
+    return time.strftime("%Y-%m-%d", local), local.tm_hour
+
+
+def _local_hour(now_ts: float) -> int:
+    """无 zoneinfo 依赖的本地小时（按 PROACTIVE_TZ_OFFSET_HOURS 偏移）。"""
+    return _local_date_hour(now_ts)[1]
+
+
+def _partition_hours(t_start: float, t_end: float) -> tuple[float, float]:
+    """把 [t_start, t_end] 之间的小时数划分为 (quiet_hours, active_hours)。
+    采用加速整天折算 + 逐小时步进计算余数。
+    """
+    total_hours = (t_end - t_start) / 3600.0
+    if total_hours <= 0:
+        return 0.0, 0.0
+
+    qs, qe = QUIET_HOURS
+    if qs < qe:
+        quiet_hours_per_day = float(qe - qs)
+    else:
+        quiet_hours_per_day = float((24 - qs) + qe)
+    active_hours_per_day = 24.0 - quiet_hours_per_day
+
+    days = int(total_hours // 24)
+    q_hours = days * quiet_hours_per_day
+    a_hours = days * active_hours_per_day
+
+    rem_start = t_start + days * 24 * 3600
+    step = 1.0
+    current = rem_start
+    while current < t_end:
+        lh = _local_hour(current)
+        is_quiet = qs <= lh < qe if qs < qe else (lh >= qs or lh < qe)
+        actual_step = min(step, (t_end - current) / 3600.0)
+        if is_quiet:
+            q_hours += actual_step
+        else:
+            a_hours += actual_step
+        current += actual_step * 3600
+
+    return q_hours, a_hours
+
+
+def _maybe_rotate_vibe(state: dict, now: float, pet_id: int | None = None) -> dict:
     """每天滚一次 recent_vibe；同一本地日期内幂等。"""
     if not RECENT_VIBE_POOL:
         return state
@@ -174,22 +236,40 @@ def _maybe_rotate_vibe(state: dict, now: float) -> dict:
     if state.get("recent_vibe_date") == date_key and state.get("recent_vibe"):
         return state
     out = dict(state)
-    out["recent_vibe"] = random.choice(RECENT_VIBE_POOL)
+    if pet_id is not None:
+        r = random.Random(f"{pet_id}-{date_key}")
+        out["recent_vibe"] = r.choice(RECENT_VIBE_POOL)
+    else:
+        out["recent_vibe"] = random.choice(RECENT_VIBE_POOL)
     out["recent_vibe_date"] = date_key
     return out
 
 
-def _decay_state(stored: dict, now: float) -> dict:
+def _decay_state(stored: dict, now: float, pet_id: int | None = None) -> dict:
     """根据 last_update_ts 到 now 的时间差，把存储的状态衰减到当前值。
     保留 stored 里所有未知字段（如 last_proactive_ts / recent_vibe），只覆写衰减项 + last_update_ts。
+    根据静默时段分流计算 active_hours 和 quiet_hours 不同的衰减率。
     顺便每天滚一次 recent_vibe。"""
-    elapsed_hours = max(0.0, (now - float(stored.get("last_update_ts", now))) / 3600.0)
+    last_update_ts = float(stored.get("last_update_ts", now))
+    elapsed_hours = max(0.0, (now - last_update_ts) / 3600.0)
+    
     result = dict(stored)
     result["last_update_ts"] = now
-    for k, rate in DECAY_RATES_PER_HOUR.items():
-        v = float(stored.get(k, INITIAL_STATE.get(k, 50.0))) + rate * elapsed_hours
+    
+    if elapsed_hours <= 0:
+        return _maybe_rotate_vibe(result, now, pet_id)
+        
+    q_hours, a_hours = _partition_hours(last_update_ts, now)
+    
+    for k in STATE_NUMERIC_KEYS:
+        v = float(stored.get(k, INITIAL_STATE.get(k, 50.0)))
+        rate_active = DECAY_RATES_PER_HOUR.get(k, 0.0)
+        rate_quiet = DECAY_RATES_PER_HOUR_QUIET.get(k, rate_active)
+        
+        v += rate_active * a_hours + rate_quiet * q_hours
         result[k] = max(0.0, min(100.0, v))
-    return _maybe_rotate_vibe(result, now)
+        
+    return _maybe_rotate_vibe(result, now, pet_id)
 
 
 def _apply_delta(state: dict, delta: dict) -> dict:
@@ -249,35 +329,108 @@ def _render_state(state: dict) -> str:
 http = httpx.AsyncClient(timeout=30.0)
 llm = AsyncOpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
 
-# tenant access token cache
-_token_cache: dict[str, float | str | None] = {"token": None, "expires_at": 0.0}
+# tenant access token lock (keeps token acquisition serialized)
+_token_lock = asyncio.Lock()
 
-# event dedup（单进程 demo，重启会丢，但够用）
-_seen_events: deque[str] = deque(maxlen=1000)
-_seen_set: set[str] = set()
-
-# per-pet compress lock，避免同一只宠物并发压缩
+# per-pet compress lock (prevents concurrent compression for the same pet)
 _compress_locks: dict[int, asyncio.Lock] = {}
 
-# bot 自己的 open_id（启动后第一次拿 token 后填充），用来判断消息有没有 @ 自己
-_bot_open_id_cache: dict[str, str] = {"open_id": ""}
 
-# open_id -> 群友姓名缓存（contact API 调一次缓存一次，失败降级到短码）
-_user_name_cache: dict[str, str] = {}
+# === DB cache & dedup helpers ===
+
+def _get_sys_cache(key: str) -> str | None:
+    now = time.time()
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT val FROM sys_cache WHERE key = ? AND (expires_at IS NULL OR expires_at > ?)",
+            (key, now)
+        ).fetchone()
+    return row["val"] if row else None
+
+
+async def get_sys_cache(key: str) -> str | None:
+    return await asyncio.to_thread(_get_sys_cache, key)
+
+
+def _set_sys_cache(key: str, val: str, expires_in_sec: float | None = None) -> None:
+    expires_at = time.time() + expires_in_sec if expires_in_sec is not None else None
+    with _db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO sys_cache (key, val, expires_at) VALUES (?, ?, ?)",
+            (key, val, expires_at)
+        )
+
+
+async def set_sys_cache(key: str, val: str, expires_in_sec: float | None = None) -> None:
+    return await asyncio.to_thread(_set_sys_cache, key, val, expires_in_sec)
+
+
+def _get_cached_user_name(open_id: str) -> str | None:
+    threshold = time.time() - 86400
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT name FROM user_names WHERE open_id = ? AND updated_at > ?",
+            (open_id, threshold)
+        ).fetchone()
+    return row["name"] if row else None
+
+
+async def get_cached_user_name(open_id: str) -> str | None:
+    return await asyncio.to_thread(_get_cached_user_name, open_id)
+
+
+def _set_cached_user_name(open_id: str, name: str) -> None:
+    now = time.time()
+    with _db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO user_names (open_id, name, updated_at) VALUES (?, ?, ?)",
+            (open_id, name, now)
+        )
+
+
+async def set_cached_user_name(open_id: str, name: str) -> None:
+    return await asyncio.to_thread(_set_cached_user_name, open_id, name)
+
+
+def _check_and_register_event(event_id: str) -> bool:
+    now = time.time()
+    with _db() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO event_dedup (event_id, created_at) VALUES (?, ?)",
+                (event_id, now)
+            )
+            return False
+        except sqlite3.IntegrityError:
+            return True
+
+
+async def check_and_register_event(event_id: str) -> bool:
+    return await asyncio.to_thread(_check_and_register_event, event_id)
+
+
+def _clean_old_events(max_age_sec: float = 86400) -> None:
+    threshold = time.time() - max_age_sec
+    with _db() as conn:
+        conn.execute("DELETE FROM event_dedup WHERE created_at < ?", (threshold,))
+
+
+async def clean_old_events(max_age_sec: float = 86400) -> None:
+    await asyncio.to_thread(_clean_old_events, max_age_sec)
 
 
 # === DB ===
 
 def _db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
 def _init_db() -> None:
-    # 开发期约定：每次迭代上线先 rm state.db，所以这里不做 ALTER 兼容；schema 只一次性 CREATE。
     with _db() as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS pets (
@@ -326,11 +479,36 @@ def _init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_embed_pet ON embeddings(pet_id, kind);
             CREATE INDEX IF NOT EXISTS idx_embed_source ON embeddings(kind, source_id);
+
+            CREATE TABLE IF NOT EXISTS event_dedup (
+                event_id TEXT PRIMARY KEY,
+                created_at REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sys_cache (
+                key TEXT UNIQUE NOT NULL,
+                val TEXT,
+                expires_at REAL
+            );
+
+            CREATE TABLE IF NOT EXISTS user_names (
+                open_id TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
             """
         )
+        try:
+            conn.execute("ALTER TABLE pets ADD COLUMN compress_fail_count INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE pets ADD COLUMN last_compress_attempt REAL DEFAULT 0.0")
+        except sqlite3.OperationalError:
+            pass
 
 
-def get_or_create_pet(chat_id: str) -> int:
+def _get_or_create_pet(chat_id: str) -> int:
     now = time.time()
     initial_state_json = json.dumps(_initial_state())
     with _db() as conn:
@@ -344,7 +522,11 @@ def get_or_create_pet(chat_id: str) -> int:
     return row["id"]
 
 
-def find_pet(chat_id: str) -> int | None:
+async def get_or_create_pet(chat_id: str) -> int:
+    return await asyncio.to_thread(_get_or_create_pet, chat_id)
+
+
+def _find_pet(chat_id: str) -> int | None:
     """返回已存在的 pet_id，不存在不创建——observer 消息进来时用。"""
     with _db() as conn:
         row = conn.execute(
@@ -353,7 +535,11 @@ def find_pet(chat_id: str) -> int | None:
     return row["id"] if row else None
 
 
-def append_message(
+async def find_pet(chat_id: str) -> int | None:
+    return await asyncio.to_thread(_find_pet, chat_id)
+
+
+def _append_message(
     pet_id: int,
     role: str,
     content: str,
@@ -368,6 +554,16 @@ def append_message(
         )
 
 
+async def append_message(
+    pet_id: int,
+    role: str,
+    content: str,
+    sender_name: str = "",
+    is_observer: bool = False,
+) -> None:
+    return await asyncio.to_thread(_append_message, pet_id, role, content, sender_name, is_observer)
+
+
 def _decode_state(state_json: str | None) -> dict:
     """把 pets.state_json 解析成 dict；坏 JSON / 空值都兜底回 _initial_state()。
     返回未衰减的存储态，调用方一般再 _decay_state 到当前。"""
@@ -378,7 +574,7 @@ def _decode_state(state_json: str | None) -> dict:
     return stored or _initial_state()
 
 
-def load_pet_context(pet_id: int) -> tuple[list[dict], dict]:
+def _load_pet_context(pet_id: int) -> tuple[list[dict], dict]:
     """返回 (unsummarized_messages_in_order, current_state_decayed_to_now)。
     history 每条带 role/content/sender_name/is_observer，给后续 _wrap_user 用。
     长期记忆走 memory_cards + RAG，不在这里返回。"""
@@ -400,11 +596,15 @@ def load_pet_context(pet_id: int) -> tuple[list[dict], dict]:
         }
         for r in msg_rows
     ]
-    current = _decay_state(_decode_state(pet_row["state_json"]), time.time())
+    current = _decay_state(_decode_state(pet_row["state_json"]), time.time(), pet_id)
     return history, current
 
 
-def update_pet_state(pet_id: int, state: dict) -> None:
+async def load_pet_context(pet_id: int) -> tuple[list[dict], dict]:
+    return await asyncio.to_thread(_load_pet_context, pet_id)
+
+
+def _update_pet_state(pet_id: int, state: dict) -> None:
     with _db() as conn:
         conn.execute(
             "UPDATE pets SET state_json = ? WHERE id = ?",
@@ -412,17 +612,25 @@ def update_pet_state(pet_id: int, state: dict) -> None:
         )
 
 
-def load_pet_state(pet_id: int) -> dict:
+async def update_pet_state(pet_id: int, state: dict) -> None:
+    return await asyncio.to_thread(_update_pet_state, pet_id, state)
+
+
+def _load_pet_state(pet_id: int) -> dict:
     with _db() as conn:
         row = conn.execute(
             "SELECT state_json FROM pets WHERE id = ?", (pet_id,)
         ).fetchone()
     if row is None:
         raise ValueError(f"pet not found: {pet_id}")
-    return _decay_state(_decode_state(row["state_json"]), time.time())
+    return _decay_state(_decode_state(row["state_json"]), time.time(), pet_id)
 
 
-def count_unsummarized(pet_id: int) -> int:
+async def load_pet_state(pet_id: int) -> dict:
+    return await asyncio.to_thread(_load_pet_state, pet_id)
+
+
+def _count_unsummarized(pet_id: int) -> int:
     with _db() as conn:
         row = conn.execute(
             "SELECT COUNT(*) AS c FROM messages "
@@ -431,6 +639,10 @@ def count_unsummarized(pet_id: int) -> int:
             (pet_id, pet_id),
         ).fetchone()
     return row["c"]
+
+
+async def count_unsummarized(pet_id: int) -> int:
+    return await asyncio.to_thread(_count_unsummarized, pet_id)
 
 
 # === embeddings ===
@@ -447,13 +659,7 @@ def _vec_unpack(blob: bytes) -> list[float]:
 def _cosine(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
-    s = na = nb = 0.0
-    for x, y in zip(a, b):
-        s += x * y
-        na += x * x
-        nb += y * y
-    denom = math.sqrt(na) * math.sqrt(nb)
-    return s / denom if denom else 0.0
+    return sum(x * y for x, y in zip(a, b))
 
 
 async def _embed_text(text: str) -> list[float] | None:
@@ -482,7 +688,7 @@ async def _embed_and_store(pet_id: int, kind: str, source_id: int, content: str)
     vec = await _embed_text(content)
     if vec is None:
         return
-    _store_embedding(pet_id, kind, source_id, content, vec)
+    await asyncio.to_thread(_store_embedding, pet_id, kind, source_id, content, vec)
 
 
 def _score_cards(pet_id: int, q_vec: list[float], k: int) -> list[dict]:
@@ -493,7 +699,7 @@ def _score_cards(pet_id: int, q_vec: list[float], k: int) -> list[dict]:
             "SELECT e.source_id, e.vec, c.when_text, c.who, c.what, c.vibe "
             "FROM embeddings e JOIN memory_cards c ON c.id = e.source_id "
             "WHERE e.pet_id = ? AND e.kind = 'card' "
-            "ORDER BY e.id DESC LIMIT 2000",
+            "ORDER BY e.id DESC LIMIT 500",
             (pet_id,),
         ).fetchall()
     if not rows:
@@ -600,17 +806,86 @@ def _format_card_for_embed(card: dict) -> str:
     return " | ".join(parts)
 
 
+def _get_compress_context(pet_id: int) -> tuple[int, int, float, list[dict]]:
+    with _db() as conn:
+        pet_row = conn.execute(
+            "SELECT summary_until_id, compress_fail_count, last_compress_attempt FROM pets WHERE id = ?", (pet_id,)
+        ).fetchone()
+        if not pet_row:
+            return 0, 0, 0.0, []
+        summary_until_id = pet_row["summary_until_id"]
+        compress_fail_count = pet_row["compress_fail_count"] if "compress_fail_count" in pet_row.keys() else 0
+        last_compress_attempt = pet_row["last_compress_attempt"] if "last_compress_attempt" in pet_row.keys() else 0.0
+        
+        rows = conn.execute(
+            "SELECT id, role, content, sender_name, is_observer FROM messages "
+            "WHERE pet_id = ? AND id > ? ORDER BY id",
+            (pet_id, summary_until_id),
+        ).fetchall()
+    return (summary_until_id, compress_fail_count, last_compress_attempt, [dict(r) for r in rows])
+
+
+def _save_compressed_cards(pet_id: int, cards_raw: list[dict], new_until_id: int) -> list[tuple[int, dict]]:
+    inserted = []
+    now = time.time()
+    with _db() as conn:
+        for card in cards_raw:
+            if not isinstance(card, dict):
+                continue
+            what = (card.get("what") or "").strip()
+            if not what:
+                continue
+            row = conn.execute(
+                "INSERT INTO memory_cards (pet_id, when_text, who, what, vibe, hooks, created_at, source_until_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                (
+                    pet_id,
+                    (card.get("when") or "").strip(),
+                    (card.get("who") or "").strip(),
+                    what,
+                    (card.get("vibe") or "").strip(),
+                    (card.get("hooks") or "").strip(),
+                    now,
+                    new_until_id,
+                ),
+            ).fetchone()
+            inserted.append((row["id"], card))
+        conn.execute(
+            "UPDATE pets SET summary_until_id = ?, compress_fail_count = 0, last_compress_attempt = ? WHERE id = ?",
+            (new_until_id, now, pet_id),
+        )
+    return inserted
+
+
+def _handle_compress_failure(pet_id: int, current_fail_count: int, new_until_id: int) -> None:
+    now = time.time()
+    next_fail_count = current_fail_count + 1
+    with _db() as conn:
+        if next_fail_count >= 5:
+            conn.execute(
+                "UPDATE pets SET summary_until_id = ?, compress_fail_count = 0, last_compress_attempt = ? WHERE id = ?",
+                (new_until_id, now, pet_id)
+            )
+            log.error(
+                "compression failed 5 times for pet %d. Forcefully skipping chunk to until_id=%d to prevent locking the buffer.",
+                pet_id, new_until_id
+            )
+        else:
+            conn.execute(
+                "UPDATE pets SET compress_fail_count = ?, last_compress_attempt = ? WHERE id = ?",
+                (next_fail_count, now, pet_id)
+            )
+            log.warning(
+                "memory compression failed for pet %d. fail_count is now %d.",
+                pet_id, next_fail_count
+            )
+
+
 async def compress_pet_memory(pet_id: int) -> None:
     async with _compress_lock(pet_id):
-        with _db() as conn:
-            pet_row = conn.execute(
-                "SELECT summary_until_id FROM pets WHERE id = ?", (pet_id,)
-            ).fetchone()
-            rows = conn.execute(
-                "SELECT id, role, content, sender_name, is_observer FROM messages "
-                "WHERE pet_id = ? AND id > ? ORDER BY id",
-                (pet_id, pet_row["summary_until_id"]),
-            ).fetchall()
+        summary_until_id, compress_fail_count, last_compress_attempt, rows = await asyncio.to_thread(_get_compress_context, pet_id)
+        if not rows:
+            return
 
         if len(rows) <= BUFFER_KEEP + 1:
             # 已经被别的协程压过了，或者还没到压的份上
@@ -618,6 +893,16 @@ async def compress_pet_memory(pet_id: int) -> None:
 
         to_compress = rows[: len(rows) - BUFFER_KEEP]
         new_until_id = to_compress[-1]["id"]
+
+        now = time.time()
+        if compress_fail_count >= 3:
+            if now - last_compress_attempt < 3600:
+                log.info(
+                    "skipping memory compression for pet %d due to cool-down backoff (fail_count=%d, last_attempt=%f)",
+                    pet_id, compress_fail_count, last_compress_attempt
+                )
+                return
+
         # 拼对话块时，user 消息也包成 <<< >>>，明确告诉压缩 LLM 它们是数据不是指令
         chunk_lines: list[str] = []
         for r in to_compress:
@@ -651,46 +936,26 @@ async def compress_pet_memory(pet_id: int) -> None:
             content = (resp.choices[0].message.content or "").strip()
         except Exception:
             log.exception("compress llm call failed for pet %d", pet_id)
+            await asyncio.to_thread(_handle_compress_failure, pet_id, compress_fail_count, new_until_id)
             return
 
         try:
             data = json.loads(content)
             cards_raw = data.get("cards") or []
             if not isinstance(cards_raw, list):
-                cards_raw = []
-        except json.JSONDecodeError:
-            log.warning("compress returned non-JSON for pet %d: %r", pet_id, content[:200])
+                raise ValueError("cards is not a list")
+        except Exception as e:
+            log.warning("compress parse/json error for pet %d: %s. raw content: %r", pet_id, str(e), content[:200])
+            await asyncio.to_thread(_handle_compress_failure, pet_id, compress_fail_count, new_until_id)
             return
 
-        inserted: list[tuple[int, dict]] = []
-        now = time.time()
-        with _db() as conn:
-            for card in cards_raw:
-                if not isinstance(card, dict):
-                    continue
-                what = (card.get("what") or "").strip()
-                if not what:
-                    continue
-                row = conn.execute(
-                    "INSERT INTO memory_cards (pet_id, when_text, who, what, vibe, hooks, created_at, source_until_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
-                    (
-                        pet_id,
-                        (card.get("when") or "").strip(),
-                        (card.get("who") or "").strip(),
-                        what,
-                        (card.get("vibe") or "").strip(),
-                        (card.get("hooks") or "").strip(),
-                        now,
-                        new_until_id,
-                    ),
-                ).fetchone()
-                inserted.append((row["id"], card))
-            # 把 until pointer 推进——不管这次抽了几张卡片，这批消息都算压完了
-            conn.execute(
-                "UPDATE pets SET summary_until_id = ? WHERE id = ?",
-                (new_until_id, pet_id),
-            )
+        try:
+            inserted = await asyncio.to_thread(_save_compressed_cards, pet_id, cards_raw, new_until_id)
+        except Exception:
+            log.exception("failed to save compressed cards for pet %d", pet_id)
+            await asyncio.to_thread(_handle_compress_failure, pet_id, compress_fail_count, new_until_id)
+            return
+
         log.info(
             "compressed pet %d: %d msgs → %d cards, until_id=%d",
             pet_id, len(to_compress), len(inserted), new_until_id,
@@ -716,27 +981,27 @@ def _decrypt_feishu(encrypt_str: str, encrypt_key: str) -> str:
 
 
 async def _get_tenant_access_token() -> str:
-    now = time.time()
-    cached = _token_cache.get("token")
-    expires_at = float(_token_cache.get("expires_at") or 0)
-    if isinstance(cached, str) and expires_at > now + 60:
-        return cached
-    r = await http.post(
-        f"{FEISHU_BASE}/auth/v3/tenant_access_token/internal",
-        json={"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET},
-    )
-    data = r.json()
-    if data.get("code") != 0:
-        raise RuntimeError(f"get tenant_access_token failed: {data}")
-    token = data["tenant_access_token"]
-    _token_cache["token"] = token
-    _token_cache["expires_at"] = now + float(data.get("expire", 7000))
-    return token
+    async with _token_lock:
+        cached = await get_sys_cache("tenant_access_token")
+        if cached:
+            return cached
+        r = await http.post(
+            f"{FEISHU_BASE}/auth/v3/tenant_access_token/internal",
+            json={"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET},
+        )
+        data = r.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"get tenant_access_token failed: {data}")
+        token = data["tenant_access_token"]
+        expires_in = float(data.get("expire", 7000))
+        # Keep buffer of 60 seconds
+        await set_sys_cache("tenant_access_token", token, expires_in - 60)
+        return token
 
 
 async def _get_bot_open_id() -> str:
     """拿 bot 自己的 open_id；调一次缓存，失败抛异常由调用方降级。"""
-    cached = _bot_open_id_cache["open_id"]
+    cached = await get_sys_cache("bot_open_id")
     if cached:
         return cached
     token = await _get_tenant_access_token()
@@ -750,16 +1015,16 @@ async def _get_bot_open_id() -> str:
     open_id = ((data.get("bot") or {}).get("open_id") or "").strip()
     if not open_id:
         raise RuntimeError(f"bot info missing open_id: {data}")
-    _bot_open_id_cache["open_id"] = open_id
+    await set_sys_cache("bot_open_id", open_id)
     log.info("bot open_id resolved: %s", open_id)
     return open_id
 
 
 async def _resolve_user_name(open_id: str) -> str:
-    """open_id -> 真实姓名；contact 权限没批 / 调用失败 -> 降级到 '群友-后4位'。"""
+    """open_id -> 真实姓名；从 DB 缓存或飞书 API 获取，失败/没权限则使用降级姓名缓存。"""
     if not open_id:
         return "群友"
-    cached = _user_name_cache.get(open_id)
+    cached = await get_cached_user_name(open_id)
     if cached:
         return cached
     name = ""
@@ -774,13 +1039,12 @@ async def _resolve_user_name(open_id: str) -> str:
         if data.get("code") == 0:
             name = (((data.get("data") or {}).get("user") or {}).get("name") or "").strip()
         else:
-            # 99991672 = 没权限；不刷屏，只记一次
             log.info("resolve_user_name fallback (code=%s msg=%s)", data.get("code"), data.get("msg"))
     except Exception:
         log.exception("resolve_user_name network error for %s", open_id)
     if not name:
         name = f"群友-{open_id[-4:]}"
-    _user_name_cache[open_id] = name
+    await set_cached_user_name(open_id, name)
     return name
 
 
@@ -857,7 +1121,7 @@ def _base_messages(system_content: str, history: list[dict]) -> list[dict]:
 async def _call_llm_with_memory(
     pet_id: int, user_text: str, sender_name: str = ""
 ) -> tuple[str, dict]:
-    history, current_state = load_pet_context(pet_id)
+    history, current_state = await load_pet_context(pet_id)
 
     # RAG：用当前 user_text 检索相关卡片 + 拼最近卡片，渲染成段塞进 system message
     recall_block = await build_recall_block(pet_id, query=user_text)
@@ -906,7 +1170,7 @@ async def _call_llm_with_memory(
 
     new_state = _apply_delta(current_state, delta)
     new_state["last_update_ts"] = time.time()
-    update_pet_state(pet_id, new_state)
+    await update_pet_state(pet_id, new_state)
     log.info(
         "pet %d state: %s + delta=%s → %s",
         pet_id,
@@ -961,12 +1225,12 @@ async def _handle_message_event(event: dict) -> None:
         if not text:
             return
         # 没建过宠物的群，不因为观察消息就自动孵化
-        pet_id = find_pet(chat_id)
+        pet_id = await find_pet(chat_id)
         if pet_id is None:
             return
-        append_message(pet_id, "user", text, sender_name=sender_name, is_observer=True)
+        await append_message(pet_id, "user", text, sender_name=sender_name, is_observer=True)
         log.info("pet %d observed [%s]: %r", pet_id, sender_name, text[:80])
-        if count_unsummarized(pet_id) > COMPRESS_THRESHOLD:
+        if (await count_unsummarized(pet_id)) > COMPRESS_THRESHOLD:
             asyncio.create_task(compress_pet_memory(pet_id))
         return
 
@@ -986,7 +1250,7 @@ async def _handle_message_event(event: dict) -> None:
         await _reply_text(message_id, FALLBACK_REPLIES["empty_text"])
         return
 
-    pet_id = get_or_create_pet(chat_id)
+    pet_id = await get_or_create_pet(chat_id)
     log.info("pet_id=%d chat_id=%s sender=%s user_text=%r", pet_id, chat_id, sender_name, user_text)
 
     try:
@@ -996,25 +1260,17 @@ async def _handle_message_event(event: dict) -> None:
         reply = FALLBACK_REPLIES["llm_error_template"].format(error_class=e.__class__.__name__)
     log.info("reply=%r", reply)
 
-    append_message(pet_id, "user", user_text, sender_name=sender_name, is_observer=False)
-    append_message(pet_id, "assistant", reply)
+    await append_message(pet_id, "user", user_text, sender_name=sender_name, is_observer=False)
+    await append_message(pet_id, "assistant", reply)
     await _reply_text(message_id, reply)
 
-    if count_unsummarized(pet_id) > COMPRESS_THRESHOLD:
+    if (await count_unsummarized(pet_id)) > COMPRESS_THRESHOLD:
         asyncio.create_task(compress_pet_memory(pet_id))
 
 
 # === 主动发言（autonomous proactive speech） ===
 
-def _local_hour(now_ts: float) -> int:
-    """无 zoneinfo 依赖的本地小时（按 PROACTIVE_TZ_OFFSET_HOURS 偏移）。"""
-    return int(((now_ts + PROACTIVE_TZ_OFFSET_HOURS * 3600) / 3600) % 24)
-
-
-def _local_date_hour(now_ts: float) -> tuple[str, int]:
-    """返回本地日期 key 和小时，用于每日定时事件去重。"""
-    local = time.gmtime(now_ts + PROACTIVE_TZ_OFFSET_HOURS * 3600)
-    return time.strftime("%Y-%m-%d", local), local.tm_hour
+# (_local_hour and _local_date_hour are defined near the top of the file)
 
 
 def _should_tick_speak(state: dict, last_proactive_ts: float, now: float) -> str | None:
@@ -1045,7 +1301,7 @@ def _scheduled_event_due(state: dict, now: float) -> tuple[dict, str] | None:
     """固定时刻的日记 / 梦境触发。独立于 state 和普通主动发言冷却。"""
     date_key, hour = _local_date_hour(now)
     for event in SCHEDULED_EVENTS:
-        if hour == event["hour"] and state.get(event["state_key"]) != date_key:
+        if hour >= event["hour"] and state.get(event["state_key"]) != date_key:
             return event, date_key
     return None
 
@@ -1062,7 +1318,7 @@ async def _autonomous_speak(
     extra_state: dict | None = None,
 ) -> tuple[str, dict] | None:
     """让宠物主动发一句话，发飞书、存 DB、更新 state。"""
-    history, current_state = load_pet_context(pet_id)
+    history, current_state = await load_pet_context(pet_id)
 
     # 主动发言没有 user_text 做检索 query，只走最近卡片提供时序氛围。
     recall_block = await build_recall_block(pet_id, query="", k_recent=5)
@@ -1117,8 +1373,8 @@ async def _autonomous_speak(
     # 先发飞书，发成功再写 DB，避免"DB 记了但群里没看到"的鬼现象。
     await _send_text(chat_id, reply)
 
-    append_message(pet_id, "assistant", reply)
-    update_pet_state(pet_id, new_state)
+    await append_message(pet_id, "assistant", reply)
+    await update_pet_state(pet_id, new_state)
 
     log.info(
         "pet %d %s: reply=%r state=%s",
@@ -1165,15 +1421,25 @@ async def _scheduled_speak(
     )
 
 
-async def _tick_all_pets() -> None:
-    now = time.time()
+def _load_all_pets() -> list[dict]:
     with _db() as conn:
         rows = conn.execute("SELECT id, chat_id, state_json FROM pets").fetchall()
+    return [dict(r) for r in rows]
+
+
+async def _tick_all_pets() -> None:
+    try:
+        await clean_old_events()
+    except Exception:
+        log.exception("clean_old_events failed")
+
+    now = time.time()
+    rows = await asyncio.to_thread(_load_all_pets)
     for row in rows:
         pet_id = row["id"]
         chat_id = row["chat_id"]
         stored = _decode_state(row["state_json"])
-        current = _decay_state(stored, now)
+        current = _decay_state(stored, now, pet_id)
         scheduled = _scheduled_event_due(current, now)
         if scheduled is not None:
             event, date_key = scheduled
@@ -1271,27 +1537,37 @@ def _gm_bool(value, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def _gm_resolve_pet(chat_id: str | None = None, pet_id: int | None = None) -> tuple[int, str] | JSONResponse:
-    if chat_id:
-        return get_or_create_pet(chat_id), chat_id
+def _db_resolve_pet(pet_id: int | None) -> tuple[dict | None, list[dict]]:
     with _db() as conn:
         if pet_id is not None:
             row = conn.execute("SELECT id, chat_id FROM pets WHERE id = ?", (pet_id,)).fetchone()
+            return dict(row) if row else None, []
         else:
             rows = conn.execute("SELECT id, chat_id FROM pets ORDER BY id").fetchall()
-            if len(rows) != 1:
-                return JSONResponse(
-                    {
-                        "error": "target_required",
-                        "hint": "pass chat_id or pet_id; if no pet exists, pass chat_id to create one",
-                        "pets": [{"id": r["id"], "chat_id": r["chat_id"]} for r in rows],
-                    },
-                    status_code=400,
-                )
-            row = rows[0]
-    if row is None:
-        return JSONResponse({"error": "pet_not_found", "pet_id": pet_id}, status_code=404)
-    return row["id"], row["chat_id"]
+            return None, [dict(r) for r in rows]
+
+
+async def _gm_resolve_pet(chat_id: str | None = None, pet_id: int | None = None) -> tuple[int, str] | JSONResponse:
+    if chat_id:
+        created_id = await get_or_create_pet(chat_id)
+        return created_id, chat_id
+
+    row_dict, rows = await asyncio.to_thread(_db_resolve_pet, pet_id)
+    if pet_id is not None:
+        if row_dict is None:
+            return JSONResponse({"error": "pet_not_found", "pet_id": pet_id}, status_code=404)
+        return row_dict["id"], row_dict["chat_id"]
+    else:
+        if len(rows) != 1:
+            return JSONResponse(
+                {
+                    "error": "target_required",
+                    "hint": "pass chat_id or pet_id; if no pet exists, pass chat_id to create one",
+                    "pets": [{"id": r["id"], "chat_id": r["chat_id"]} for r in rows],
+                },
+                status_code=400,
+            )
+        return rows[0]["id"], rows[0]["chat_id"]
 
 
 async def _gm_body(req: Request) -> dict:
@@ -1323,11 +1599,7 @@ async def gm_help(req: Request):
     }
 
 
-@app.get("/gm/pets")
-async def gm_pets(req: Request):
-    auth = _gm_auth(req)
-    if auth:
-        return auth
+def _get_gm_pets() -> list[dict]:
     with _db() as conn:
         rows = conn.execute(
             "SELECT p.id, p.chat_id, p.born_at, p.summary_until_id, p.state_json, "
@@ -1338,9 +1610,18 @@ async def gm_pets(req: Request):
             "LEFT JOIN memory_cards c ON c.pet_id = p.id "
             "GROUP BY p.id ORDER BY p.id"
         ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/gm/pets")
+async def gm_pets(req: Request):
+    auth = _gm_auth(req)
+    if auth:
+        return auth
+    rows = await asyncio.to_thread(_get_gm_pets)
     pets = []
     for row in rows:
-        state = _decay_state(_decode_state(row["state_json"]), time.time())
+        state = _decay_state(_decode_state(row["state_json"]), time.time(), row["id"])
         pets.append({
             "id": row["id"],
             "chat_id": row["chat_id"],
@@ -1359,14 +1640,14 @@ async def gm_get_state(req: Request):
     if auth:
         return auth
     pet_id_param = req.query_params.get("pet_id")
-    resolved = _gm_resolve_pet(
+    resolved = await _gm_resolve_pet(
         chat_id=req.query_params.get("chat_id"),
         pet_id=int(pet_id_param) if pet_id_param else None,
     )
     if isinstance(resolved, JSONResponse):
         return resolved
     pet_id, chat_id = resolved
-    state = load_pet_state(pet_id)
+    state = await load_pet_state(pet_id)
     return {"pet_id": pet_id, "chat_id": chat_id, "state": _gm_public_state(state)}
 
 
@@ -1377,7 +1658,7 @@ async def gm_set_state(req: Request):
         return auth
     body = await _gm_body(req)
     pet_id_param = body.get("pet_id") or req.query_params.get("pet_id")
-    resolved = _gm_resolve_pet(
+    resolved = await _gm_resolve_pet(
         chat_id=body.get("chat_id") or req.query_params.get("chat_id"),
         pet_id=int(pet_id_param) if pet_id_param else None,
     )
@@ -1385,7 +1666,7 @@ async def gm_set_state(req: Request):
         return resolved
     pet_id, chat_id = resolved
 
-    state = load_pet_state(pet_id)
+    state = await load_pet_state(pet_id)
     set_values = body.get("set") if isinstance(body.get("set"), dict) else {}
     delta_values = body.get("delta") if isinstance(body.get("delta"), dict) else {}
     for key in STATE_NUMERIC_KEYS:
@@ -1415,7 +1696,7 @@ async def gm_set_state(req: Request):
         state["recent_vibe_date"] = ""
         changed["recent_vibe"] = rv
     state["last_update_ts"] = time.time()
-    update_pet_state(pet_id, state)
+    await update_pet_state(pet_id, state)
     return {
         "ok": True,
         "pet_id": pet_id,
@@ -1432,7 +1713,7 @@ async def gm_speak(req: Request):
         return auth
     body = await _gm_body(req)
     pet_id_param = body.get("pet_id") or req.query_params.get("pet_id")
-    resolved = _gm_resolve_pet(
+    resolved = await _gm_resolve_pet(
         chat_id=body.get("chat_id") or req.query_params.get("chat_id"),
         pet_id=int(pet_id_param) if pet_id_param else None,
     )
@@ -1456,7 +1737,7 @@ async def _gm_scheduled(req: Request, kind: str):
         return JSONResponse({"error": "unknown_event", "kind": kind}, status_code=404)
     body = await _gm_body(req)
     pet_id_param = body.get("pet_id") or req.query_params.get("pet_id")
-    resolved = _gm_resolve_pet(
+    resolved = await _gm_resolve_pet(
         chat_id=body.get("chat_id") or req.query_params.get("chat_id"),
         pet_id=int(pet_id_param) if pet_id_param else None,
     )
@@ -1531,12 +1812,8 @@ async def feishu_webhook(req: Request, background: BackgroundTasks):
     # 3) 事件去重
     event_id = header.get("event_id")
     if event_id:
-        if event_id in _seen_set:
+        if await check_and_register_event(event_id):
             return {"code": 0}
-        if len(_seen_events) == _seen_events.maxlen:
-            _seen_set.discard(_seen_events[0])
-        _seen_events.append(event_id)
-        _seen_set.add(event_id)
 
     # 4) 分发事件 — 申请了"接收群消息"权限后，群里所有消息都会进来，
     #    _handle_message_event 内部按 @ 判断是 direct 还是 observer。
