@@ -224,6 +224,13 @@ def _local_hour(now_ts: float) -> int:
     return _local_date_hour(now_ts)[1]
 
 
+def _in_quiet_hours(now_ts: float) -> bool:
+    """now 是否落在休息时段（支持跨午夜：start > end 时按夜间区间处理）。"""
+    h = _local_hour(now_ts)
+    qs, qe = QUIET_HOURS
+    return qs <= h < qe if qs < qe else (h >= qs or h < qe)
+
+
 def _partition_hours(t_start: float, t_end: float) -> tuple[float, float]:
     """把 [t_start, t_end] 之间的小时数划分为 (quiet_hours, active_hours)。
     采用加速整天折算 + 逐小时步进计算余数。
@@ -412,19 +419,27 @@ def _pick_card_actions(state: dict) -> list[str]:
 
 
 def _build_pet_card(
-    pet_id: int, text: str, state: dict, *, with_actions: bool = True
+    pet_id: int,
+    text: str,
+    state: dict,
+    *,
+    with_actions: bool = True,
+    action_keys: list[str] | None = None,
 ) -> dict:
-    """组装飞书 interactive 卡片：宠物的话 + 状态进度条 + state 驱动的互动按钮。
+    """组装飞书 interactive 卡片：宠物的话 + 状态进度条 + 互动按钮。
     with_actions=False 时不带按钮——按钮被点过一次后，卡片就变成结果快照，
-    避免按钮集随状态轮换导致可以无限点。"""
+    避免按钮集随状态轮换导致可以无限点。
+    action_keys 不为 None 时用这组固定按钮（日记 / 梦境的「晚安」「早上好」），
+    为 None 时按 state 动态挑（主动发言卡片）。"""
     elements: list[dict] = [{"tag": "markdown", "content": text or "…"}]
     bars = _render_state_bars(state)
     if bars:
         elements.append({"tag": "hr"})
         elements.append({"tag": "markdown", "content": bars})
     if with_actions:
+        keys = _pick_card_actions(state) if action_keys is None else action_keys
         buttons = []
-        for key in _pick_card_actions(state):
+        for key in keys:
             btn_text = CARD_ACTION_TEXT.get(key, {}).get("button", key)
             buttons.append({
                 "tag": "button",
@@ -463,6 +478,11 @@ _compress_locks: dict[int, asyncio.Lock] = {}
 # 旁听消息不逐条落库：先攒在进程内，autonomous tick 或下一条 direct 消息到来时批量写入。
 # {pet_id: [{"content", "sender_name", "ts"}, ...]}
 _observer_buffer: dict[int, list[dict]] = {}
+
+# 群 @ 回复节流的进程内闸门：{pet_id: 上次放行回复的起始时间戳}。
+# DB 的 last_reply_ts 要等 LLM 回完才写，一波 @ 在回复生成期间都读到同一个旧值会全部放行；
+# 这个 dict 在通过节流的同步代码里立即占位（check+set 间无 await，asyncio 下原子），堵住并发漏放。
+_reply_gate: dict[int, float] = {}
 
 
 # === DB cache & dedup helpers ===
@@ -674,13 +694,15 @@ def _append_message(
     content: str,
     sender_name: str = "",
     is_observer: bool = False,
-) -> None:
+) -> int:
+    """插入一条消息，返回新行的 id（调用方需要时用来在 history 里定位本条）。"""
     with _db() as conn:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO messages (pet_id, role, content, ts, sender_name, is_observer) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (pet_id, role, content, time.time(), sender_name, 1 if is_observer else 0),
         )
+        return int(cur.lastrowid)
 
 
 async def append_message(
@@ -689,7 +711,7 @@ async def append_message(
     content: str,
     sender_name: str = "",
     is_observer: bool = False,
-) -> None:
+) -> int:
     return await asyncio.to_thread(_append_message, pet_id, role, content, sender_name, is_observer)
 
 
@@ -749,12 +771,13 @@ def _load_pet_context(pet_id: int) -> tuple[list[dict], dict]:
             "SELECT summary_until_id, state_json FROM pets WHERE id = ?", (pet_id,)
         ).fetchone()
         msg_rows = conn.execute(
-            "SELECT role, content, sender_name, is_observer FROM messages "
+            "SELECT id, role, content, sender_name, is_observer FROM messages "
             "WHERE pet_id = ? AND id > ? ORDER BY id",
             (pet_id, pet_row["summary_until_id"]),
         ).fetchall()
     history = [
         {
+            "id": r["id"],
             "role": r["role"],
             "content": r["content"],
             "sender_name": r["sender_name"] or "",
@@ -1323,7 +1346,7 @@ def _base_messages(system_content: str, history: list[dict]) -> list[dict]:
     return messages
 
 async def _call_llm_with_memory(
-    pet_id: int, user_text: str, sender_name: str = ""
+    pet_id: int, user_text: str, sender_name: str = "", current_msg_id: int | None = None
 ) -> tuple[str, dict]:
     history, current_state = await load_pet_context(pet_id)
 
@@ -1331,7 +1354,10 @@ async def _call_llm_with_memory(
     recall_block = await build_recall_block(pet_id, query=user_text)
     system_content = SYSTEM_PROMPT + recall_block
 
-    messages = _base_messages(system_content, history)
+    # 本条 user 输入在调用前已入库（保证 messages.id 反映真实到达顺序），
+    # 这里按 id 把它从 history 摘掉，避免它既在历史里又作为末条 user 出现而重复。
+    hist = [m for m in history if m.get("id") != current_msg_id]
+    messages = _base_messages(system_content, hist)
 
     # 临近新输入：拼一条 system 消息，含 (当前状态感受 + JSON 输出契约 + 人设重申)，
     # 利用 recency bias 让这三条最权威。state 中段维度自动不渲染。
@@ -1393,14 +1419,10 @@ async def _mark_replied(pet_id: int) -> None:
     await update_pet_state(pet_id, state)
 
 
-async def _is_direct_to_bot(msg: dict, chat_type: str, mentions: list[dict]) -> bool:
-    """判断这条消息是不是"对宠物说的"。
-    - 私聊 (p2p) 永远 direct
-    - 群里只有 @ 了 bot 才 direct
-    - 拿不到 bot open_id（API 挂 / 权限未批）则退化成"全部 direct"，保持老行为
+async def _is_direct_to_bot(mentions: list[dict]) -> bool:
+    """判断这条群消息是不是"对宠物说的"——只有 @ 了 bot 才 direct。
+    拿不到 bot open_id（API 挂 / 权限未批）则退化成"全部 direct"，保持老行为。
     """
-    if chat_type == "p2p":
-        return True
     try:
         bot_open_id = await _get_bot_open_id()
     except Exception:
@@ -1416,12 +1438,11 @@ async def _handle_message_event(event: dict) -> None:
     if not message_id or not chat_id:
         return
 
-    chat_type = msg.get("chat_type") or ""
     mentions = msg.get("mentions") or []
     sender_open_id = (((event.get("sender") or {}).get("sender_id") or {}).get("open_id")) or ""
     sender_name = await _resolve_user_name(sender_open_id) if sender_open_id else "群友"
 
-    is_direct = await _is_direct_to_bot(msg, chat_type, mentions)
+    is_direct = await _is_direct_to_bot(mentions)
     msg_type = msg.get("message_type")
 
     # observer 模式：群里别人在聊，不针对宠物
@@ -1473,11 +1494,25 @@ async def _handle_message_event(event: dict) -> None:
     # 先把缓冲的旁听消息落库，保证 messages.id 顺序≈真实时间顺序
     await flush_observer_buffer(pet_id)
 
+    # 休息时段：群 @ / 私聊都不调 LLM，只回一句固定的睡觉文案；
+    # 消息照常写 messages（is_observer=0），宠物醒来后能看到。
+    if _in_quiet_hours(time.time()):
+        await append_message(
+            pet_id, "user", user_text, sender_name=sender_name, is_observer=False
+        )
+        await _reply_text(message_id, FALLBACK_REPLIES["quiet_hours"])
+        log.info("pet %d @ during quiet hours, sent sleeping reply", pet_id)
+        if (await count_unsummarized(pet_id)) > COMPRESS_THRESHOLD:
+            asyncio.create_task(compress_pet_memory(pet_id))
+        return
+
     # 回复节流：群里被 @ 时，距上次正式回复不足 min_interval_sec 则只记不回。
-    # p2p 私聊是一对一对话，不受节流限制。
-    if chat_type != "p2p" and REPLY_MIN_INTERVAL_SEC > 0:
-        last_reply_ts = float((await load_pet_state(pet_id)).get("last_reply_ts", 0.0))
-        elapsed = time.time() - last_reply_ts
+    if REPLY_MIN_INTERVAL_SEC > 0:
+        now = time.time()
+        db_ts = float((await load_pet_state(pet_id)).get("last_reply_ts", 0.0))
+        # DB last_reply_ts 在 LLM 回完才写，取 max(_reply_gate) 才能挡住同一波在途的并发 @。
+        last_reply_ts = max(db_ts, _reply_gate.get(pet_id, 0.0))
+        elapsed = now - last_reply_ts
         if elapsed < REPLY_MIN_INTERVAL_SEC:
             await append_message(
                 pet_id, "user", user_text, sender_name=sender_name, is_observer=False
@@ -1489,15 +1524,24 @@ async def _handle_message_event(event: dict) -> None:
             if (await count_unsummarized(pet_id)) > COMPRESS_THRESHOLD:
                 asyncio.create_task(compress_pet_memory(pet_id))
             return
+        # 通过节流——立即占位。上面 _reply_gate.get 到这里无 await，并发 @ 无法插进来漏放。
+        _reply_gate[pet_id] = now
 
+    # 本条输入先入库，让它的 id 反映真实到达顺序（节流消息同样即时入库，不会被回复
+    # 期间的 LLM 延迟挤到后面）；_call_llm_with_memory 按 current_msg_id 把它从历史里
+    # 摘出来当末条 user，避免重复。
+    current_msg_id = await append_message(
+        pet_id, "user", user_text, sender_name=sender_name, is_observer=False
+    )
     try:
-        reply, _ = await _call_llm_with_memory(pet_id, user_text, sender_name=sender_name)
+        reply, _ = await _call_llm_with_memory(
+            pet_id, user_text, sender_name=sender_name, current_msg_id=current_msg_id
+        )
     except Exception as e:
         log.exception("llm error")
         reply = FALLBACK_REPLIES["llm_error_template"].format(error_class=e.__class__.__name__)
     log.info("reply=%r", reply)
 
-    await append_message(pet_id, "user", user_text, sender_name=sender_name, is_observer=False)
     await append_message(pet_id, "assistant", reply)
     await _reply_text(message_id, reply)
     await _mark_replied(pet_id)
@@ -1513,11 +1557,8 @@ async def _handle_message_event(event: dict) -> None:
 
 def _should_tick_speak(state: dict, last_proactive_ts: float, now: float) -> str | None:
     """代码层廉价过滤：返回触发情境字符串就该让 LLM 说话，None 就跳过这一 tick。"""
-    # 静默时段（支持跨午夜：start > end 时按夜间区间处理）
-    h = _local_hour(now)
-    qs, qe = QUIET_HOURS
-    in_quiet = qs <= h < qe if qs < qe else (h >= qs or h < qe)
-    if in_quiet:
+    # 静默时段
+    if _in_quiet_hours(now):
         return None
     # 冷却
     if now - last_proactive_ts < PROACTIVE_COOLDOWN_SEC:
@@ -1555,9 +1596,11 @@ async def _autonomous_speak(
     set_last_proactive: bool = False,
     extra_state: dict | None = None,
     as_card: bool = False,
+    card_actions: list[str] | None = None,
 ) -> tuple[str, dict] | None:
     """让宠物主动发一句话，发飞书、存 DB、更新 state。
-    as_card=True 时发交互卡片（状态条 + 互动按钮），否则发纯文本。"""
+    as_card=True 时发交互卡片（状态条 + 互动按钮），否则发纯文本。
+    card_actions 不为 None 时卡片用这组固定按钮，否则按 state 动态挑。"""
     history, current_state = await load_pet_context(pet_id)
 
     # 主动发言没有 user_text 做检索 query，只走最近卡片提供时序氛围。
@@ -1612,7 +1655,9 @@ async def _autonomous_speak(
 
     # 先发飞书，发成功再写 DB，避免"DB 记了但群里没看到"的鬼现象。
     if as_card and CARD_ENABLED:
-        await _send_card(chat_id, _build_pet_card(pet_id, reply, new_state))
+        await _send_card(
+            chat_id, _build_pet_card(pet_id, reply, new_state, action_keys=card_actions)
+        )
     else:
         await _send_text(chat_id, reply)
 
@@ -1649,7 +1694,9 @@ async def _scheduled_speak(
     *,
     mark_date: bool = True,
 ) -> tuple[str, dict] | None:
-    """固定时刻的日记 / 梦境。成功发出后才写每日去重字段。"""
+    """固定时刻的日记 / 梦境。成功发出后才写每日去重字段。
+    发交互卡片，按钮是该事件固定的「晚安」/「早上好」（prompts.toml 里的 card_action）。"""
+    action = event.get("card_action")
     return await _autonomous_speak(
         pet_id,
         chat_id,
@@ -1662,6 +1709,8 @@ async def _scheduled_speak(
         f"SCHEDULED {event['kind']} date={date_key}",
         max_tokens=SCHEDULED_MAX_TOKENS,
         extra_state={event["state_key"]: date_key} if mark_date else None,
+        as_card=True,
+        card_actions=[action] if action else [],
     )
 
 

@@ -11,7 +11,7 @@ compress_threshold = 200
 [reply]
 # 群里被 @ 后，两次正式 LLM 回复之间的最小间隔（秒）。
 # 间隔内的 @ 消息照常记进记忆（is_observer=0），下次正式回复时宠物能看到，
-# 但不会逐条触发 LLM 回复。p2p 私聊不受此限制。设 0 = 关闭节流（每次 @ 都回）。
+# 但不会逐条触发 LLM 回复。设 0 = 关闭节流（每次 @ 都回）。
 min_interval_sec = 10
 
 [observer]
@@ -105,9 +105,9 @@ mood = 15.0
 energy = 15.0
 
 [card]
-# 交互卡片总开关。只作用于「主动发言」（宠物自己冒泡）；
-# @ 回复、梦境 / 日记始终是纯文本，不受这里影响。
-# false = 主动发言也退回纯文本。
+# 交互卡片总开关。作用于「主动发言」（宠物自己冒泡）和「梦境 / 日记」定时事件；
+# @ 回复始终是纯文本，不受这里影响。
+# false = 主动发言 + 梦境 / 日记都退回纯文本。
 enabled = true
 # 状态进度条的格子数。
 bar_width = 10
@@ -147,3 +147,11 @@ delta = { curiosity = 25, mood = 8, energy = -8, hunger = 5 }
 need_dim = "affection"
 need_side = "low"
 delta = { affection = 20, mood = 5 }
+
+# 日记 / 梦境卡片的固定按钮。没有 need_dim/need_side，不会出现在主动发言卡片上，
+# 只在 prompts.toml [[scheduled_events]] 的 card_action 指定时随对应卡片出现。
+[card.actions.goodnight]
+delta = { mood = 8, affection = 5 }
+
+[card.actions.goodmorning]
+delta = { mood = 8, curiosity = 8, affection = 5 }

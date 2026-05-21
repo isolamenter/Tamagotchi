@@ -143,12 +143,14 @@ prompt = """【系统定时触发——{event_name}】
 
 # dream / diary 的 hour 由 main.py 锁定到 pet_config.toml 的 quiet_end / quiet_start，
 # 下面的 hour 仅作记录、不生效；要改时间改 pet_config.toml [autonomous] 的休息时段。
+# card_action 指定这条定时事件的卡片固定按钮（对应 [card.actions.*] 的 key）。
 [[scheduled_events]]
 kind = "dream"
 name = "梦境"
 hour = 10
 state_key = "last_dream_date"
 instruction = "把昨晚像梦一样闪过的回忆讲给群友听，柔软、含糊、像刚睡醒。"
+card_action = "goodmorning"
 
 [[scheduled_events]]
 kind = "diary"
@@ -156,12 +158,15 @@ name = "日记"
 hour = 19
 state_key = "last_diary_date"
 instruction = "像写今天的小日记一样，用几句回忆最近发生的事和自己的心情。"
+card_action = "goodnight"
 
 [fallback_reply]
 non_text = "我现在只看得懂文字消息哦。"
 empty_text = "在的，想跟我说什么？"
 empty_llm = "...(脑袋一片空白)..."
 llm_error_template = "脑袋短路了...({error_class})"
+# 休息时段里被 @ / 私聊时回的固定文案（不调 LLM）。
+quiet_hours = "Zzz……（蜷成一团，没醒）现在是休息时间，明早再找我玩吧~"
 
 [gm]
 default_speak_trigger = "GM 手动触发：测试普通主动发言"
@@ -212,6 +217,18 @@ did = "陪你玩了个小游戏"
 button = "🤚 摸摸头"
 pending = "（眯起眼睛……被摸头的时候最安心了）"
 did = "摸了摸你的头"
+
+# 下面两个是日记 / 梦境卡片的固定按钮，不参与主动发言卡片的 state 动态挑选
+# （[card.actions.*] 里没有 need_dim/need_side 的动作不会出现在普通卡片上）。
+[card.actions.goodnight]
+button = "🌙 晚安"
+pending = "（……晚安，做个好梦）"
+did = "对你说了晚安"
+
+[card.actions.goodmorning]
+button = "☀️ 早上好"
+pending = "（揉揉眼睛……早上好呀）"
+did = "对你说了早上好"
 
 [card.action_reply]
 # 按钮被点击后，后台异步让 LLM 生成一句有人格的反馈，替换 pending 占位文案。
