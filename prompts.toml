@@ -1,6 +1,6 @@
 # Tamagotchi 玩法 prompt 的集中配置。
 # 宠物风格放在 pet_style.toml；这里保留对话流程、记忆、状态、主动行为、日记梦境和输出契约。
-# 改完需要重启服务（main.py 启动时读一次）。
+# 改完需要重启服务（tamagotchi 启动时读一次）。
 
 [system]
 template = """{style_prompt}
@@ -143,7 +143,7 @@ prompt = """【系统定时触发——{event_name}】
 
 照常输出 JSON。reply 是要发到群里的文字。state_delta 反映写完这条日记 / 梦境后的轻微状态变化，通常 mood 可以小幅正向，energy 可以小幅下降。"""
 
-# dream / diary 的 hour 由 main.py 锁定到 pet_config.toml 的 quiet_end / quiet_start，
+# dream / diary 的 hour 由 config.py 锁定到 pet_config.toml 的 quiet_end / quiet_start，
 # 下面的 hour 仅作记录、不生效；要改时间改 pet_config.toml [autonomous] 的休息时段。
 # card_action 指定这条定时事件的卡片固定按钮（对应 [card.actions.*] 的 key）。
 [[scheduled_events]]

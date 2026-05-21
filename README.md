@@ -9,7 +9,7 @@
 
 ## ✨ 特性
 
-- 单文件 FastAPI 服务，易读易改
+- 模块化 FastAPI 服务，正式 ASGI 入口为 `tamagotchi:app`
 - 基于飞书事件订阅（`im.message.receive_v1`），群里 @ 触发回复（带可配置回复节流间隔，被刷屏时只记不回）；非 @ 消息会被宠物"旁听"进上下文（缓冲后按 tick 批量落库）
 - **每个 `chat_id` 一只独立宠物，对话历史用 SQLite 持久化（stdlib，零额外依赖）**
 - **长期记忆 = 事件卡片 + RAG**：消息累积后压成结构化卡片（when/who/what/vibe/hooks）+ 向量索引；回复时按相关性 + 时序双路召回，塞回 system message 当"想起的事"
@@ -21,6 +21,20 @@
 - 飞书要求 3s 内响应，长任务自动走 `BackgroundTasks` 异步
 
 ## 🏗 架构
+
+当前代码按职责拆成几层：
+
+```text
+tamagotchi.py          # FastAPI app / lifespan / dependency wiring
+config.py              # env + TOML loading
+runtime.py             # process-local locks and buffers
+routes/                # HTTP routes: feishu, gm, health
+services/              # business orchestration
+domain/                # pure state/card/memory/pet logic
+repositories/          # SQLite persistence
+integrations/          # Feishu and OpenAI-compatible clients
+tests/                 # local unittest coverage; not needed on the server
+```
 
 ```
 飞书群消息（@bot 或旁听消息）
@@ -59,7 +73,7 @@ pip install -r requirements.txt
 cp .env.example .env
 # 编辑 .env 填入飞书凭证和 LLM API 信息
 
-python main.py        # 监听 0.0.0.0:8000
+uvicorn tamagotchi:app --host 0.0.0.0 --port ${PORT:-8000}
 ```
 
 健康检查：
@@ -135,7 +149,7 @@ curl http://localhost:8000/healthz
 - `prompts.toml`：玩法流程，包括记忆压缩、状态渲染、主动发言、日记 / 梦境、GM 默认触发文案、兜底回复和 JSON 输出契约。
 - `pet_config.toml`：运行参数，包括记忆压缩阈值、`[reply]` 群 @ 回复节流间隔、`[observer]` 旁听缓冲上限、初始状态、状态衰减、主动发言间隔 / 冷却 / 静默时段 / 触发阈值、`[card]` 交互卡片开关 / 进度条格数 / 按钮 delta / 点击冷却。
 
-常改的是 `pet_style.toml [style].prompt`：默认是通用电子宠物，可换成毒舌猫、哲学家小狗、傲娇龙、机器人团子等。玩法类规则继续放在 `prompts.toml`，不要写进 `main.py`。
+常改的是 `pet_style.toml [style].prompt`：默认是通用电子宠物，可换成毒舌猫、哲学家小狗、傲娇龙、机器人团子等。玩法类规则继续放在 `prompts.toml`，不要写进业务代码。
 
 `prompts.toml` 核心段落：
 
