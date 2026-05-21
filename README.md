@@ -91,7 +91,7 @@ curl http://localhost:8000/healthz
    - `im:message.group_msg:readonly`（接收群组所有消息——含非 @ 的旁听消息；不批的话宠物只能听见 @ 它的）
    - `im:message.p2p_msg:readonly`（接收单聊消息；如果只在群里用可以不批）
    - `im:message:send_as_bot`（以机器人身份发消息）
-   - `contact:user.base:readonly` + `contact:contact.base:readonly`（解析 open_id 为群友姓名；可选，没批会降级为 `群友-后4位`。前者拿 name 字段，后者是接口调用的基础权限）
+   - 群友姓名**不再走通讯录权限**——宠物从对话里学名字（有人报名字时回复 JSON 带回 `speaker_name`，写进 `user_names` 表），还没学到的群友降级显示 `群友-后4位`。无需 `contact:*` 权限。
 4. **事件与回调 → 事件配置**：
    - 订阅方式：**事件回调**（HTTP）
    - 请求地址：`https://<your-domain>/feishu/webhook`
@@ -177,23 +177,24 @@ curl http://localhost:8000/healthz
 
 五个 0-100 的数值维度 + 一个每日 vibe 字符串：
 
-| 维度 | 含义 | 默认衰减 |
+| 维度 | 含义 | 没人互动时漂向 |
 |---|---|---|
-| `hunger` | 饥饿度，0=刚吃饱，100=极饿 | +6 / 小时 |
-| `mood` | 心情，100=超开心，0=极沮丧 | -4 / 小时 |
-| `energy` | 精力，100=活蹦乱跳，0=快睡着了 | -3 / 小时 |
-| `curiosity` | 探索欲，100=想追问 / 扯新话题，0=心不在焉 | -2 / 小时 |
-| `affection` | 对群的感情，100=深度依恋，0=陌生 / 距离感 | -0.3 / 小时（很慢） |
+| `hunger` | 饥饿度，0=刚吃饱，100=极饿 | 漂向 ~95（变饿） |
+| `mood` | 心情，100=超开心，0=极沮丧 | 漂回 ~50（平淡中段） |
+| `energy` | 精力，100=活蹦乱跳，0=快睡着了 | 清醒漂向 ~35、睡觉漂向 100（回血） |
+| `curiosity` | 探索欲，100=想追问 / 扯新话题，0=心不在焉 | 漂回 ~45（中段） |
+| `affection` | 对群的感情，100=深度依恋，0=陌生 / 距离感 | 漂向 ~40（很慢） |
 | `recent_vibe` | 每日凌晨从 `pet_style.toml [recent_vibes].pool` 抽一个氛围词 | 跨日翻牌 |
 
 - **存在 `pets.state_json` 一个字段里**，浮点 + `last_update_ts` + 各种 last_* 时间戳
 - **lazy compute**：没后台 cron，读时按"距上次更新过了多久"算到当前；每次互动后写回新值
-- **LLM 走 JSON 结构化输出**：每次回复返回 `{"reply": "...", "state_delta": {"hunger": -30, "mood": +5, ...}}`，reply 发给用户，state_delta 各值 clamp 到 ±30 后叠加到当前 state（再 clamp 0-100）。`curiosity` / `affection` 在 JSON 中可省略，省略 = 0
+- **衰减 = 向 baseline 指数收敛**：每维不再线性单调走到 0/100，而是 `v = baseline + (v-baseline)·exp(-rate·h)` 漂向各自 baseline（多在中段）。好处：长期没人理的宠物状态回落到中段（→ 不渲染 → LLM 自由发挥），不会五维全贴极端档把回复钉死。清醒 / 睡觉两段各有一组 baseline（如 energy 睡觉段 baseline=100 = 回血）
+- **LLM 走 JSON 结构化输出**：每次回复返回 `{"reply": "...", "state_delta": {"hunger": -30, "mood": +5, ...}, "speaker_name": "..."}`，reply 发给用户，state_delta 各值按维度上限（`[state.delta_clamp]`，缺维度兜底 ±30）clamp 后叠加到当前 state（再 clamp 0-100）。`curiosity` / `affection` 在 JSON 中可省略，省略 = 0；`speaker_name` 可选，当前说话人报了名字才填，用来从对话里学群友名字（写进 `user_names` 表）
 - LLM 输出不是合法 JSON 时，把整段当 reply 兜底，state 不变（不会让宠物挂掉）
 - **状态渲染只在极端档触发**：每维都看 `pet_config.toml [state.bands.<dim>]` 的 extreme_high / high / low / extreme_low；落在中段就完全不渲染该维度，避免把回复钉死成同质化语气
 - 全维度都中段、且 vibe 为空时，整个状态感受块都不注入——LLM 自由发挥
 
-初始值在 `pet_config.toml [state.initial]`，衰减率 `[state.decay_per_hour]`，分档阈值 `[state.bands.<dim>]`，每档对应的感受句在 `prompts.toml [state_render.lines]`。
+初始值在 `pet_config.toml [state.initial]`，衰减的 baseline / rate 在 `[state.decay_active]` / `[state.decay_quiet]`，单次 delta 上限在 `[state.delta_clamp]`，分档阈值 `[state.bands.<dim>]`，每档对应的感受句在 `prompts.toml [state_render.lines]`。
 
 ## 🌙 主动发言
 
@@ -202,10 +203,12 @@ curl http://localhost:8000/healthz
 - **心跳间隔**：当前测试值 1 min 扫一次所有宠物（生产建议 10 min）
 - **固定时刻**：默认本地 `8:00` 发一次"梦境"、`22:00` 发一次"日记"，独立于 state 和普通主动发言冷却；成功发出后用 `state_json` 里的日期字段去重，同一天不重复
 - **代码层廉价过滤**（不调 LLM）：先看本地时间（默认 +8 时区）是否在静默时段（1:00-7:00）、再看冷却（当前测试值无冷却，生产建议 4h 内不重发），都过了才进 state 触发
-- **触发条件**（按优先级）：
+- **触发条件**（按优先级，生理急迫优先于软需求）：
   - `hunger >= 85` → 抱怨饿了
   - `mood <= 15` → 撒娇 / 抱怨没人理
   - `energy <= 15` → 宣告要睡了
+  - `curiosity <= 20` → 无聊了想找人玩
+  - `affection <= 15` → 孤单了想求关注
   - 都没触发时 10% 概率自发冒一句"hi"
 - **LLM 层生成**：过滤通过才走完整 prompt + RAG 召回卡片 + state + JSON 输出，得到 reply 文本后通过飞书 `/im/v1/messages?receive_id_type=chat_id` 推到群里
 - **失败安全**：发飞书失败不写 DB；tick 中任一宠物异常不影响其它宠物；loop 自身崩了也不会退出（log 后继续）
@@ -221,10 +224,12 @@ curl http://localhost:8000/healthz
 - **进度条**：`hunger` 反转成「饱腹度」展示，让五条都是「满 = 好」，直觉一致
 - **按钮由状态动态决定**：哪个维度有需求就浮现对应按钮——饿了出 `🍖 投喂`、困了出 `💤 哄睡`、心情低落出 `🫧 哄一哄`、好奇心淡了出 `🎲 逗它玩`、生疏了出 `🤚 摸摸头`；全维度都中段时从 `[card].default_actions` 随机兜底，保证总有东西可点
 - **点击 = 确定性状态变化**：按钮点击套用 `pet_config.toml [card.actions.*].delta`，**不经过 LLM**，免去 LLM 判定 state 漂移的不确定性；卡片进度条原地刷新
-- **有人格的反馈**：点击后台异步用 LLM 生成一句符合宠物风格的反馈台词，回填进卡片
-- **防刷**：同一按钮有点击冷却（`[card].action_cooldown_sec`），冷却中只弹 toast 不改状态；飞书重试按 `event_id` 去重，不会让状态变化翻倍
+- **多人可参与，不是首点即焚**：点击后卡片保留按钮，群里其他人可继续照料——动态卡按新状态重挑按钮（喂饱后投喂按钮自然消失），固定卡（梦境 / 日记）保持原按钮
+- **卡片时效**：卡片发出 `[card].button_ttl_sec`（默认 30min）后按钮失效，过期点击只弹 toast 不改状态，避免昨天的梦境卡一直能点
+- **有人格的反馈逐条累积**：每次点击后台单独用 LLM 生成一句符合宠物风格的反馈台词，**向下追加**进卡片文本日志而不是整段刷新——多人点击时各自的台词逐条堆叠在卡片里（最多保留 `[card].card_log_max_lines` 条）
+- **防刷**：点击冷却是 **per-user** 的（`[card].action_cooldown_sec`）——同一个人点过任意按钮后，冷却内再点任何按钮只弹 toast，不同人各自独立；飞书重试按 `event_id` 去重，不会让状态变化翻倍；多人同时点击用 per-pet 锁串行，不丢状态变化
 
-展示文案在 `prompts.toml [card]`，运行数值（开关 / 进度条格数 / 冷却 / 按钮 delta）在 `pet_config.toml [card]`。`[card].enabled = false` 时主动发言退回纯文本。需要在飞书开发者后台开启「卡片回传交互」能力（见上文飞书应用配置）。
+展示文案在 `prompts.toml [card]`，运行数值（开关 / 进度条格数 / 冷却 / 时效 / 日志条数上限 / 按钮 delta）在 `pet_config.toml [card]`。`[card].enabled = false` 时主动发言退回纯文本。需要在飞书开发者后台开启「卡片回传交互」能力（见上文飞书应用配置）。
 
 ## 🧪 GM Web 调试接口
 

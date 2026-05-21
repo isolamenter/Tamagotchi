@@ -32,8 +32,6 @@ compress_max_tokens = 2000
 card_reply_max_tokens = 150
 
 [state]
-# LLM 单次 state_delta 的绝对值上限，防 outlier。
-delta_clamp = 30
 
 [state.initial]
 # 0-100 浮点：hunger 0=饱 100=极饿；mood/energy/curiosity/affection 0=糟 100=满。
@@ -43,21 +41,31 @@ energy = 80.0
 curiosity = 60.0
 affection = 30.0
 
-[state.decay_per_hour]
-# 每小时的衰减率（正负号体现方向）。
-hunger = 6.0      # 越来越饿
-mood = -4.0       # 心情会跌
-energy = -3.0     # 精力会跌
-curiosity = -2.0  # 探索欲慢慢淡掉，需要互动重新点燃
-affection = -0.3  # 对群的感情衰减很慢；正向积累靠互动
+# LLM 单次 state_delta 的绝对值上限，按维度配置，防 outlier。缺维度兜底 30。
+[state.delta_clamp]
+hunger = 30
+mood = 25
+energy = 25
+curiosity = 20
+affection = 12
 
-[state.decay_per_hour_quiet]
-# 静默时段（睡觉时间）每小时的衰减率。
-hunger = 2.0      # 睡觉时代谢慢，饿得慢
-mood = -0.5       # 睡觉时心情基本稳定
-energy = 6.0      # 睡觉回血（每小时 +6.0 精力）
-curiosity = 0.0   # 睡觉不衰减探索欲
-affection = 0.0   # 睡觉不衰减感情
+# 衰减模型：每个维度向 baseline 指数收敛（v = baseline + (v-baseline)*exp(-rate*h)），
+# 没人互动时漂回中段而不是钉死在极端档。rate = 每小时收敛速率常数（半衰期 ≈ 0.693/rate 小时）。
+[state.decay_active]
+# 清醒时段的收敛目标 / 速率。
+hunger    = { baseline = 95.0,  rate = 0.20 }  # 没人喂会慢慢饿到接近极饿
+mood      = { baseline = 50.0,  rate = 0.22 }  # 没互动回落到平淡中段
+energy    = { baseline = 35.0,  rate = 0.18 }  # 清醒时精力往略低档漂
+curiosity = { baseline = 45.0,  rate = 0.25 }  # 探索欲淡回中段，需要互动重新点燃
+affection = { baseline = 40.0,  rate = 0.04 }  # 对群的感情漂得很慢
+
+[state.decay_quiet]
+# 静默时段（睡觉时间）的收敛目标 / 速率。
+hunger    = { baseline = 80.0,  rate = 0.06 }  # 睡觉代谢慢，饿得慢
+mood      = { baseline = 55.0,  rate = 0.05 }  # 睡觉时心情基本稳定
+energy    = { baseline = 100.0, rate = 0.45 }  # 睡觉快速回血
+curiosity = { baseline = 50.0,  rate = 0.0  }  # 睡觉不衰减探索欲
+affection = { baseline = 40.0,  rate = 0.0  }  # 睡觉不衰减感情
 
 # 极端档 / 高档 / 低档判定（不在范围内 = 中段，state_render 直接不渲染该维度）。
 [state.bands.hunger]
@@ -103,6 +111,10 @@ hunger = 85.0
 mood = 15.0
 # energy <= 此值 -> 主动说要睡。
 energy = 15.0
+# curiosity <= 此值 -> 主动想找人玩。
+curiosity = 20.0
+# affection <= 此值 -> 主动想求关注。
+affection = 15.0
 
 [card]
 # 交互卡片总开关。作用于「主动发言」（宠物自己冒泡）和「梦境 / 日记」定时事件；
@@ -111,8 +123,15 @@ energy = 15.0
 enabled = true
 # 状态进度条的格子数。
 bar_width = 10
-# 同一动作按钮两次点击之间的最小间隔（秒），防群里刷按钮；0 = 不限。
+# 同一个人点过任意按钮后，再点（任何按钮）的最小间隔（秒），防单人连点；0 = 不限。
+# 冷却是 per-user 的：A 点过一下后冷却内不能再点，但 B 不受影响，可继续照料。
 action_cooldown_sec = 60
+# 卡片按钮从发出起多久后失效（秒），过期后点击只回 toast、不改 state。
+# 防止昨天的梦境 / 日记卡一直能点。计时从发卡那刻算，不随点击续期。
+button_ttl_sec = 1800
+# 卡片文本日志最多累积多少条反馈台词：多人点击时台词逐条向下追加（不整段刷新），
+# 超出这个条数就丢掉最旧的，避免卡片无限变高。
+card_log_max_lines = 6
 # 一张卡片最多显示几个按钮。
 max_buttons = 3
 # 所有状态维度都在中段（宠物没有明显需求）时，兜底随机挑这些按钮里的，保证卡片总有东西可点。

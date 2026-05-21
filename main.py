@@ -110,26 +110,28 @@ CARD_REPLY_MAX_TOKENS = int(_LLM_CONFIG.get("card_reply_max_tokens", 150))
 
 _STATE_CONFIG = _PET_CONFIG["state"]
 INITIAL_STATE = {k: float(v) for k, v in _STATE_CONFIG["initial"].items()}
-DECAY_RATES_PER_HOUR = {
-    k: float(v) for k, v in _STATE_CONFIG["decay_per_hour"].items()
+
+
+def _parse_decay_table(raw: dict) -> dict:
+    """把 [state.decay_active] / [state.decay_quiet] 解析成 {dim: {baseline, rate}}。
+    每个维度向 baseline 指数收敛，rate 是每小时收敛速率常数。"""
+    out = {}
+    for k in INITIAL_STATE.keys():
+        cfg = raw.get(k) or {}
+        out[k] = {
+            "baseline": float(cfg.get("baseline", INITIAL_STATE.get(k, 50.0))),
+            "rate": float(cfg.get("rate", 0.0)),
+        }
+    return out
+
+
+DECAY_ACTIVE = _parse_decay_table(_STATE_CONFIG.get("decay_active", {}))
+DECAY_QUIET = _parse_decay_table(_STATE_CONFIG.get("decay_quiet", {}))
+# 单次 state_delta 的绝对值上限，按维度配置；缺维度兜底 _DEFAULT_DELTA_CLAMP。
+_DEFAULT_DELTA_CLAMP = 30
+STATE_DELTA_CLAMP = {
+    k: int(v) for k, v in _STATE_CONFIG.get("delta_clamp", {}).items()
 }
-_DEFAULT_DECAY_QUIET = {
-    "hunger": 2.0,
-    "mood": -0.5,
-    "energy": 6.0,
-    "curiosity": 0.0,
-    "affection": 0.0,
-}
-DECAY_RATES_PER_HOUR_QUIET = {}
-for k in INITIAL_STATE.keys():
-    _val = _STATE_CONFIG.get("decay_per_hour_quiet", {}).get(k)
-    if _val is not None:
-        DECAY_RATES_PER_HOUR_QUIET[k] = float(_val)
-    else:
-        DECAY_RATES_PER_HOUR_QUIET[k] = float(
-            _DEFAULT_DECAY_QUIET.get(k, DECAY_RATES_PER_HOUR.get(k, 0.0))
-        )
-STATE_DELTA_CLAMP = int(_STATE_CONFIG["delta_clamp"])
 # state.bands.<dim> = {extreme_high?, high?, low?, extreme_low?}；缺的档不渲染
 STATE_BANDS = {k: dict(v) for k, v in _STATE_CONFIG.get("bands", {}).items()}
 # 数值维度的顺序，影响 _apply_delta / _decay_state / 渲染先后
@@ -155,6 +157,8 @@ _TRIGGER_THRESHOLDS = _AUTONOMOUS_CONFIG["trigger_thresholds"]
 HUNGER_TRIGGER = float(_TRIGGER_THRESHOLDS["hunger"])
 MOOD_TRIGGER = float(_TRIGGER_THRESHOLDS["mood"])
 ENERGY_TRIGGER = float(_TRIGGER_THRESHOLDS["energy"])
+CURIOSITY_TRIGGER = float(_TRIGGER_THRESHOLDS["curiosity"])
+AFFECTION_TRIGGER = float(_TRIGGER_THRESHOLDS["affection"])
 SPONTANEOUS_PROB = float(_AUTONOMOUS_CONFIG["spontaneous_prob"])
 
 # 主动发言交互卡片配置（运行数值在 pet_config [card]，展示文案在 prompts [card]）。
@@ -164,6 +168,10 @@ CARD_BAR_WIDTH = int(_CARD_CONFIG.get("bar_width", 10))
 CARD_ACTION_COOLDOWN_SEC = int(_CARD_CONFIG.get("action_cooldown_sec", 60))
 CARD_MAX_BUTTONS = int(_CARD_CONFIG.get("max_buttons", 3))
 CARD_DEFAULT_ACTIONS = list(_CARD_CONFIG.get("default_actions", []))
+# 卡片按钮从发出起多久后失效（秒），过期后点击只回 toast、不改 state。
+CARD_BUTTON_TTL_SEC = int(_CARD_CONFIG.get("button_ttl_sec", 1800))
+# 卡片文本日志最多累积多少条反馈台词（多人点击逐条向下追加），超出丢最旧的。
+CARD_LOG_MAX_LINES = int(_CARD_CONFIG.get("card_log_max_lines", 6))
 # action_key -> {need_dim, need_side, delta}
 CARD_ACTIONS = {k: dict(v) for k, v in _CARD_CONFIG.get("actions", {}).items()}
 
@@ -173,6 +181,9 @@ CARD_BAR_EMPTY = _CARD_PROMPTS.get("bar_empty", "▱")
 CARD_BARS_HEADER = _CARD_PROMPTS.get("bars_header", "")
 CARD_TOAST_DONE = _CARD_PROMPTS.get("toast_done", "✓")
 CARD_TOAST_COOLDOWN = _CARD_PROMPTS.get("toast_cooldown", "稍等一下~")
+CARD_TOAST_EXPIRED = _CARD_PROMPTS.get("toast_expired", "这张卡片过期了~")
+# 多人点击时，每条反馈台词在卡片文本里向下追加的行前缀。
+CARD_FOLLOWUP_PREFIX = _CARD_PROMPTS.get("followup_prefix", "↳ ")
 _CARD_BARS = dict(_CARD_PROMPTS.get("bars", {}))
 CARD_VIBE_TEMPLATE = _CARD_BARS.pop("vibe_template", "✨ {vibe}")
 CARD_BAR_LABELS = _CARD_BARS  # dim -> label（含 emoji）
@@ -286,27 +297,33 @@ def _maybe_rotate_vibe(state: dict, now: float, pet_id: int | None = None) -> di
 def _decay_state(stored: dict, now: float, pet_id: int | None = None) -> dict:
     """根据 last_update_ts 到 now 的时间差，把存储的状态衰减到当前值。
     保留 stored 里所有未知字段（如 last_proactive_ts / recent_vibe），只覆写衰减项 + last_update_ts。
-    根据静默时段分流计算 active_hours 和 quiet_hours 不同的衰减率。
+    衰减模型：每个维度向 baseline 指数收敛（v = baseline + (v-baseline)*exp(-rate*h)），
+    没人互动时漂回中段而不是钉死在极端档。active / quiet 两段各用各的 baseline，
+    先套 active 段再套 quiet 段（_partition_hours 只给总量，是近似）。
     顺便每天滚一次 recent_vibe。"""
     last_update_ts = float(stored.get("last_update_ts", now))
     elapsed_hours = max(0.0, (now - last_update_ts) / 3600.0)
-    
+
     result = dict(stored)
     result["last_update_ts"] = now
-    
+
     if elapsed_hours <= 0:
         return _maybe_rotate_vibe(result, now, pet_id)
-        
+
     q_hours, a_hours = _partition_hours(last_update_ts, now)
-    
+
     for k in STATE_NUMERIC_KEYS:
         v = float(stored.get(k, INITIAL_STATE.get(k, 50.0)))
-        rate_active = DECAY_RATES_PER_HOUR.get(k, 0.0)
-        rate_quiet = DECAY_RATES_PER_HOUR_QUIET.get(k, rate_active)
-        
-        v += rate_active * a_hours + rate_quiet * q_hours
+        for regime, hours in ((DECAY_ACTIVE, a_hours), (DECAY_QUIET, q_hours)):
+            if hours <= 0:
+                continue
+            cfg = regime.get(k)
+            if not cfg:
+                continue
+            baseline = cfg["baseline"]
+            v = baseline + (v - baseline) * math.exp(-cfg["rate"] * hours)
         result[k] = max(0.0, min(100.0, v))
-        
+
     return _maybe_rotate_vibe(result, now, pet_id)
 
 
@@ -319,7 +336,8 @@ def _apply_delta(state: dict, delta: dict) -> dict:
             d = int(delta.get(k, 0))
         except (TypeError, ValueError):
             d = 0
-        d = max(-STATE_DELTA_CLAMP, min(STATE_DELTA_CLAMP, d))
+        clamp = STATE_DELTA_CLAMP.get(k, _DEFAULT_DELTA_CLAMP)
+        d = max(-clamp, min(clamp, d))
         out[k] = max(0.0, min(100.0, float(out.get(k, INITIAL_STATE.get(k, 50.0))) + d))
     return out
 
@@ -425,12 +443,23 @@ def _build_pet_card(
     *,
     with_actions: bool = True,
     action_keys: list[str] | None = None,
+    built_at: int | None = None,
+    base_text: str | None = None,
 ) -> dict:
     """组装飞书 interactive 卡片：宠物的话 + 状态进度条 + 互动按钮。
-    with_actions=False 时不带按钮——按钮被点过一次后，卡片就变成结果快照，
-    避免按钮集随状态轮换导致可以无限点。
+    with_actions=False 时不带按钮（极少用——卡片现在点击后保留按钮供多人参与）。
     action_keys 不为 None 时用这组固定按钮（日记 / 梦境的「晚安」「早上好」），
-    为 None 时按 state 动态挑（主动发言卡片）。"""
+    为 None 时按 state 动态挑（主动发言卡片）。
+    built_at：发卡时间戳（int 秒），点击后重建卡片时由调用方透传原值以保留卡片时效；
+    新卡片传 None 时取当前时间。
+    base_text：卡片最初那段「宠物的话」（不含点击追加的台词），随按钮 value 传出去，
+    点击后首次重建时用来引导文本日志；为 None 时取 text。
+    每个按钮 value 都带上重建所需信息，无需 message_id→时间 / 文本存储。"""
+    if built_at is None:
+        built_at = int(time.time())
+    if base_text is None:
+        base_text = text
+    is_fixed = action_keys is not None
     elements: list[dict] = [{"tag": "markdown", "content": text or "…"}]
     bars = _render_state_bars(state)
     if bars:
@@ -445,7 +474,14 @@ def _build_pet_card(
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": btn_text},
                 "type": "primary",
-                "value": {"pet_id": pet_id, "action": key},
+                "value": {
+                    "pet_id": pet_id,
+                    "action": key,
+                    "keys": list(keys),
+                    "fixed": is_fixed,
+                    "built_at": built_at,
+                    "base": base_text,
+                },
             })
         if buttons:
             elements.append({"tag": "hr"})
@@ -474,6 +510,15 @@ _token_lock = asyncio.Lock()
 
 # per-pet compress lock (prevents concurrent compression for the same pet)
 _compress_locks: dict[int, asyncio.Lock] = {}
+
+# per-pet 卡片按钮锁：多人近乎同时点击会各自 load→改→write state_json 丢 delta，
+# 用这把锁串行同一宠物的「读 state→套 delta→写回」段。每宠物一把，不同宠物互不阻塞。
+_card_locks: dict[int, asyncio.Lock] = {}
+
+# 卡片文本日志缓冲（进程内，重启丢失可接受——state delta 点击时已同步落库）。
+# 多人点击时反馈台词逐条向下追加而不是整段刷新，靠这个缓冲攒住累积文本。
+# message_id -> {pet_id, card_keys, is_fixed, built_at, base_text, lines:[str,...]}
+_card_followup_buffer: dict[str, dict] = {}
 
 # 旁听消息不逐条落库：先攒在进程内，autonomous tick 或下一条 direct 消息到来时批量写入。
 # {pet_id: [{"content", "sender_name", "ts"}, ...]}
@@ -515,11 +560,11 @@ async def set_sys_cache(key: str, val: str, expires_in_sec: float | None = None)
 
 
 def _get_cached_user_name(open_id: str) -> str | None:
-    threshold = time.time() - 86400
+    # 名字由对话里学到（JSON 输出的 speaker_name 写入），是权威值，不设过期。
     with _db() as conn:
         row = conn.execute(
-            "SELECT name FROM user_names WHERE open_id = ? AND updated_at > ?",
-            (open_id, threshold)
+            "SELECT name FROM user_names WHERE open_id = ?",
+            (open_id,)
         ).fetchone()
     return row["name"] if row else None
 
@@ -1210,31 +1255,15 @@ async def _get_bot_open_id() -> str:
 
 
 async def _resolve_user_name(open_id: str) -> str:
-    """open_id -> 真实姓名；从 DB 缓存或飞书 API 获取，失败/没权限则使用降级姓名缓存。"""
+    """open_id -> 名字。只查 user_names 表——名字由对话里学到（宠物回复 JSON 的
+    speaker_name 字段写入），不调飞书 API。还没学到过就返回降级名（群友-后4位）
+    供本次消息使用，**不入表**；等这人在对话里报了名字就会被记下、之后自动用上。"""
     if not open_id:
         return "群友"
     cached = await get_cached_user_name(open_id)
     if cached:
         return cached
-    name = ""
-    try:
-        token = await _get_tenant_access_token()
-        r = await http.get(
-            f"{FEISHU_BASE}/contact/v3/users/{open_id}",
-            params={"user_id_type": "open_id"},
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        data = r.json()
-        if data.get("code") == 0:
-            name = (((data.get("data") or {}).get("user") or {}).get("name") or "").strip()
-        else:
-            log.info("resolve_user_name fallback (code=%s msg=%s)", data.get("code"), data.get("msg"))
-    except Exception:
-        log.exception("resolve_user_name network error for %s", open_id)
-    if not name:
-        name = f"群友-{open_id[-4:]}"
-    await set_cached_user_name(open_id, name)
-    return name
+    return f"群友-{open_id[-4:]}"
 
 
 async def _reply_text(message_id: str, text: str) -> None:
@@ -1346,7 +1375,11 @@ def _base_messages(system_content: str, history: list[dict]) -> list[dict]:
     return messages
 
 async def _call_llm_with_memory(
-    pet_id: int, user_text: str, sender_name: str = "", current_msg_id: int | None = None
+    pet_id: int,
+    user_text: str,
+    sender_name: str = "",
+    current_msg_id: int | None = None,
+    sender_open_id: str = "",
 ) -> tuple[str, dict]:
     history, current_state = await load_pet_context(pet_id)
 
@@ -1384,12 +1417,14 @@ async def _call_llm_with_memory(
     content = (resp.choices[0].message.content or "").strip()
 
     # 解析 LLM 的 JSON：失败就把 content 当 reply 兜底，state 不变
+    speaker_name = ""
     try:
         data = json.loads(content)
         reply = (data.get("reply") or "").strip()
         delta = data.get("state_delta") or {}
         if not isinstance(delta, dict):
             delta = {}
+        speaker_name = (data.get("speaker_name") or "").strip()
     except json.JSONDecodeError:
         log.warning("LLM returned non-JSON: %r", content[:200])
         reply = content
@@ -1397,6 +1432,14 @@ async def _call_llm_with_memory(
 
     if not reply:
         reply = FALLBACK_REPLIES["empty_llm"]
+
+    # 从对话里学到的名字：LLM 判断当前说话人报了名字才回填 speaker_name。
+    # 占位名（群友 / 群友-xxxx）不入表，避免把降级名当真名记住。
+    if speaker_name and sender_open_id and not speaker_name.startswith("群友"):
+        if (await get_cached_user_name(sender_open_id)) != speaker_name:
+            await set_cached_user_name(sender_open_id, speaker_name)
+            log.info("pet %d learned name from chat: %s → %s",
+                     pet_id, sender_open_id, speaker_name)
 
     new_state = _apply_delta(current_state, delta)
     new_state["last_update_ts"] = time.time()
@@ -1535,7 +1578,8 @@ async def _handle_message_event(event: dict) -> None:
     )
     try:
         reply, _ = await _call_llm_with_memory(
-            pet_id, user_text, sender_name=sender_name, current_msg_id=current_msg_id
+            pet_id, user_text, sender_name=sender_name,
+            current_msg_id=current_msg_id, sender_open_id=sender_open_id,
         )
     except Exception as e:
         log.exception("llm error")
@@ -1563,13 +1607,17 @@ def _should_tick_speak(state: dict, last_proactive_ts: float, now: float) -> str
     # 冷却
     if now - last_proactive_ts < PROACTIVE_COOLDOWN_SEC:
         return None
-    # 状态触发（按强烈度排序）
+    # 状态触发（生理急迫 hunger/mood/energy 优先，软需求 curiosity/affection 次之）
     if state["hunger"] >= HUNGER_TRIGGER:
         return PROACTIVE_TRIGGER_TEMPLATES["hunger"].format(hunger=round(state["hunger"]))
     if state["mood"] <= MOOD_TRIGGER:
         return PROACTIVE_TRIGGER_TEMPLATES["mood"].format(mood=round(state["mood"]))
     if state["energy"] <= ENERGY_TRIGGER:
         return PROACTIVE_TRIGGER_TEMPLATES["energy"].format(energy=round(state["energy"]))
+    if state["curiosity"] <= CURIOSITY_TRIGGER:
+        return PROACTIVE_TRIGGER_TEMPLATES["curiosity"].format(curiosity=round(state["curiosity"]))
+    if state["affection"] <= AFFECTION_TRIGGER:
+        return PROACTIVE_TRIGGER_TEMPLATES["affection"].format(affection=round(state["affection"]))
     # 自发：cooldown 过了 + 状态没触发 → 小概率冒个泡
     if random.random() < SPONTANEOUS_PROB:
         return PROACTIVE_TRIGGER_TEMPLATES["spontaneous"]
@@ -2079,17 +2127,82 @@ async def gm_tick(req: Request):
     return {"ok": True}
 
 
+def _rebuild_action_card(
+    pet_id: int,
+    text: str,
+    state: dict,
+    card_keys: list[str] | None,
+    is_fixed: bool,
+    built_at: int | None,
+    base_text: str,
+) -> dict:
+    """点击后带按钮重建卡片：固定卡（梦境 / 日记）保持同一组按钮，
+    动态卡（主动发言）按新 state 重挑——喂饱后投喂按钮自然消失，天然自限制。
+    透传原 built_at 让卡片时效从最初发卡那刻算起，不随点击续期；
+    透传原 base_text 让按钮 value 始终带着最初那段「宠物的话」。"""
+    if is_fixed and card_keys:
+        return _build_pet_card(
+            pet_id, text, state, action_keys=card_keys,
+            built_at=built_at, base_text=base_text,
+        )
+    return _build_pet_card(
+        pet_id, text, state, built_at=built_at, base_text=base_text
+    )
+
+
+def _compose_card_text(base_text: str, lines: list[str], pending: str = "") -> str:
+    """把卡片文本拼成「宠物的话 + 逐条向下追加的反馈台词」。
+    多人点击时新台词往下加，不覆盖前面的；pending 是当前这次点击的即时占位。"""
+    parts = [base_text] if base_text else []
+    for ln in lines:
+        parts.append(CARD_FOLLOWUP_PREFIX + ln)
+    if pending:
+        parts.append(CARD_FOLLOWUP_PREFIX + pending)
+    return "\n".join(p for p in parts if p) or "…"
+
+
+def _prune_card_followup_buffer(now: float) -> None:
+    """清掉已过期卡片的文本日志缓冲（卡片 TTL 过后不会再被点），防进程内 dict 泄漏。"""
+    if CARD_BUTTON_TTL_SEC <= 0:
+        return
+    stale = [
+        mid
+        for mid, e in _card_followup_buffer.items()
+        if isinstance(e.get("built_at"), (int, float))
+        and now - e["built_at"] >= CARD_BUTTON_TTL_SEC
+    ]
+    for mid in stale:
+        _card_followup_buffer.pop(mid, None)
+
+
+def _prune_card_click_ts(click_ts: dict, now: float) -> dict:
+    """清掉冷却窗口外的 per-user 点击时间戳（已拦不住任何人），防 dict 无界增长。
+    只保留数值型 ts，顺手丢弃老 shape 残留的非数值值。"""
+    if CARD_ACTION_COOLDOWN_SEC <= 0:
+        return {}  # 没有冷却就没什么要记的
+    return {
+        oid: ts
+        for oid, ts in click_ts.items()
+        if isinstance(ts, (int, float)) and now - ts < CARD_ACTION_COOLDOWN_SEC
+    }
+
+
 async def _card_action_followup(
-    pet_id: int, action_key: str, message_id: str, clicker_open_id: str
+    message_id: str, action_key: str, clicker_open_id: str
 ) -> None:
-    """按钮点击的后台收尾：让 LLM 生成一句有人格的反馈，回填卡片 + 写进记忆。"""
+    """单次按钮点击的后台收尾：LLM 生成一句有人格的反馈，**向下追加**到卡片文本日志
+    （不覆盖之前别人点击留下的台词），重建并 PATCH 卡片，再写进记忆。"""
     try:
+        entry = _card_followup_buffer.get(message_id)
+        if not entry:
+            return  # 卡片缓冲已不在（过期 / 重启），放弃回填
+        pet_id = entry["pet_id"]
         sender_name = (
             await _resolve_user_name(clicker_open_id) if clicker_open_id else "群友"
         )
-        text = CARD_ACTION_TEXT.get(action_key, {})
-        did = text.get("did", "和你互动了一下")
-        pending = text.get("pending", "…")
+        text_cfg = CARD_ACTION_TEXT.get(action_key, {})
+        did = text_cfg.get("did", "和你互动了一下")
+        pending = text_cfg.get("pending", "…")
 
         # 把这次照料动作记进对话历史，让 LLM 能看到上下文
         await append_message(
@@ -2104,7 +2217,9 @@ async def _card_action_followup(
         })
         messages.append({
             "role": "user",
-            "content": CARD_ACTION_REPLY_PROMPT.format(sender_name=sender_name, did=did),
+            "content": CARD_ACTION_REPLY_PROMPT.format(
+                sender_name=sender_name, did=did
+            ),
         })
 
         reaction = ""
@@ -2122,9 +2237,23 @@ async def _card_action_followup(
             reaction = pending
 
         await append_message(pet_id, "assistant", reaction)
+
+        # 把反馈台词向下追加进卡片文本日志（多人点击逐条累积，不整段刷新），重建并 PATCH
+        entry = _card_followup_buffer.get(message_id)
+        if not entry:
+            return
+        entry["lines"].append(reaction)
+        if CARD_LOG_MAX_LINES > 0:
+            del entry["lines"][:-CARD_LOG_MAX_LINES]
         new_state = await load_pet_state(pet_id)
+        display = _compose_card_text(entry["base_text"], entry["lines"])
         await _update_card_message(
-            message_id, _build_pet_card(pet_id, reaction, new_state, with_actions=False)
+            message_id,
+            _rebuild_action_card(
+                pet_id, display, new_state,
+                entry.get("card_keys"), bool(entry.get("is_fixed")),
+                entry.get("built_at"), entry["base_text"],
+            ),
         )
 
         if (await count_unsummarized(pet_id)) > COMPRESS_THRESHOLD:
@@ -2135,7 +2264,8 @@ async def _card_action_followup(
 
 async def _handle_card_action(event: dict, event_id: str | None) -> dict:
     """处理卡片按钮点击（card.action.trigger）：套确定性 delta、原地刷新卡片。
-    必须在 ~3s 内同步返回更新后的卡片；有人格的反馈台词由后台异步回填。"""
+    必须在 ~3s 内同步返回更新后的卡片；点击后保留按钮让群里其他人继续参与，
+    有人格的反馈台词由后台异步生成、逐条向下追加进卡片文本日志（不整段刷新）。"""
     try:
         action = event.get("action") or {}
         value = action.get("value") or {}
@@ -2149,6 +2279,10 @@ async def _handle_card_action(event: dict, event_id: str | None) -> dict:
         except (TypeError, ValueError):
             pet_id = None
         action_key = value.get("action")
+        card_keys = value.get("keys")
+        is_fixed = bool(value.get("fixed"))
+        built_at = value.get("built_at")
+        base_text = value.get("base") or ""
         context = event.get("context") or {}
         message_id = context.get("open_message_id")
         operator = event.get("operator") or {}
@@ -2157,38 +2291,68 @@ async def _handle_card_action(event: dict, event_id: str | None) -> dict:
         if pet_id is None or action_key not in CARD_ACTIONS:
             return {"toast": {"type": "error", "content": "这个按钮点不动了…"}}
 
-        try:
-            state = await load_pet_state(pet_id)
-        except ValueError:
-            return {"toast": {"type": "error", "content": "找不到我了…"}}
+        now = time.time()
+
+        # 卡片时效：超过 TTL 的卡片按钮失效，只回 toast，不碰 DB、不重建卡。
+        # built_at 缺失 = 本次部署前发出的老卡，视为未过期，老卡仍可用。
+        if (
+            CARD_BUTTON_TTL_SEC > 0
+            and isinstance(built_at, (int, float))
+            and now - built_at >= CARD_BUTTON_TTL_SEC
+        ):
+            return {"toast": {"type": "info", "content": CARD_TOAST_EXPIRED}}
 
         # 幂等：飞书重试同一 event_id 不重复套 delta（按钮 delta 是确定性的，重复会翻倍）
         if event_id and await check_and_register_event(event_id):
             return {}
 
-        # 动作冷却：冷却中只回 toast，不改 state、不动卡片
-        now = time.time()
-        action_ts = dict(state.get("card_action_ts") or {})
-        last_ts = float(action_ts.get(action_key, 0.0))
-        if CARD_ACTION_COOLDOWN_SEC > 0 and now - last_ts < CARD_ACTION_COOLDOWN_SEC:
-            return {"toast": {"type": "info", "content": CARD_TOAST_COOLDOWN}}
+        # 读 state→套 delta→写回：用 per-pet 锁串行，挡住多人同时点击丢 delta
+        lock = _card_locks.setdefault(pet_id, asyncio.Lock())
+        async with lock:
+            try:
+                state = await load_pet_state(pet_id)
+            except ValueError:
+                return {"toast": {"type": "error", "content": "找不到我了…"}}
 
-        # 套确定性 delta（不经过 LLM），写回 state
-        delta = CARD_ACTIONS[action_key].get("delta") or {}
-        new_state = _apply_card_delta(state, delta)
-        action_ts[action_key] = now
-        new_state["card_action_ts"] = action_ts
-        new_state["last_update_ts"] = now
-        await update_pet_state(pet_id, new_state)
+            # per-user 点击冷却：同一个人点过任意按钮后，冷却内不能再点（任何按钮）——
+            # 卡片是给「多人一起照料」的，不是给一个人连点的；不同人各自独立。
+            click_ts = dict(state.get("card_action_ts") or {})
+            raw_last = click_ts.get(clicker_open_id)
+            last_ts = float(raw_last) if isinstance(raw_last, (int, float)) else 0.0
+            if CARD_ACTION_COOLDOWN_SEC > 0 and now - last_ts < CARD_ACTION_COOLDOWN_SEC:
+                return {"toast": {"type": "info", "content": CARD_TOAST_COOLDOWN}}
+
+            # 套确定性 delta（不经过 LLM），写回 state
+            delta = CARD_ACTIONS[action_key].get("delta") or {}
+            new_state = _apply_card_delta(state, delta)
+            click_ts[clicker_open_id] = now
+            new_state["card_action_ts"] = _prune_card_click_ts(click_ts, now)
+            new_state["last_update_ts"] = now
+            await update_pet_state(pet_id, new_state)
 
         pending = CARD_ACTION_TEXT.get(action_key, {}).get("pending", "…")
-        # 点过之后不再带按钮：这张卡片变成结果快照，避免按钮随状态轮换被无限点。
-        card = _build_pet_card(pet_id, pending, new_state, with_actions=False)
-
-        # 后台异步生成有人格的反馈台词，回填卡片
+        # 点击后保留按钮（动态卡按新 state 重挑 / 固定卡保持），让群里其他人继续照料。
         if message_id:
+            # 文本日志缓冲：首次点击用按钮 value 里的 base_text 引导，后续点击累积台词。
+            entry = _card_followup_buffer.setdefault(message_id, {
+                "pet_id": pet_id, "card_keys": card_keys, "is_fixed": is_fixed,
+                "built_at": built_at, "base_text": base_text, "lines": [],
+            })
+            base = entry["base_text"]
+            # 即时回显：宠物的话 + 已累积的台词 + 这次点击的 pending 占位
+            display = _compose_card_text(base, entry["lines"], pending)
+            card = _rebuild_action_card(
+                pet_id, display, new_state, card_keys, is_fixed, built_at, base
+            )
+            # 后台异步生成这次点击的有人格反馈，向下追加到文本日志
             asyncio.create_task(
-                _card_action_followup(pet_id, action_key, message_id, clicker_open_id)
+                _card_action_followup(message_id, action_key, clicker_open_id)
+            )
+            _prune_card_followup_buffer(now)
+        else:
+            # 理论上不会发生（卡片点击必有 message_id）：退化成单段，不带文本日志
+            card = _rebuild_action_card(
+                pet_id, pending, new_state, card_keys, is_fixed, built_at, base_text
             )
 
         log.info(
