@@ -153,6 +153,14 @@ hour = 10
 state_key = "last_dream_date"
 instruction = "把昨晚像梦一样闪过的回忆讲给群友听，柔软、含糊、像刚睡醒。"
 card_action = "goodmorning"
+# gen_image = true：这条定时事件会额外生成一张梦境插图（梦境专属，需配置 IMAGE_MODEL）。
+gen_image = true
+# extra_prompt 只追加在梦境这条事件上，覆盖上面模板里的字数要求。
+extra_prompt = """
+【这次特殊】这条梦境会配一张「梦里画面」的插图，所以：
+- reply 只写一两句话（30-60 字），像刚睡醒嘟囔的一句梦话，不要写满 150 字。
+- 额外输出一个 image_prompt 字段：用具体的画面语言描述这个梦的场景（光线、颜色、主体、氛围、画风），50-120 字，只给绘图模型看，不会发到群里。
+照常输出 JSON，形如 {"reply": "...", "image_prompt": "...", "state_delta": {...}}。"""
 
 [[scheduled_events]]
 kind = "diary"

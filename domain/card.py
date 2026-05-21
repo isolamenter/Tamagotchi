@@ -69,6 +69,7 @@ class CardDomain:
         action_keys: list[str] | None = None,
         built_at: int | None = None,
         base_text: str | None = None,
+        img_key: str | None = None,
     ) -> dict:
         import time
 
@@ -78,6 +79,14 @@ class CardDomain:
             base_text = text
         is_fixed = action_keys is not None
         elements: list[dict] = [{"tag": "markdown", "content": text or "…"}]
+        if img_key:
+            elements.append(
+                {
+                    "tag": "img",
+                    "img_key": img_key,
+                    "alt": {"tag": "plain_text", "content": ""},
+                }
+            )
         bars = self.render_state_bars(state)
         if bars:
             elements.append({"tag": "hr"})
@@ -99,6 +108,7 @@ class CardDomain:
                             "fixed": is_fixed,
                             "built_at": built_at,
                             "base": base_text,
+                            "img_key": img_key,
                         },
                     }
                 )
@@ -116,6 +126,7 @@ class CardDomain:
         is_fixed: bool,
         built_at: int | None,
         base_text: str,
+        img_key: str | None = None,
     ) -> dict:
         if is_fixed and card_keys:
             return self.build_pet_card(
@@ -125,9 +136,10 @@ class CardDomain:
                 action_keys=card_keys,
                 built_at=built_at,
                 base_text=base_text,
+                img_key=img_key,
             )
         return self.build_pet_card(
-            pet_id, text, state, built_at=built_at, base_text=base_text
+            pet_id, text, state, built_at=built_at, base_text=base_text, img_key=img_key
         )
 
     def compose_card_text(self, base_text: str, lines: list[str], pending: str = "") -> str:

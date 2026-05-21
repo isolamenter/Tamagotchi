@@ -136,6 +136,9 @@ card_log_max_lines = 6
 max_buttons = 3
 # 所有状态维度都在中段（宠物没有明显需求）时，兜底随机挑这些按钮里的，保证卡片总有东西可点。
 default_actions = ["play", "pet"]
+# 梦境插图：调图像模型生成一张图的超时（秒）。需在 .env 配 IMAGE_MODEL 才会生成；
+# 生成 / 上传任一步失败都会安静回退成纯文字梦境卡。
+image_timeout_sec = 120
 
 # 每个互动按钮的运行数值。展示文案（按钮名 / 反馈语）在 prompts.toml [card]。
 # need_dim + need_side 决定按钮何时浮现：该维度进入对应方向的非中段档位才显示。

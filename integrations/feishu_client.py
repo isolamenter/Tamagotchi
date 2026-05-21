@@ -119,6 +119,20 @@ class FeishuClient:
             log.error("send failed: %s", data)
             raise RuntimeError(f"feishu send failed: {data}")
 
+    async def upload_image(self, image_bytes: bytes) -> str | None:
+        token = await self.get_tenant_access_token()
+        resp = await self.http.post(
+            f"{self.config.feishu_base}/im/v1/images",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"image_type": "message"},
+            files={"image": ("pet.png", image_bytes, "image/png")},
+        )
+        data = resp.json()
+        if data.get("code") != 0:
+            log.error("upload image failed: %s", data)
+            return None
+        return (data.get("data") or {}).get("image_key")
+
     async def send_card(self, chat_id: str, card: dict) -> None:
         token = await self.get_tenant_access_token()
         resp = await self.http.post(

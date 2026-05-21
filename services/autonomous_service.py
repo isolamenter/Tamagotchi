@@ -99,6 +99,7 @@ class AutonomousService:
         extra_state: dict | None = None,
         as_card: bool = False,
         card_actions: list[str] | None = None,
+        gen_image: bool = False,
     ) -> tuple[str, dict] | None:
         history, current_state = await self.pet_repo.load_pet_context(pet_id)
 
@@ -129,6 +130,7 @@ class AutonomousService:
         try:
             data = json.loads(content)
             reply = (data.get("reply") or "").strip()
+            image_prompt = (data.get("image_prompt") or "").strip()
             delta = data.get("state_delta") or {}
             if not isinstance(delta, dict):
                 delta = {}
@@ -148,11 +150,20 @@ class AutonomousService:
         if extra_state:
             new_state.update(extra_state)
 
+        img_key: str | None = None
+        if gen_image and self.config.image_model:
+            try:
+                image_bytes = await self.llm.generate_image(image_prompt or reply)
+                if image_bytes:
+                    img_key = await self.feishu.upload_image(image_bytes)
+            except Exception:
+                log.exception("dream image pipeline failed for pet %d", pet_id)
+
         if as_card and self.config.card_enabled:
             await self.feishu.send_card(
                 chat_id,
                 self.card_domain.build_pet_card(
-                    pet_id, reply, new_state, action_keys=card_actions
+                    pet_id, reply, new_state, action_keys=card_actions, img_key=img_key
                 ),
             )
         else:
@@ -194,20 +205,25 @@ class AutonomousService:
         mark_date: bool = True,
     ) -> tuple[str, dict] | None:
         action = event.get("card_action")
+        prompt = self.config.scheduled_event_prompt.format(
+            event_name=event["name"],
+            scheduled_hour=event["hour"],
+            instruction=event["instruction"],
+        )
+        extra_prompt = (event.get("extra_prompt") or "").strip()
+        if extra_prompt:
+            prompt = prompt + "\n" + extra_prompt
         return await self.autonomous_speak(
             pet_id,
             chat_id,
-            self.config.scheduled_event_prompt.format(
-                event_name=event["name"],
-                scheduled_hour=event["hour"],
-                instruction=event["instruction"],
-            ),
+            prompt,
             self.config.scheduled_user_stub_template.format(event_name=event["name"]),
             f"SCHEDULED {event['kind']} date={date_key}",
             max_tokens=self.config.scheduled_max_tokens,
             extra_state={event["state_key"]: date_key} if mark_date else None,
             as_card=True,
             card_actions=[action] if action else [],
+            gen_image=bool(event.get("gen_image")),
         )
 
     async def tick_all_pets(self) -> None:

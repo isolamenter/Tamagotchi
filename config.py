@@ -21,6 +21,7 @@ class AppConfig:
     openai_api_key: str
     model_name: str
     embed_model: str
+    image_model: str
     db_path: Path
     feishu_base: str
 
@@ -103,6 +104,7 @@ class AppConfig:
     card_bar_labels: dict
     card_action_text: dict
     card_action_reply_prompt: str
+    card_image_timeout_sec: int
 
 
 def _load_toml(path: Path) -> dict:
@@ -181,6 +183,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         openai_api_key=env["OPENAI_API_KEY"],
         model_name=env.get("MODEL_NAME", "gpt-4o-mini"),
         embed_model=env.get("EMBED_MODEL", "text-embedding-3-small"),
+        image_model=env.get("IMAGE_MODEL", ""),
         db_path=Path(env.get("STATE_DB", "state.db")),
         feishu_base="https://open.feishu.cn/open-apis",
         prompts=prompts,
@@ -257,4 +260,5 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         card_bar_labels=card_bars,
         card_action_text={k: dict(v) for k, v in card_prompts.get("actions", {}).items()},
         card_action_reply_prompt=card_prompts.get("action_reply", {}).get("prompt", ""),
+        card_image_timeout_sec=int(card_config.get("image_timeout_sec", 120)),
     )

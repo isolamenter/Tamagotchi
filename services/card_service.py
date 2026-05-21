@@ -127,6 +127,7 @@ class CardService:
                     bool(entry.get("is_fixed")),
                     entry.get("built_at"),
                     entry["base_text"],
+                    entry.get("img_key"),
                 ),
             )
 
@@ -153,6 +154,7 @@ class CardService:
             is_fixed = bool(value.get("fixed"))
             built_at = value.get("built_at")
             base_text = value.get("base") or ""
+            img_key = value.get("img_key") or None
             context = event.get("context") or {}
             message_id = context.get("open_message_id")
             operator = event.get("operator") or {}
@@ -212,6 +214,7 @@ class CardService:
                         "is_fixed": is_fixed,
                         "built_at": built_at,
                         "base_text": base_text,
+                        "img_key": img_key,
                         "lines": [],
                     },
                 )
@@ -220,7 +223,8 @@ class CardService:
                     base, entry["lines"], pending
                 )
                 card = self.card_domain.rebuild_action_card(
-                    pet_id, display, new_state, card_keys, is_fixed, built_at, base
+                    pet_id, display, new_state, card_keys, is_fixed, built_at, base,
+                    entry.get("img_key"),
                 )
                 asyncio.create_task(
                     self.card_action_followup(message_id, action_key, clicker_open_id)
@@ -230,7 +234,8 @@ class CardService:
                 )
             else:
                 card = self.card_domain.rebuild_action_card(
-                    pet_id, pending, new_state, card_keys, is_fixed, built_at, base_text
+                    pet_id, pending, new_state, card_keys, is_fixed, built_at, base_text,
+                    img_key,
                 )
 
             log.info(
