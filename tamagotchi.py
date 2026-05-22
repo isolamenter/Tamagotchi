@@ -19,7 +19,7 @@ from repositories.message_repo import MessageRepository
 from repositories.pet_repo import PetRepository
 from repositories.sqlite import Database
 from repositories.system_repo import SystemRepository
-from routes import feishu, gm, health
+from routes import feishu, gm, health, web
 from runtime import RuntimeState
 from services.autonomous_service import AutonomousService
 from services.card_service import CardService
@@ -183,6 +183,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     fastapi_app.state.container = container
     fastapi_app.include_router(health.router)
     fastapi_app.include_router(gm.router)
+    fastapi_app.include_router(web.router)
     fastapi_app.include_router(feishu.router)
     return fastapi_app
 

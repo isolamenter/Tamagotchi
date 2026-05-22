@@ -94,7 +94,7 @@ low = 20
 # 心跳间隔（测试期 1 min；生产建议 600）。
 tick_interval_sec = 600
 # 普通主动发言冷却（测试期 0；生产建议 14400，即 4h）。
-cooldown_sec = 600
+cooldown_sec = 3600
 # 静默时段用的本地时区偏移（默认上海 +8）。
 timezone_offset_hours = 8.0
 # 休息时段：本地时间落在此区间内不普通主动发言。支持跨午夜（start > end）。
@@ -102,7 +102,7 @@ timezone_offset_hours = 8.0
 quiet_start_hour = 19
 quiet_end_hour = 10
 # 状态没触发时，每 tick 自发说话的概率。
-spontaneous_prob = 0.10
+spontaneous_prob = 0.50
 
 [autonomous.trigger_thresholds]
 # hunger >= 此值 -> 主动抱怨饿。

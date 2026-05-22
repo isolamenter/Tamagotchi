@@ -49,11 +49,11 @@ class AutonomousService:
         self.llm = llm
 
     def should_tick_speak(
-        self, state: dict, last_proactive_ts: float, now: float
+        self, state: dict, last_active_ts: float, now: float
     ) -> str | None:
         if self.state_domain.in_quiet_hours(now):
             return None
-        if now - last_proactive_ts < self.config.proactive_cooldown_sec:
+        if now - last_active_ts < self.config.proactive_cooldown_sec:
             return None
         if state["hunger"] >= self.config.hunger_trigger:
             return self.config.proactive_trigger_templates["hunger"].format(
@@ -226,6 +226,31 @@ class AutonomousService:
             gen_image=bool(event.get("gen_image")),
         )
 
+    async def tick_pet(
+        self,
+        pet_id: int,
+        chat_id: str,
+        current: dict | None = None,
+        now: float | None = None,
+    ) -> bool:
+        now = time.time() if now is None else now
+        if current is None:
+            current = await self.pet_repo.load_pet_state(pet_id)
+        scheduled = self.scheduled_event_due(current, now)
+        if scheduled is not None:
+            event, date_key = scheduled
+            await self.scheduled_speak(pet_id, chat_id, event, date_key)
+            return True
+        last_active_ts = max(
+            float(current.get("last_proactive_ts", 0) or 0),
+            float(current.get("last_reply_ts", 0) or 0),
+        )
+        trigger = self.should_tick_speak(current, last_active_ts, now)
+        if trigger is None:
+            return False
+        await self.proactive_speak(pet_id, chat_id, trigger)
+        return True
+
     async def tick_all_pets(self) -> None:
         try:
             await self.system_repo.clean_old_events()
@@ -241,22 +266,10 @@ class AutonomousService:
             chat_id = row["chat_id"]
             stored = self.pet_repo.decode_state(row["state_json"])
             current = self.state_domain.decay_state(stored, now, pet_id)
-            scheduled = self.scheduled_event_due(current, now)
-            if scheduled is not None:
-                event, date_key = scheduled
-                try:
-                    await self.scheduled_speak(pet_id, chat_id, event, date_key)
-                except Exception:
-                    log.exception("scheduled speak failed for pet %d", pet_id)
-                continue
-            last_proactive_ts = float(stored.get("last_proactive_ts", 0))
-            trigger = self.should_tick_speak(current, last_proactive_ts, now)
-            if trigger is None:
-                continue
             try:
-                await self.proactive_speak(pet_id, chat_id, trigger)
+                await self.tick_pet(pet_id, chat_id, current=current, now=now)
             except Exception:
-                log.exception("proactive speak failed for pet %d", pet_id)
+                log.exception("tick failed for pet %d", pet_id)
 
     async def run_loop(self) -> None:
         log.info(

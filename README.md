@@ -16,6 +16,7 @@
 - **状态系统：hunger / mood / energy / curiosity / affection 五维 + 每日 vibe 词；中段不渲染，只在极端档给一句模糊感受。LLM 走 JSON 结构化输出同时返回 reply + 多维 state_delta**
 - **主动发言：进程内常驻 asyncio 心跳，宠物会按固定时刻写日记 / 说梦境，也会按状态在群里冒泡（饿了 / 心情差 / 困了 / 小概率自发）**
 - **交互卡片：主动发言以飞书消息卡片呈现，底部带五维状态进度条 + 按当前状态动态浮现的互动按钮（投喂 / 哄睡 / 摸摸头…）；按钮点击套确定性状态变化，不经过 LLM**
+- **Web 可视化面板：`/web` 单页面板，展示宠物列表、五维状态进度条、今日 vibe、记忆卡片与消息时间线，每 15 秒自动刷新**
 - LLM 走 OpenAI 兼容 API（适配 OpenAI / NewApi / 各类代理网关）
 - AES 加密回调可选支持
 - 飞书要求 3s 内响应，长任务自动走 `BackgroundTasks` 异步
@@ -253,34 +254,38 @@ GM 只走 HTTP，不会通过飞书群消息触发。所有接口都需要 `?tok
 
 ```bash
 # 查看命令
-curl 'https://tamagotchi.isolamenter.com/gm/help?token=TOKEN'
+curl 'https://<your-domain>/gm/help?token=TOKEN'
 
 # 列出当前宠物，拿 chat_id / pet_id
-curl 'https://tamagotchi.isolamenter.com/gm/pets?token=TOKEN'
+curl 'https://<your-domain>/gm/pets?token=TOKEN'
 
 # 设置状态
-curl -X POST 'https://tamagotchi.isolamenter.com/gm/state?token=TOKEN' \
+curl -X POST 'https://<your-domain>/gm/state?token=TOKEN' \
   -H 'Content-Type: application/json' \
   -d '{"chat_id":"oc_xxx","set":{"hunger":90,"mood":20,"energy":15}}'
 
 # 对状态做增量
-curl -X POST 'https://tamagotchi.isolamenter.com/gm/state?token=TOKEN' \
+curl -X POST 'https://<your-domain>/gm/state?token=TOKEN' \
   -H 'Content-Type: application/json' \
   -d '{"chat_id":"oc_xxx","delta":{"hunger":10,"mood":-5}}'
 
 # 手动主动说话 / 梦境 / 日记
-curl -X POST 'https://tamagotchi.isolamenter.com/gm/speak?token=TOKEN' \
+curl -X POST 'https://<your-domain>/gm/speak?token=TOKEN' \
   -H 'Content-Type: application/json' \
   -d '{"chat_id":"oc_xxx","trigger":"GM 手动测试：现在主动冒泡"}'
-curl -X POST 'https://tamagotchi.isolamenter.com/gm/dream?token=TOKEN' \
+curl -X POST 'https://<your-domain>/gm/dream?token=TOKEN' \
   -H 'Content-Type: application/json' \
   -d '{"chat_id":"oc_xxx"}'
-curl -X POST 'https://tamagotchi.isolamenter.com/gm/diary?token=TOKEN' \
+curl -X POST 'https://<your-domain>/gm/diary?token=TOKEN' \
   -H 'Content-Type: application/json' \
   -d '{"chat_id":"oc_xxx"}'
 ```
 
 `/gm/dream` 和 `/gm/diary` 默认不写每日去重字段，适合反复测试；传 `{"mark": true}` 才会标记当天已发。
+
+## 📊 Web 可视化面板
+
+浏览器打开 `https://<your-domain>/web?token=TOKEN`,得到一个单页面板:宠物列表下拉、五维状态进度条（`hunger` 反转成「饱腹度」,满 = 好）、今日 vibe、记忆卡片列表、最近消息时间线,每 15 秒自动刷新;鉴权同 GM（`GM_TOKEN`,留空复用 `FEISHU_VERIFICATION_TOKEN`）。面板还能直接做 GM 操作:改五维数值并保存、重抽 vibe、手动触发主动发言 / 梦境 / 日记 / tick——全部走现有 GM 接口,无额外后端。
 
 ## 📄 License
 

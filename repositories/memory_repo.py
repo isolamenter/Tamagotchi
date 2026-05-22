@@ -94,6 +94,29 @@ class MemoryRepository:
     async def recent_cards(self, pet_id: int, n: int) -> list[dict]:
         return await asyncio.to_thread(self._recent_cards, pet_id, n)
 
+    def _list_cards(self, pet_id: int, limit: int) -> list[dict]:
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT id, when_text, who, what, vibe, hooks, created_at "
+                "FROM memory_cards WHERE pet_id = ? ORDER BY id DESC LIMIT ?",
+                (pet_id, limit),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "when": row["when_text"],
+                "who": row["who"],
+                "what": row["what"],
+                "vibe": row["vibe"],
+                "hooks": row["hooks"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    async def list_cards(self, pet_id: int, limit: int) -> list[dict]:
+        return await asyncio.to_thread(self._list_cards, pet_id, limit)
+
     def _get_compress_context(self, pet_id: int) -> tuple[int, int, float, list[dict]]:
         with self.db.connect() as conn:
             pet_row = conn.execute(

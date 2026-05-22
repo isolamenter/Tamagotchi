@@ -88,7 +88,10 @@ async def gm_help(req: Request):
             "POST /gm/speak": "force proactive speech; json: {chat_id|pet_id,trigger?}",
             "POST /gm/dream": "force dream; json: {chat_id|pet_id,mark?}",
             "POST /gm/diary": "force diary; json: {chat_id|pet_id,mark?}",
-            "POST /gm/tick": "run one autonomous tick for all pets",
+            "POST /gm/tick": "run one autonomous tick; json: {chat_id|pet_id?} — omit for all pets",
+            "GET /gm/cards": "list memory cards; query: chat_id or pet_id, limit?",
+            "GET /gm/messages": "list recent messages; query: chat_id or pet_id, limit?",
+            "GET /web": "html dashboard; open /web?token=...",
         },
     }
 
@@ -116,7 +119,51 @@ async def gm_pets(req: Request):
                 "state": container.state_domain.public_state(state),
             }
         )
-    return {"pets": pets}
+    return {
+        "pets": pets,
+        "numeric_keys": list(container.config.state_numeric_keys),
+        "bar_labels": dict(container.config.card_bar_labels),
+    }
+
+
+@router.get("/gm/cards")
+async def gm_cards(req: Request):
+    auth = _gm_auth(req)
+    if auth:
+        return auth
+    pet_id_param = req.query_params.get("pet_id")
+    resolved = await _gm_resolve_pet(
+        req,
+        chat_id=req.query_params.get("chat_id"),
+        pet_id=int(pet_id_param) if pet_id_param else None,
+    )
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    pet_id, chat_id = resolved
+    limit_param = req.query_params.get("limit")
+    limit = max(1, min(200, int(limit_param))) if limit_param else 50
+    cards = await _container(req).memory_repo.list_cards(pet_id, limit)
+    return {"pet_id": pet_id, "chat_id": chat_id, "cards": cards}
+
+
+@router.get("/gm/messages")
+async def gm_messages(req: Request):
+    auth = _gm_auth(req)
+    if auth:
+        return auth
+    pet_id_param = req.query_params.get("pet_id")
+    resolved = await _gm_resolve_pet(
+        req,
+        chat_id=req.query_params.get("chat_id"),
+        pet_id=int(pet_id_param) if pet_id_param else None,
+    )
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    pet_id, chat_id = resolved
+    limit_param = req.query_params.get("limit")
+    limit = max(1, min(200, int(limit_param))) if limit_param else 50
+    messages = await _container(req).message_repo.recent_messages(pet_id, limit)
+    return {"pet_id": pet_id, "chat_id": chat_id, "messages": messages}
 
 
 @router.get("/gm/state")
@@ -184,8 +231,9 @@ async def gm_set_state(req: Request):
         rv = str(rv_payload).strip()
         if rv.lower() == "random" and container.config.recent_vibe_pool:
             rv = random.choice(container.config.recent_vibe_pool)
+        date_key, _ = container.state_domain.local_date_hour(time.time())
         state["recent_vibe"] = rv
-        state["recent_vibe_date"] = ""
+        state["recent_vibe_date"] = date_key
         changed["recent_vibe"] = rv
     state["last_update_ts"] = time.time()
     await container.pet_repo.update_pet_state(pet_id, state)
@@ -284,6 +332,21 @@ async def gm_tick(req: Request):
     auth = _gm_auth(req)
     if auth:
         return auth
-    await _container(req).services.autonomous.tick_all_pets()
-    return {"ok": True}
+    container = _container(req)
+    body = await _gm_body(req)
+    pet_id_param = body.get("pet_id") or req.query_params.get("pet_id")
+    chat_id_param = body.get("chat_id") or req.query_params.get("chat_id")
+    if not pet_id_param and not chat_id_param:
+        await container.services.autonomous.tick_all_pets()
+        return {"ok": True, "scope": "all"}
+    resolved = await _gm_resolve_pet(
+        req,
+        chat_id=chat_id_param,
+        pet_id=int(pet_id_param) if pet_id_param else None,
+    )
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    pet_id, chat_id = resolved
+    spoke = await container.services.autonomous.tick_pet(pet_id, chat_id)
+    return {"ok": True, "scope": "pet", "pet_id": pet_id, "chat_id": chat_id, "spoke": spoke}
 
