@@ -52,8 +52,17 @@ class PetRepository:
                 "SELECT summary_until_id, state_json FROM pets WHERE id = ?", (pet_id,)
             ).fetchone()
             msg_rows = conn.execute(
-                "SELECT id, role, content, sender_name, is_observer FROM messages "
-                "WHERE pet_id = ? AND id > ? ORDER BY id",
+                "SELECT m.id, m.role, m.content, m.is_observer, "
+                "COALESCE("
+                "  u.name,"
+                "  CASE WHEN m.sender_open_id != ''"
+                "       THEN '群友-' || substr(m.sender_open_id, -4)"
+                "       ELSE m.sender_name END"
+                ") AS sender_name "
+                "FROM messages m "
+                "LEFT JOIN user_names u "
+                "  ON u.open_id = m.sender_open_id AND m.sender_open_id != '' "
+                "WHERE m.pet_id = ? AND m.id > ? ORDER BY m.id",
                 (pet_id, pet_row["summary_until_id"]),
             ).fetchall()
         history = [

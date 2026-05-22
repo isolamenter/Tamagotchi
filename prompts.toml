@@ -177,6 +177,8 @@ empty_llm = "...(脑袋一片空白)..."
 llm_error_template = "脑袋短路了...({error_class})"
 # 休息时段里被 @ / 私聊时回的固定文案（不调 LLM）。
 quiet_hours = "Zzz……（蜷成一团，没醒）现在是休息时间，明早再找我玩吧~"
+# 成功学到群友名字后追发的固定确认消息（不调 LLM）。
+name_learned = "（叮~）记住啦，以后就叫你「{name}」啦~"
 
 [gm]
 default_speak_trigger = "GM 手动触发：测试普通主动发言"

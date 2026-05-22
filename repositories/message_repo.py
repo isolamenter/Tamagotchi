@@ -17,12 +17,22 @@ class MessageRepository:
         content: str,
         sender_name: str = "",
         is_observer: bool = False,
+        sender_open_id: str = "",
     ) -> int:
         with self.db.connect() as conn:
             cur = conn.execute(
-                "INSERT INTO messages (pet_id, role, content, ts, sender_name, is_observer) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (pet_id, role, content, time.time(), sender_name, 1 if is_observer else 0),
+                "INSERT INTO messages "
+                "(pet_id, role, content, ts, sender_name, sender_open_id, is_observer) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    pet_id,
+                    role,
+                    content,
+                    time.time(),
+                    sender_name,
+                    sender_open_id,
+                    1 if is_observer else 0,
+                ),
             )
             return int(cur.lastrowid)
 
@@ -33,17 +43,34 @@ class MessageRepository:
         content: str,
         sender_name: str = "",
         is_observer: bool = False,
+        sender_open_id: str = "",
     ) -> int:
         return await asyncio.to_thread(
-            self._append_message, pet_id, role, content, sender_name, is_observer
+            self._append_message,
+            pet_id,
+            role,
+            content,
+            sender_name,
+            is_observer,
+            sender_open_id,
         )
 
     def _append_observer_batch(self, pet_id: int, items: list[dict]) -> None:
         with self.db.connect() as conn:
             conn.executemany(
-                "INSERT INTO messages (pet_id, role, content, ts, sender_name, is_observer) "
-                "VALUES (?, 'user', ?, ?, ?, 1)",
-                [(pet_id, item["content"], item["ts"], item["sender_name"]) for item in items],
+                "INSERT INTO messages "
+                "(pet_id, role, content, ts, sender_name, sender_open_id, is_observer) "
+                "VALUES (?, 'user', ?, ?, ?, ?, 1)",
+                [
+                    (
+                        pet_id,
+                        item["content"],
+                        item["ts"],
+                        item["sender_name"],
+                        item.get("open_id", ""),
+                    )
+                    for item in items
+                ],
             )
 
     async def append_observer_batch(self, pet_id: int, items: list[dict]) -> None:

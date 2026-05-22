@@ -62,7 +62,7 @@ class ReplyService:
         sender_name: str = "",
         current_msg_id: int | None = None,
         sender_open_id: str = "",
-    ) -> tuple[str, dict]:
+    ) -> tuple[str, dict, str]:
         history, current_state = await self.pet_repo.load_pet_context(pet_id)
 
         recall_block = await self.memory_service.build_recall_block(
@@ -110,9 +110,16 @@ class ReplyService:
         if not reply:
             reply = self.config.fallback_replies["empty_llm"]
 
-        if speaker_name and sender_open_id and not speaker_name.startswith("群友"):
+        learned_name = ""
+        if (
+            speaker_name
+            and sender_open_id
+            and not speaker_name.startswith("群友")
+            and speaker_name in user_text
+        ):
             if await self.system_repo.get_cached_user_name(sender_open_id) != speaker_name:
                 await self.system_repo.set_cached_user_name(sender_open_id, speaker_name)
+                learned_name = speaker_name
                 log.info(
                     "pet %d learned name from chat: %s -> %s",
                     pet_id,
@@ -131,7 +138,7 @@ class ReplyService:
             {key: round(new_state.get(key, 0)) for key in self.config.state_numeric_keys},
         )
 
-        return reply, new_state
+        return reply, new_state, learned_name
 
     async def mark_replied(self, pet_id: int) -> None:
         state = await self.pet_repo.load_pet_state(pet_id)
@@ -184,7 +191,14 @@ class ReplyService:
             if pet_id is None:
                 return
             buf = self.runtime.observer_buffer.setdefault(pet_id, [])
-            buf.append({"content": text, "sender_name": sender_name, "ts": time.time()})
+            buf.append(
+                {
+                    "content": text,
+                    "sender_name": sender_name,
+                    "open_id": sender_open_id,
+                    "ts": time.time(),
+                }
+            )
             log.info(
                 "pet %d buffered observer [%s]: %r (buffer=%d)",
                 pet_id,
@@ -224,7 +238,12 @@ class ReplyService:
 
         if self.state_domain.in_quiet_hours(time.time()):
             await self.message_repo.append_message(
-                pet_id, "user", user_text, sender_name=sender_name, is_observer=False
+                pet_id,
+                "user",
+                user_text,
+                sender_name=sender_name,
+                is_observer=False,
+                sender_open_id=sender_open_id,
             )
             await self.feishu.reply_text(
                 message_id, self.config.fallback_replies["quiet_hours"]
@@ -245,6 +264,7 @@ class ReplyService:
                     user_text,
                     sender_name=sender_name,
                     is_observer=False,
+                    sender_open_id=sender_open_id,
                 )
                 log.info(
                     "pet %d @ within reply cooldown (%.0fs left), recorded without reply",
@@ -256,10 +276,16 @@ class ReplyService:
             self.runtime.reply_gate[pet_id] = now
 
         current_msg_id = await self.message_repo.append_message(
-            pet_id, "user", user_text, sender_name=sender_name, is_observer=False
+            pet_id,
+            "user",
+            user_text,
+            sender_name=sender_name,
+            is_observer=False,
+            sender_open_id=sender_open_id,
         )
+        learned_name = ""
         try:
-            reply, _ = await self.call_llm_with_memory(
+            reply, _, learned_name = await self.call_llm_with_memory(
                 pet_id,
                 user_text,
                 sender_name=sender_name,
@@ -276,6 +302,12 @@ class ReplyService:
         await self.message_repo.append_message(pet_id, "assistant", reply)
         await self.feishu.reply_text(message_id, reply)
         await self.mark_replied(pet_id)
+
+        if learned_name:
+            await self.feishu.reply_text(
+                message_id,
+                self.config.fallback_replies["name_learned"].format(name=learned_name),
+            )
 
         await self._maybe_compress(pet_id)
 

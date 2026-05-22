@@ -35,6 +35,7 @@ class Database:
                     content TEXT NOT NULL,
                     ts REAL NOT NULL,
                     sender_name TEXT NOT NULL DEFAULT '',
+                    sender_open_id TEXT NOT NULL DEFAULT '',
                     is_observer INTEGER NOT NULL DEFAULT 0
                 );
 
@@ -91,6 +92,12 @@ class Database:
                 pass
             try:
                 conn.execute("ALTER TABLE pets ADD COLUMN last_compress_attempt REAL DEFAULT 0.0")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute(
+                    "ALTER TABLE messages ADD COLUMN sender_open_id TEXT NOT NULL DEFAULT ''"
+                )
             except sqlite3.OperationalError:
                 pass
 
