@@ -101,6 +101,8 @@ timezone_offset_hours = 8.0
 # 当前 19:00 休息 → 次日 10:00 起床。日记锁定在 quiet_start、梦境锁定在 quiet_end。
 quiet_start_hour = 19
 quiet_end_hour = 10
+# 周末整天也算休息时间；自动冒泡、梦境、日记都会停掉，@ 时只回睡眠文案。
+quiet_weekends = true
 # 状态没触发时，每 tick 自发说话的概率。
 spontaneous_prob = 0.50
 

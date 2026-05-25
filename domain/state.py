@@ -27,46 +27,49 @@ class StateDomain:
             "recent_vibe_date": "",
         }
 
+    def local_time(self, now_ts: float) -> time.struct_time:
+        return time.gmtime(now_ts + self.config.proactive_tz_offset_hours * 3600)
+
     def local_date_hour(self, now_ts: float) -> tuple[str, int]:
-        local = time.gmtime(now_ts + self.config.proactive_tz_offset_hours * 3600)
+        local = self.local_time(now_ts)
         return time.strftime("%Y-%m-%d", local), local.tm_hour
 
     def local_hour(self, now_ts: float) -> int:
         return self.local_date_hour(now_ts)[1]
 
-    def in_quiet_hours(self, now_ts: float) -> bool:
-        h = self.local_hour(now_ts)
+    def quiet_by_hour(self, hour: int) -> bool:
         qs, qe = self.config.quiet_hours
-        return qs <= h < qe if qs < qe else (h >= qs or h < qe)
+        return qs <= hour < qe if qs < qe else (hour >= qs or hour < qe)
+
+    def is_weekend_rest(self, now_ts: float) -> bool:
+        return self.config.quiet_weekends and self.local_time(now_ts).tm_wday >= 5
+
+    def in_quiet_hours(self, now_ts: float) -> bool:
+        local = self.local_time(now_ts)
+        return self.is_weekend_rest(now_ts) or self.quiet_by_hour(local.tm_hour)
 
     def partition_hours(self, t_start: float, t_end: float) -> tuple[float, float]:
         total_hours = (t_end - t_start) / 3600.0
         if total_hours <= 0:
             return 0.0, 0.0
 
-        qs, qe = self.config.quiet_hours
-        if qs < qe:
-            quiet_hours_per_day = float(qe - qs)
-        else:
-            quiet_hours_per_day = float((24 - qs) + qe)
-        active_hours_per_day = 24.0 - quiet_hours_per_day
-
-        days = int(total_hours // 24)
-        q_hours = days * quiet_hours_per_day
-        a_hours = days * active_hours_per_day
-
-        rem_start = t_start + days * 24 * 3600
-        step = 1.0
-        current = rem_start
+        q_hours = 0.0
+        a_hours = 0.0
+        current = t_start
+        tz_offset_sec = self.config.proactive_tz_offset_hours * 3600
         while current < t_end:
-            lh = self.local_hour(current)
-            is_quiet = qs <= lh < qe if qs < qe else (lh >= qs or lh < qe)
-            actual_step = min(step, (t_end - current) / 3600.0)
+            local = self.local_time(current)
+            seconds_into_hour = (current + tz_offset_sec) % 3600
+            step_sec = 3600 - seconds_into_hour if seconds_into_hour else 3600
+            actual_step = min(step_sec, t_end - current) / 3600.0
+            is_quiet = (
+                self.config.quiet_weekends and local.tm_wday >= 5
+            ) or self.quiet_by_hour(local.tm_hour)
             if is_quiet:
                 q_hours += actual_step
             else:
                 a_hours += actual_step
-            current += actual_step * 3600
+            current += actual_step * 3600.0
 
         return q_hours, a_hours
 
@@ -190,4 +193,3 @@ class StateDomain:
         out["last_dream_date"] = state.get("last_dream_date", "")
         out["last_diary_date"] = state.get("last_diary_date", "")
         return out
-

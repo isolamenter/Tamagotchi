@@ -7,6 +7,7 @@ from config import load_config
 from domain.card import CardDomain
 from domain.memory import MemoryDomain
 from domain.state import StateDomain
+from services.autonomous_service import AutonomousService
 
 
 def make_config(db_path: str = "state.db"):
@@ -33,6 +34,41 @@ class StateDomainTests(unittest.TestCase):
         self.assertTrue(self.state.in_quiet_hours(self.local_ts(2026, 1, 1, 20)))
         self.assertTrue(self.state.in_quiet_hours(self.local_ts(2026, 1, 2, 9)))
         self.assertFalse(self.state.in_quiet_hours(self.local_ts(2026, 1, 2, 12)))
+
+    def test_weekend_is_rest_time(self):
+        self.assertTrue(self.state.in_quiet_hours(self.local_ts(2026, 1, 3, 12)))
+        self.assertTrue(self.state.in_quiet_hours(self.local_ts(2026, 1, 4, 12)))
+        self.assertFalse(self.state.in_quiet_hours(self.local_ts(2026, 1, 5, 12)))
+
+    def test_weekend_rest_counts_as_quiet_decay_time(self):
+        q_hours, a_hours = self.state.partition_hours(
+            self.local_ts(2026, 1, 3, 10),
+            self.local_ts(2026, 1, 3, 12),
+        )
+        self.assertEqual(q_hours, 2.0)
+        self.assertEqual(a_hours, 0.0)
+
+    def test_scheduled_events_skip_weekend_rest(self):
+        service = AutonomousService(
+            self.config,
+            self.state,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        state = self.state.initial_state()
+        self.assertIsNone(
+            service.scheduled_event_due(state, self.local_ts(2026, 1, 3, 12))
+        )
+        self.assertIsNotNone(
+            service.scheduled_event_due(state, self.local_ts(2026, 1, 5, 12))
+        )
 
     def test_delta_clamp_and_band(self):
         current = {key: 50.0 for key in self.config.state_numeric_keys}
@@ -94,4 +130,3 @@ class MemoryDomainTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

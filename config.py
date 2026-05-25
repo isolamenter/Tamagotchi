@@ -77,6 +77,7 @@ class AppConfig:
     proactive_cooldown_sec: int
     proactive_tz_offset_hours: float
     quiet_hours: tuple[int, int]
+    quiet_weekends: bool
     scheduled_events: tuple[dict, ...]
     hunger_trigger: float
     mood_trigger: float
@@ -234,6 +235,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         proactive_cooldown_sec=int(autonomous_config["cooldown_sec"]),
         proactive_tz_offset_hours=float(autonomous_config["timezone_offset_hours"]),
         quiet_hours=quiet_hours,
+        quiet_weekends=bool(autonomous_config.get("quiet_weekends", False)),
         scheduled_events=scheduled_events,
         hunger_trigger=float(trigger_thresholds["hunger"]),
         mood_trigger=float(trigger_thresholds["mood"]),

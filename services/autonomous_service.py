@@ -80,6 +80,8 @@ class AutonomousService:
         return None
 
     def scheduled_event_due(self, state: dict, now: float) -> tuple[dict, str] | None:
+        if self.state_domain.is_weekend_rest(now):
+            return None
         date_key, hour = self.state_domain.local_date_hour(now)
         for event in self.config.scheduled_events:
             if hour >= event["hour"] and state.get(event["state_key"]) != date_key:
@@ -273,10 +275,11 @@ class AutonomousService:
 
     async def run_loop(self) -> None:
         log.info(
-            "autonomous_loop start tick=%ds cooldown=%ds quiet=%s tz_offset=%s",
+            "autonomous_loop start tick=%ds cooldown=%ds quiet=%s quiet_weekends=%s tz_offset=%s",
             self.config.tick_interval_sec,
             self.config.proactive_cooldown_sec,
             self.config.quiet_hours,
+            self.config.quiet_weekends,
             self.config.proactive_tz_offset_hours,
         )
         while True:
@@ -288,4 +291,3 @@ class AutonomousService:
                 raise
             except Exception:
                 log.exception("autonomous tick crashed, loop continues")
-
