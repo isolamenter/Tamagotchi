@@ -15,7 +15,7 @@
 - **长期记忆 = 事件卡片 + RAG**：消息累积后压成结构化卡片（when/who/what/vibe/hooks）+ 向量索引；回复时按相关性 + 时序双路召回，塞回 system message 当"想起的事"
 - **状态系统：hunger / mood / energy / curiosity / affection 五维 + 每日 vibe 词；中段不渲染，只在极端档给一句模糊感受。LLM 走 JSON 结构化输出同时返回 reply + 多维 state_delta**
 - **主动发言：进程内常驻 asyncio 心跳，宠物会按固定时刻写日记 / 说梦境，也会按状态在群里冒泡（饿了 / 心情差 / 困了 / 小概率自发）**
-- **交互卡片：主动发言以飞书消息卡片呈现，底部带五维状态进度条 + 按当前状态动态浮现的互动按钮（投喂 / 哄睡 / 摸摸头…）；按钮点击套确定性状态变化，不经过 LLM**
+- **交互卡片：主动发言、梦境 / 日记都以飞书消息卡片呈现，底部带五维状态进度条 + 按当前状态动态浮现的互动按钮（投喂 / 哄睡 / 摸摸头…）；按钮点击套确定性状态变化，不经过 LLM。梦境卡还会额外调图像模型生成一张插图嵌进卡里**
 - **Web 可视化面板：`/web` 单页面板，展示宠物列表、五维状态进度条、今日 vibe、记忆卡片与消息时间线，每 15 秒自动刷新**
 - LLM 走 OpenAI 兼容 API（适配 OpenAI / NewApi / 各类代理网关）
 - AES 加密回调可选支持
@@ -106,6 +106,7 @@ curl http://localhost:8000/healthz
    - `im:message.group_msg:readonly`（接收群组所有消息——含非 @ 的旁听消息；不批的话宠物只能听见 @ 它的）
    - `im:message.p2p_msg:readonly`（接收单聊消息；如果只在群里用可以不批）
    - `im:message:send_as_bot`（以机器人身份发消息）
+   - `im:resource:upload`（或 `im:resource`，**仅当配置了 `IMAGE_MODEL` 想要梦境插图时**才需要——卡片嵌图前要先 `POST /im/v1/images` 换 `image_key`。没开通时上传报 `code 99991672`，梦境卡安静退回纯文字。**改完权限要重新发布应用版本才生效**）
    - 群友姓名**不再走通讯录权限**——宠物从对话里学名字（有人报名字时回复 JSON 带回 `speaker_name`，写进 `user_names` 表），还没学到的群友降级显示 `群友-后4位`。无需 `contact:*` 权限。
 4. **事件与回调 → 事件配置**：
    - 订阅方式：**事件回调**（HTTP）
@@ -138,6 +139,7 @@ curl http://localhost:8000/healthz
 | `OPENAI_API_KEY` | API Key | ✓ |
 | `MODEL_NAME` | 模型名（如 `gpt-4o-mini`、`claude-3-5-sonnet`、`gemini-...`） | ✓ |
 | `EMBED_MODEL` | RAG 用的 embedding 模型，默认 `text-embedding-3-small` |  |
+| `IMAGE_MODEL` | 梦境插图的图像模型（如 `imagen-4.0-fast-generate-001` / `gpt-image-1` / `dall-e-3`，走 `/v1/images/generations`），留空 = 关闭插图、梦境退回纯文字卡 |  |
 | `STATE_DB` | SQLite 持久化文件路径，默认 `state.db`（相对启动目录） |  |
 | `PORT` | 服务监听端口，默认 8000 |  |
 | `GM_TOKEN` | `/gm/*` Web 调试接口 token；留空则复用 `FEISHU_VERIFICATION_TOKEN` |  |
@@ -232,19 +234,20 @@ curl http://localhost:8000/healthz
 
 ## 🎴 交互卡片
 
-**主动发言**（宠物自己冒泡）会以飞书消息卡片呈现，而不是纯文本；@ 回复、梦境 / 日记仍是纯文本。
+**主动发言**（宠物自己冒泡）、**梦境**、**日记**都会以飞书消息卡片呈现；@ 回复仍是纯文本。
 
-卡片结构：宠物的话 + 五维状态进度条 + 一排互动按钮。
+卡片结构：宠物的话（或梦/日记文本）+ 五维状态进度条 + 一排互动按钮。梦境卡额外在文字下方插一张图像模型生成的插图。
 
 - **进度条**：`hunger` 反转成「饱腹度」展示，让五条都是「满 = 好」，直觉一致
-- **按钮由状态动态决定**：哪个维度有需求就浮现对应按钮——饿了出 `🍖 投喂`、困了出 `💤 哄睡`、心情低落出 `🫧 哄一哄`、好奇心淡了出 `🎲 逗它玩`、生疏了出 `🤚 摸摸头`；全维度都中段时从 `[card].default_actions` 随机兜底，保证总有东西可点
+- **按钮由状态动态决定**（仅主动发言卡）：哪个维度有需求就浮现对应按钮——饿了出 `🍖 投喂`、困了出 `💤 哄睡`、心情低落出 `🫧 哄一哄`、好奇心淡了出 `🎲 逗它玩`、生疏了出 `🤚 摸摸头`；全维度都中段时从 `[card].default_actions` 随机兜底，保证总有东西可点。梦境 / 日记卡按钮固定（☀️ 早上好 / 🌙 晚安）
+- **梦境插图**：梦境这条 `[[scheduled_events]]` 配了 `gen_image = true`，LLM 输出短梦话同时返回 `image_prompt`；服务用它调 `IMAGE_MODEL`（`/v1/images/generations`）拿 base64 → 上传飞书拿 `image_key` → 嵌入卡片。`IMAGE_MODEL` 留空或生成 / 上传任一步失败都安静回退成纯文字梦境卡；超时在 `pet_config.toml [card].image_timeout_sec`。日记不生成图
 - **点击 = 确定性状态变化**：按钮点击套用 `pet_config.toml [card.actions.*].delta`，**不经过 LLM**，免去 LLM 判定 state 漂移的不确定性；卡片进度条原地刷新
 - **多人可参与，不是首点即焚**：点击后卡片保留按钮，群里其他人可继续照料——动态卡按新状态重挑按钮（喂饱后投喂按钮自然消失），固定卡（梦境 / 日记）保持原按钮
 - **卡片时效**：卡片发出 `[card].button_ttl_sec`（默认 30min）后按钮失效，过期点击只弹 toast 不改状态，避免昨天的梦境卡一直能点
 - **有人格的反馈逐条累积**：每次点击后台单独用 LLM 生成一句符合宠物风格的反馈台词，**向下追加**进卡片文本日志而不是整段刷新——多人点击时各自的台词逐条堆叠在卡片里（最多保留 `[card].card_log_max_lines` 条）
 - **防刷**：点击冷却是 **per-user** 的（`[card].action_cooldown_sec`）——同一个人点过任意按钮后，冷却内再点任何按钮只弹 toast，不同人各自独立；飞书重试按 `event_id` 去重，不会让状态变化翻倍；多人同时点击用 per-pet 锁串行，不丢状态变化
 
-展示文案在 `prompts.toml [card]`，运行数值（开关 / 进度条格数 / 冷却 / 时效 / 日志条数上限 / 按钮 delta）在 `pet_config.toml [card]`。`[card].enabled = false` 时主动发言退回纯文本。需要在飞书开发者后台开启「卡片回传交互」能力（见上文飞书应用配置）。
+展示文案在 `prompts.toml [card]`，运行数值（开关 / 进度条格数 / 冷却 / 时效 / 日志条数上限 / 按钮 delta / 图像超时）在 `pet_config.toml [card]`。`[card].enabled = false` 时主动发言、梦境、日记都退回纯文本。需要在飞书开发者后台开启「卡片回传交互」能力（见上文飞书应用配置）。
 
 ## 🧪 GM Web 调试接口
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import logging
-import re
 
 from openai import AsyncOpenAI
 
@@ -50,31 +49,31 @@ class LLMClient:
         return (resp.choices[0].message.content or "").strip()
 
     async def generate_image(self, prompt: str) -> bytes | None:
-        """调 Gemini 系图像模型，从返回的 markdown data URI 里解出图片字节。
+        """走 OpenAI 兼容的 /v1/images/generations 端点生成图，从 b64_json 解字节。
 
-        new-api 把生成的图塞在 chat 返回的 message.content 字符串里，
-        形如 `![image](data:image/png;base64,...)`，没有标准 images 字段。
+        适用于 imagen / gpt-image / dall-e 等纯图像生成模型；Gemini 系图像模型
+        协议不同（要走 chat.completions + modalities），这里不支持。
         """
         prompt = (prompt or "").strip()
         if not self.config.image_model or not prompt:
             return None
         try:
-            resp = await self.client.chat.completions.create(
+            resp = await self.client.images.generate(
                 model=self.config.image_model,
-                messages=[{"role": "user", "content": prompt}],
-                extra_body={"modalities": ["text", "image"]},
+                prompt=prompt,
+                n=1,
                 timeout=self.config.card_image_timeout_sec,
             )
-            content = resp.choices[0].message.content or ""
         except Exception:
             log.exception("image generation failed")
             return None
-        match = re.search(r"data:image/[^;]+;base64,([A-Za-z0-9+/=\s]+)", content)
-        if not match:
-            log.warning("image response had no data URI: %r", content[:200])
+        data = resp.data[0] if resp.data else None
+        b64 = getattr(data, "b64_json", None) if data else None
+        if not b64:
+            log.warning("image response had no b64_json: %r", resp.model_dump() if hasattr(resp, "model_dump") else resp)
             return None
         try:
-            return base64.b64decode(match.group(1).strip())
+            return base64.b64decode(b64)
         except Exception:
             log.exception("image base64 decode failed")
             return None
