@@ -14,7 +14,14 @@ router = APIRouter()
 @router.post("/feishu/webhook")
 async def feishu_webhook(req: Request, background: BackgroundTasks):
     container = req.app.state.container
-    raw = await req.json()
+    try:
+        raw = await req.json()
+    except Exception:
+        log.warning("malformed webhook body (not JSON)")
+        return JSONResponse({"code": 400}, status_code=400)
+    if not isinstance(raw, dict):
+        log.warning("webhook body is not a JSON object: %r", type(raw).__name__)
+        return JSONResponse({"code": 400}, status_code=400)
 
     if "encrypt" in raw:
         if not container.config.feishu_encrypt_key:
@@ -33,7 +40,7 @@ async def feishu_webhook(req: Request, background: BackgroundTasks):
 
     header = body.get("header") or {}
 
-    if container.config.feishu_verification_token and not hmac.compare_digest(
+    if not hmac.compare_digest(
         header.get("token") or "", container.config.feishu_verification_token
     ):
         log.warning("verification token mismatch")

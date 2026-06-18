@@ -145,12 +145,18 @@ class AutonomousService:
             return None
 
         now = time.time()
-        new_state = self.state_domain.apply_delta(current_state, delta)
-        new_state["last_update_ts"] = now
-        if set_last_proactive:
-            new_state["last_proactive_ts"] = now
-        if extra_state:
-            new_state.update(extra_state)
+
+        def _mutator(state: dict) -> dict:
+            out = self.state_domain.apply_delta(state, delta)
+            out["last_update_ts"] = now
+            if set_last_proactive:
+                out["last_proactive_ts"] = now
+            if extra_state:
+                out.update(extra_state)
+            return out
+
+        # 卡片用展示快照渲染；权威值在发送成功后经 mutate_state 落库（保持「先发后写」）。
+        display_state = _mutator(dict(current_state))
 
         img_key: str | None = None
         if gen_image and self.config.image_model:
@@ -165,14 +171,14 @@ class AutonomousService:
             await self.feishu.send_card(
                 chat_id,
                 self.card_domain.build_pet_card(
-                    pet_id, reply, new_state, action_keys=card_actions, img_key=img_key
+                    pet_id, reply, display_state, action_keys=card_actions, img_key=img_key
                 ),
             )
         else:
             await self.feishu.send_text(chat_id, reply)
 
         await self.message_repo.append_message(pet_id, "assistant", reply)
-        await self.pet_repo.update_pet_state(pet_id, new_state)
+        new_state = await self.pet_repo.mutate_state(pet_id, _mutator)
 
         log.info(
             "pet %d %s: reply=%r state=%s",
@@ -238,10 +244,22 @@ class AutonomousService:
         now = time.time() if now is None else now
         if current is None:
             current = await self.pet_repo.load_pet_state(pet_id)
-        scheduled = self.scheduled_event_due(current, now)
-        if scheduled is not None:
+
+        # 可能同时有多个到期定时事件（如进程停了一整天，梦境+日记都欠着）：
+        # 逐个补发，每次用返回的 new_state 刷新 current（含 date_key 标记），
+        # 迭代上限 = 事件总数，防死循环。任一触发则本 tick 不再走主动发言。
+        fired_scheduled = False
+        for _ in range(len(self.config.scheduled_events)):
+            scheduled = self.scheduled_event_due(current, now)
+            if scheduled is None:
+                break
             event, date_key = scheduled
-            await self.scheduled_speak(pet_id, chat_id, event, date_key)
+            result = await self.scheduled_speak(pet_id, chat_id, event, date_key)
+            fired_scheduled = True
+            if result is None:
+                break
+            _, current = result
+        if fired_scheduled:
             return True
         last_active_ts = max(
             float(current.get("last_proactive_ts", 0) or 0),

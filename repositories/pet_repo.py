@@ -3,15 +3,18 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from typing import Callable
 
 from domain.state import StateDomain
 from repositories.sqlite import Database
+from runtime import RuntimeState
 
 
 class PetRepository:
-    def __init__(self, db: Database, state_domain: StateDomain):
+    def __init__(self, db: Database, state_domain: StateDomain, runtime: RuntimeState):
         self.db = db
         self.state_domain = state_domain
+        self.runtime = runtime
 
     def decode_state(self, state_json: str | None) -> dict:
         try:
@@ -92,6 +95,18 @@ class PetRepository:
 
     async def update_pet_state(self, pet_id: int, state: dict) -> None:
         await asyncio.to_thread(self._update_pet_state, pet_id, state)
+
+    async def mutate_state(
+        self, pet_id: int, mutator: Callable[[dict], dict]
+    ) -> dict:
+        """串行化的「读-改-写」：在 per-pet state_lock 内 load 最新 decayed state，
+        交给 mutator 产出新 state 再落库。昂贵的 LLM/图像调用必须留在锁外，只把
+        load→改→write 这段短临界区放进来，避免多写入方相互覆盖 state_json。"""
+        async with self.runtime.state_lock(pet_id):
+            state = await self.load_pet_state(pet_id)
+            new_state = mutator(state)
+            await self.update_pet_state(pet_id, new_state)
+            return new_state
 
     def _load_pet_state(self, pet_id: int) -> dict:
         with self.db.connect() as conn:

@@ -17,6 +17,9 @@ log = logging.getLogger("tamagotchi")
 
 
 class FeishuClient:
+    # 飞书 tenant_access_token 失效/过期的业务码，命中则刷新缓存重试一次。
+    _TOKEN_EXPIRED_CODES = {99991661, 99991663, 99991668}
+
     def __init__(
         self,
         config: AppConfig,
@@ -53,6 +56,10 @@ class FeishuClient:
                     "app_secret": self.config.feishu_app_secret,
                 },
             )
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"get tenant_access_token http {resp.status_code}: {resp.text[:200]}"
+                )
             data = resp.json()
             if data.get("code") != 0:
                 raise RuntimeError(f"get tenant_access_token failed: {data}")
@@ -82,88 +89,101 @@ class FeishuClient:
         log.info("bot open_id resolved: %s", open_id)
         return open_id
 
+    async def _authed_request(
+        self, method: str, url: str, *, label: str, headers: dict | None = None, **kwargs
+    ) -> dict | None:
+        """带 tenant token 的请求；命中 token 失效码时清缓存刷新并重试一次。
+        非 JSON 响应返回 None（调用方按失败处理）。"""
+        data: dict | None = None
+        for attempt in range(2):
+            token = await self.get_tenant_access_token()
+            req_headers = {"Authorization": f"Bearer {token}", **(headers or {})}
+            resp = await self.http.request(method, url, headers=req_headers, **kwargs)
+            try:
+                data = resp.json()
+            except Exception:
+                log.error("%s: non-JSON response (status=%s)", label, resp.status_code)
+                return None
+            if data.get("code") in self._TOKEN_EXPIRED_CODES and attempt == 0:
+                log.warning(
+                    "%s: tenant token rejected (code=%s), refreshing and retrying",
+                    label,
+                    data.get("code"),
+                )
+                await self.system_repo.delete_sys_cache("tenant_access_token")
+                continue
+            return data
+        return data
+
     async def reply_text(self, message_id: str, text: str) -> None:
-        token = await self.get_tenant_access_token()
-        resp = await self.http.post(
+        data = await self._authed_request(
+            "POST",
             f"{self.config.feishu_base}/im/v1/messages/{message_id}/reply",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json; charset=utf-8",
-            },
+            label="reply",
+            headers={"Content-Type": "application/json; charset=utf-8"},
             json={
                 "msg_type": "text",
                 "content": json.dumps({"text": text}, ensure_ascii=False),
             },
         )
-        data = resp.json()
-        if data.get("code") != 0:
+        if not data or data.get("code") != 0:
             log.error("reply failed: %s", data)
 
     async def send_text(self, chat_id: str, text: str) -> None:
-        token = await self.get_tenant_access_token()
-        resp = await self.http.post(
+        data = await self._authed_request(
+            "POST",
             f"{self.config.feishu_base}/im/v1/messages",
+            label="send",
             params={"receive_id_type": "chat_id"},
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json; charset=utf-8",
-            },
+            headers={"Content-Type": "application/json; charset=utf-8"},
             json={
                 "receive_id": chat_id,
                 "msg_type": "text",
                 "content": json.dumps({"text": text}, ensure_ascii=False),
             },
         )
-        data = resp.json()
-        if data.get("code") != 0:
+        if not data or data.get("code") != 0:
             log.error("send failed: %s", data)
             raise RuntimeError(f"feishu send failed: {data}")
 
     async def upload_image(self, image_bytes: bytes) -> str | None:
-        token = await self.get_tenant_access_token()
-        resp = await self.http.post(
+        data = await self._authed_request(
+            "POST",
             f"{self.config.feishu_base}/im/v1/images",
-            headers={"Authorization": f"Bearer {token}"},
+            label="upload image",
             data={"image_type": "message"},
             files={"image": ("pet.png", image_bytes, "image/png")},
         )
-        data = resp.json()
-        if data.get("code") != 0:
+        if not data or data.get("code") != 0:
             log.error("upload image failed: %s", data)
             return None
         return (data.get("data") or {}).get("image_key")
 
     async def send_card(self, chat_id: str, card: dict) -> None:
-        token = await self.get_tenant_access_token()
-        resp = await self.http.post(
+        data = await self._authed_request(
+            "POST",
             f"{self.config.feishu_base}/im/v1/messages",
+            label="send card",
             params={"receive_id_type": "chat_id"},
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json; charset=utf-8",
-            },
+            headers={"Content-Type": "application/json; charset=utf-8"},
             json={
                 "receive_id": chat_id,
                 "msg_type": "interactive",
                 "content": json.dumps(card, ensure_ascii=False),
             },
         )
-        data = resp.json()
-        if data.get("code") != 0:
+        if not data or data.get("code") != 0:
             log.error("send card failed: %s", data)
             raise RuntimeError(f"feishu send card failed: {data}")
 
     async def update_card_message(self, message_id: str, card: dict) -> None:
-        token = await self.get_tenant_access_token()
-        resp = await self.http.patch(
+        data = await self._authed_request(
+            "PATCH",
             f"{self.config.feishu_base}/im/v1/messages/{message_id}",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json; charset=utf-8",
-            },
+            label="update card",
+            headers={"Content-Type": "application/json; charset=utf-8"},
             json={"content": json.dumps(card, ensure_ascii=False)},
         )
-        data = resp.json()
-        if data.get("code") != 0:
+        if not data or data.get("code") != 0:
             log.error("update card failed: %s", data)
 

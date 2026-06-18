@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
+from config import AppConfig
 from domain.memory import MemoryDomain
 from repositories.sqlite import Database
 
+log = logging.getLogger("tamagotchi")
+
 
 class MemoryRepository:
-    def __init__(self, db: Database, memory_domain: MemoryDomain):
+    def __init__(self, db: Database, memory_domain: MemoryDomain, config: AppConfig):
         self.db = db
         self.memory_domain = memory_domain
+        self.config = config
 
     def _store_embedding(
         self, pet_id: int, kind: str, source_id: int, content: str, vec: list[float]
@@ -42,15 +47,28 @@ class MemoryRepository:
                 "SELECT e.source_id, e.vec, c.when_text, c.who, c.what, c.vibe "
                 "FROM embeddings e JOIN memory_cards c ON c.id = e.source_id "
                 "WHERE e.pet_id = ? AND e.kind = 'card' "
-                "ORDER BY e.id DESC LIMIT 500",
-                (pet_id,),
+                "ORDER BY e.id DESC LIMIT ?",
+                (pet_id, self.config.recall_scan_max),
             ).fetchall()
         if not rows:
             return []
+        q_len = len(q_vec)
+        dim_match = 0
         scored = []
         for row in rows:
-            sim = self.memory_domain.cosine(q_vec, self.memory_domain.vec_unpack(row["vec"]))
+            vec = self.memory_domain.vec_unpack(row["vec"])
+            if len(vec) == q_len:
+                dim_match += 1
+            sim = self.memory_domain.cosine(q_vec, vec)
             scored.append((sim, row))
+        if dim_match == 0:
+            log.warning(
+                "pet %d: all %d stored embeddings mismatch query dim (%d); "
+                "EMBED_MODEL changed? historical recall is disabled until re-embedded",
+                pet_id,
+                len(rows),
+                q_len,
+            )
         scored.sort(key=lambda item: item[0], reverse=True)
         out = []
         for sim, row in scored[:k]:
@@ -178,11 +196,14 @@ class MemoryRepository:
                     ),
                 ).fetchone()
                 inserted.append((row["id"], card))
-            conn.execute(
-                "UPDATE pets SET summary_until_id = ?, compress_fail_count = 0, "
-                "last_compress_attempt = ? WHERE id = ?",
-                (new_until_id, now, pet_id),
-            )
+            # 只有真正存进卡片时才推进 summary_until_id；0 张卡时不推进，
+            # 否则这批消息会从 verbatim 窗口和卡片索引里同时消失（静默丢失）。
+            if inserted:
+                conn.execute(
+                    "UPDATE pets SET summary_until_id = ?, compress_fail_count = 0, "
+                    "last_compress_attempt = ? WHERE id = ?",
+                    (new_until_id, now, pet_id),
+                )
         return inserted
 
     async def save_compressed_cards(

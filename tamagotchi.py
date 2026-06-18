@@ -75,9 +75,9 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
     db.init_db()
 
     system_repo = SystemRepository(db)
-    pet_repo = PetRepository(db, state_domain)
+    pet_repo = PetRepository(db, state_domain, runtime)
     message_repo = MessageRepository(db)
-    memory_repo = MemoryRepository(db, memory_domain)
+    memory_repo = MemoryRepository(db, memory_domain, config)
 
     llm = LLMClient(config)
     feishu_client = FeishuClient(config, system_repo, runtime)

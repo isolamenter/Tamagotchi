@@ -175,7 +175,7 @@ class CardService:
             if event_id and await self.system_repo.check_and_register_event(event_id):
                 return {}
 
-            async with self.runtime.card_lock(pet_id):
+            async with self.runtime.state_lock(pet_id):
                 try:
                     state = await self.pet_repo.load_pet_state(pet_id)
                 except ValueError:

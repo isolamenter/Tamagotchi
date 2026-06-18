@@ -15,6 +15,7 @@ def make_config(db_path: str = "state.db"):
         {
             "FEISHU_APP_ID": "app",
             "FEISHU_APP_SECRET": "secret",
+            "FEISHU_VERIFICATION_TOKEN": "verify-token",
             "OPENAI_BASE_URL": "https://example.invalid/v1",
             "OPENAI_API_KEY": "key",
             "STATE_DB": db_path,
@@ -70,6 +71,30 @@ class StateDomainTests(unittest.TestCase):
             service.scheduled_event_due(state, self.local_ts(2026, 1, 5, 12))
         )
 
+    def test_tick_fires_all_due_scheduled_events_one_tick(self):
+        import asyncio
+
+        service = AutonomousService(
+            self.config, self.state, None, None, None, None, None, None, None, None, None
+        )
+        # 模拟「DB 里逐步累计 date_key 标记」：fake scheduled_speak 标记自己的 state_key 并回传整份状态
+        db_state = dict(self.state.initial_state())
+        calls: list[str] = []
+
+        async def fake_scheduled(pet_id, chat_id, event, date_key, mark_date=True):
+            calls.append(event["kind"])
+            db_state[event["state_key"]] = date_key
+            return "reply", dict(db_state)
+
+        service.scheduled_speak = fake_scheduled
+        # 周一 20:00：非周末，且已过 dream(10) 与 diary(19) 两个钟点 → 两个事件都欠着
+        now = self.local_ts(2026, 1, 5, 20)
+        spoke = asyncio.run(
+            service.tick_pet(1, "chat", current=dict(db_state), now=now)
+        )
+        self.assertTrue(spoke)
+        self.assertEqual(set(calls), {"dream", "diary"})
+
     def test_delta_clamp_and_band(self):
         current = {key: 50.0 for key in self.config.state_numeric_keys}
         updated = self.state.apply_delta(current, {"hunger": 999, "mood": -999})
@@ -77,6 +102,18 @@ class StateDomainTests(unittest.TestCase):
         self.assertEqual(updated["mood"], 25.0)
         self.assertEqual(self.state.state_band("hunger", 90), "hunger_extreme_high")
         self.assertEqual(self.state.state_band("mood", 10), "mood_extreme_low")
+
+    def test_apply_delta_accepts_fractional_values(self):
+        base = {key: 50.0 for key in self.config.state_numeric_keys}
+        # 浮点小数不再被 int() 截断成 0
+        out = self.state.apply_delta(base, {"affection": 0.8})
+        self.assertAlmostEqual(out["affection"], 50.8, places=5)
+        # 带小数的数字字符串也能解析（旧版 int("2.5") 会抛错→丢弃）
+        out2 = self.state.apply_delta(base, {"affection": "2.5"})
+        self.assertAlmostEqual(out2["affection"], 52.5, places=5)
+        # 非数字仍安全降级为 0
+        out3 = self.state.apply_delta(base, {"affection": "abc"})
+        self.assertAlmostEqual(out3["affection"], 50.0, places=5)
 
     def test_decay_updates_timestamp_and_bounds_values(self):
         stored = self.state.initial_state()
@@ -126,6 +163,20 @@ class MemoryDomainTests(unittest.TestCase):
             ]
         )
         self.assertLess(block.index("first"), block.index("second"))
+
+
+class ConfigTests(unittest.TestCase):
+    def test_missing_verification_token_fails_fast(self):
+        with self.assertRaises(KeyError):
+            load_config(
+                {
+                    "FEISHU_APP_ID": "app",
+                    "FEISHU_APP_SECRET": "secret",
+                    "OPENAI_BASE_URL": "https://example.invalid/v1",
+                    "OPENAI_API_KEY": "key",
+                    "STATE_DB": "state.db",
+                }
+            )
 
 
 if __name__ == "__main__":

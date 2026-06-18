@@ -178,6 +178,19 @@ class MemoryService:
                 )
                 return
 
+            if not inserted:
+                # 解析成功但 0 张可用卡片：summary_until_id 未推进，按失败计数走退避，
+                # 累计到 5 次由 _handle_compress_failure 强推 until_id 清毒缓冲，避免永久卡死。
+                log.warning(
+                    "compress produced no usable cards for pet %d (raw=%d)",
+                    pet_id,
+                    len(cards_raw),
+                )
+                await self._record_compress_failure(
+                    pet_id, compress_fail_count, new_until_id
+                )
+                return
+
             log.info(
                 "compressed pet %d: %d msgs -> %d cards, until_id=%d",
                 pet_id,

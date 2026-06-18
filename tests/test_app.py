@@ -22,6 +22,7 @@ class AppSmokeTests(unittest.TestCase):
                 {
                     "FEISHU_APP_ID": "app",
                     "FEISHU_APP_SECRET": "secret",
+                    "FEISHU_VERIFICATION_TOKEN": "verify-token",
                     "OPENAI_BASE_URL": "https://example.invalid/v1",
                     "OPENAI_API_KEY": "key",
                     "STATE_DB": str(Path(tmp) / "state.db"),

@@ -121,9 +121,9 @@ class StateDomain:
         out = dict(state)
         for key in self.config.state_numeric_keys:
             try:
-                d = int(delta.get(key, 0))
+                d = float(delta.get(key, 0))
             except (TypeError, ValueError):
-                d = 0
+                d = 0.0
             clamp = self.config.state_delta_clamp.get(key, self.config.default_delta_clamp)
             d = max(-clamp, min(clamp, d))
             out[key] = max(

@@ -36,6 +36,13 @@ class SystemRepository:
     ) -> None:
         await asyncio.to_thread(self._set_sys_cache, key, val, expires_in_sec)
 
+    def _delete_sys_cache(self, key: str) -> None:
+        with self.db.connect() as conn:
+            conn.execute("DELETE FROM sys_cache WHERE key = ?", (key,))
+
+    async def delete_sys_cache(self, key: str) -> None:
+        await asyncio.to_thread(self._delete_sys_cache, key)
+
     def _get_cached_user_name(self, open_id: str) -> str | None:
         with self.db.connect() as conn:
             row = conn.execute(

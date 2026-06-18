@@ -127,23 +127,26 @@ class ReplyService:
                     speaker_name,
                 )
 
-        new_state = self.state_domain.apply_delta(current_state, delta)
-        new_state["last_update_ts"] = time.time()
-        await self.pet_repo.update_pet_state(pet_id, new_state)
+        def _mutator(state: dict) -> dict:
+            out = self.state_domain.apply_delta(state, delta)
+            out["last_update_ts"] = time.time()
+            return out
+
+        new_state = await self.pet_repo.mutate_state(pet_id, _mutator)
         log.info(
             "pet %d state: %s + delta=%s -> %s",
             pet_id,
             {key: round(current_state.get(key, 0)) for key in self.config.state_numeric_keys},
-            {key: int(delta.get(key, 0)) for key in self.config.state_numeric_keys},
+            delta,
             {key: round(new_state.get(key, 0)) for key in self.config.state_numeric_keys},
         )
 
         return reply, new_state, learned_name
 
     async def mark_replied(self, pet_id: int) -> None:
-        state = await self.pet_repo.load_pet_state(pet_id)
-        state["last_reply_ts"] = time.time()
-        await self.pet_repo.update_pet_state(pet_id, state)
+        await self.pet_repo.mutate_state(
+            pet_id, lambda s: {**s, "last_reply_ts": time.time()}
+        )
 
     async def is_direct_to_bot(self, mentions: list[dict]) -> bool:
         try:

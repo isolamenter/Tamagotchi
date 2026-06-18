@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 class RuntimeState:
     token_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     compress_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
-    card_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
+    state_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
     card_followup_buffer: dict[str, dict] = field(default_factory=dict)
     observer_buffer: dict[int, list[dict]] = field(default_factory=dict)
     reply_gate: dict[int, float] = field(default_factory=dict)
@@ -20,10 +20,11 @@ class RuntimeState:
             self.compress_locks[pet_id] = lock
         return lock
 
-    def card_lock(self, pet_id: int) -> asyncio.Lock:
-        lock = self.card_locks.get(pet_id)
+    def state_lock(self, pet_id: int) -> asyncio.Lock:
+        """串行化同一宠物对 pets.state_json 的所有「读-改-写」。"""
+        lock = self.state_locks.get(pet_id)
         if lock is None:
             lock = asyncio.Lock()
-            self.card_locks[pet_id] = lock
+            self.state_locks[pet_id] = lock
         return lock
 

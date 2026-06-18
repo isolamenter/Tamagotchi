@@ -7,6 +7,9 @@
 buffer_keep = 80
 # 未压缩消息数超过这个值后触发后台压缩。
 compress_threshold = 200
+# RAG 召回时按相关性打分最多扫描这么多张最近卡片（防 CPU 开销过大）。
+# 超过这个数的更老卡片只能落到 recency 兜底路径，进不了相关性打分。
+recall_scan_max = 2000
 
 [reply]
 # 群里被 @ 后，两次正式 LLM 回复之间的最小间隔（秒）。

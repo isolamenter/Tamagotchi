@@ -133,12 +133,12 @@ curl http://localhost:8000/healthz
 |---|---|---|
 | `FEISHU_APP_ID` | 飞书自建应用 App ID | ✓ |
 | `FEISHU_APP_SECRET` | 飞书自建应用 App Secret | ✓ |
-| `FEISHU_VERIFICATION_TOKEN` | 事件订阅 Verification Token，留空则跳过身份校验 |  |
+| `FEISHU_VERIFICATION_TOKEN` | 事件订阅 Verification Token。**必填**（缺失启动失败）——空值会让公网 webhook 无鉴权 | ✓ |
 | `FEISHU_ENCRYPT_KEY` | 启用加密策略时填，否则留空 |  |
 | `OPENAI_BASE_URL` | OpenAI 兼容 API 端点（末尾通常带 `/v1`） | ✓ |
 | `OPENAI_API_KEY` | API Key | ✓ |
 | `MODEL_NAME` | 模型名（如 `gpt-4o-mini`、`claude-3-5-sonnet`、`gemini-...`） | ✓ |
-| `EMBED_MODEL` | RAG 用的 embedding 模型，默认 `text-embedding-3-small` |  |
+| `EMBED_MODEL` | RAG 用的 embedding 模型，默认 `text-embedding-3-small`。**换成不同维度的模型会使旧向量失配、历史召回失效，需重嵌** |  |
 | `IMAGE_MODEL` | 梦境插图的图像模型（如 `imagen-4.0-fast-generate-001` / `gpt-image-1` / `dall-e-3`，走 `/v1/images/generations`），留空 = 关闭插图、梦境退回纯文字卡 |  |
 | `STATE_DB` | SQLite 持久化文件路径，默认 `state.db`（相对启动目录） |  |
 | `PORT` | 服务监听端口，默认 8000 |  |

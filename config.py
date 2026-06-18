@@ -57,6 +57,7 @@ class AppConfig:
 
     buffer_keep: int
     compress_threshold: int
+    recall_scan_max: int
     reply_min_interval_sec: int
     observer_flush_max_count: int
     reply_max_tokens: int
@@ -129,7 +130,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
 
     feishu_app_id = env["FEISHU_APP_ID"]
     feishu_app_secret = env["FEISHU_APP_SECRET"]
-    feishu_verification_token = env.get("FEISHU_VERIFICATION_TOKEN", "")
+    feishu_verification_token = env["FEISHU_VERIFICATION_TOKEN"]
     feishu_encrypt_key = env.get("FEISHU_ENCRYPT_KEY", "")
     gm_token = env.get("GM_TOKEN") or feishu_verification_token
 
@@ -217,6 +218,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         gm_default_speak_trigger=prompts["gm"]["default_speak_trigger"],
         buffer_keep=int(memory_config["buffer_keep"]),
         compress_threshold=int(memory_config["compress_threshold"]),
+        recall_scan_max=int(memory_config.get("recall_scan_max", 2000)),
         reply_min_interval_sec=int(reply_config["min_interval_sec"]),
         observer_flush_max_count=int(observer_config["flush_max_count"]),
         reply_max_tokens=int(llm_config["reply_max_tokens"]),

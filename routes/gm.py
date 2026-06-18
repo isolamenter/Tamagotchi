@@ -40,12 +40,20 @@ def _gm_bool(value, default: bool = False) -> bool:
 
 
 async def _gm_resolve_pet(
-    req: Request, chat_id: str | None = None, pet_id: int | None = None
+    req: Request, chat_id: str | None = None, pet_id: int | str | None = None
 ) -> tuple[int, str] | JSONResponse:
     container = _container(req)
     if chat_id:
         created_id = await container.pet_repo.get_or_create_pet(chat_id)
         return created_id, chat_id
+
+    if pet_id is not None and not isinstance(pet_id, bool):
+        try:
+            pet_id = int(str(pet_id).strip())
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"error": "invalid_pet_id", "pet_id": pet_id}, status_code=400
+            )
 
     row_dict, rows = await container.pet_repo.resolve_pet(pet_id)
     if pet_id is not None:
@@ -135,13 +143,16 @@ async def gm_cards(req: Request):
     resolved = await _gm_resolve_pet(
         req,
         chat_id=req.query_params.get("chat_id"),
-        pet_id=int(pet_id_param) if pet_id_param else None,
+        pet_id=pet_id_param or None,
     )
     if isinstance(resolved, JSONResponse):
         return resolved
     pet_id, chat_id = resolved
     limit_param = req.query_params.get("limit")
-    limit = max(1, min(200, int(limit_param))) if limit_param else 50
+    try:
+        limit = max(1, min(200, int(limit_param))) if limit_param else 50
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "invalid_limit", "limit": limit_param}, status_code=400)
     cards = await _container(req).memory_repo.list_cards(pet_id, limit)
     return {"pet_id": pet_id, "chat_id": chat_id, "cards": cards}
 
@@ -155,13 +166,16 @@ async def gm_messages(req: Request):
     resolved = await _gm_resolve_pet(
         req,
         chat_id=req.query_params.get("chat_id"),
-        pet_id=int(pet_id_param) if pet_id_param else None,
+        pet_id=pet_id_param or None,
     )
     if isinstance(resolved, JSONResponse):
         return resolved
     pet_id, chat_id = resolved
     limit_param = req.query_params.get("limit")
-    limit = max(1, min(200, int(limit_param))) if limit_param else 50
+    try:
+        limit = max(1, min(200, int(limit_param))) if limit_param else 50
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "invalid_limit", "limit": limit_param}, status_code=400)
     messages = await _container(req).message_repo.recent_messages(pet_id, limit)
     return {"pet_id": pet_id, "chat_id": chat_id, "messages": messages}
 
@@ -175,7 +189,7 @@ async def gm_get_state(req: Request):
     resolved = await _gm_resolve_pet(
         req,
         chat_id=req.query_params.get("chat_id"),
-        pet_id=int(pet_id_param) if pet_id_param else None,
+        pet_id=pet_id_param or None,
     )
     if isinstance(resolved, JSONResponse):
         return resolved
@@ -200,43 +214,43 @@ async def gm_set_state(req: Request):
     resolved = await _gm_resolve_pet(
         req,
         chat_id=body.get("chat_id") or req.query_params.get("chat_id"),
-        pet_id=int(pet_id_param) if pet_id_param else None,
+        pet_id=pet_id_param or None,
     )
     if isinstance(resolved, JSONResponse):
         return resolved
     pet_id, chat_id = resolved
 
-    state = await container.pet_repo.load_pet_state(pet_id)
     set_values = body.get("set") if isinstance(body.get("set"), dict) else {}
     delta_values = body.get("delta") if isinstance(body.get("delta"), dict) else {}
     for key in container.config.state_numeric_keys:
         if key in req.query_params:
             set_values[key] = req.query_params[key]
-
-    changed: dict = {}
-    for key in container.config.state_numeric_keys:
-        if key in set_values:
-            value = float(set_values[key])
-            state[key] = max(0.0, min(100.0, value))
-            changed[key] = state[key]
-        if key in delta_values:
-            value = float(delta_values[key])
-            state[key] = max(0.0, min(100.0, float(state[key]) + value))
-            changed[key] = state[key]
-
     rv_payload = set_values.get("recent_vibe")
     if rv_payload is None:
         rv_payload = body.get("recent_vibe")
-    if rv_payload is not None:
-        rv = str(rv_payload).strip()
-        if rv.lower() == "random" and container.config.recent_vibe_pool:
-            rv = random.choice(container.config.recent_vibe_pool)
-        date_key, _ = container.state_domain.local_date_hour(time.time())
-        state["recent_vibe"] = rv
-        state["recent_vibe_date"] = date_key
-        changed["recent_vibe"] = rv
-    state["last_update_ts"] = time.time()
-    await container.pet_repo.update_pet_state(pet_id, state)
+
+    changed: dict = {}
+
+    def _mutator(state: dict) -> dict:
+        for key in container.config.state_numeric_keys:
+            if key in set_values:
+                state[key] = max(0.0, min(100.0, float(set_values[key])))
+                changed[key] = state[key]
+            if key in delta_values:
+                state[key] = max(0.0, min(100.0, float(state[key]) + float(delta_values[key])))
+                changed[key] = state[key]
+        if rv_payload is not None:
+            rv = str(rv_payload).strip()
+            if rv.lower() == "random" and container.config.recent_vibe_pool:
+                rv = random.choice(container.config.recent_vibe_pool)
+            date_key, _ = container.state_domain.local_date_hour(time.time())
+            state["recent_vibe"] = rv
+            state["recent_vibe_date"] = date_key
+            changed["recent_vibe"] = rv
+        state["last_update_ts"] = time.time()
+        return state
+
+    state = await container.pet_repo.mutate_state(pet_id, _mutator)
     return {
         "ok": True,
         "pet_id": pet_id,
@@ -257,7 +271,7 @@ async def gm_speak(req: Request):
     resolved = await _gm_resolve_pet(
         req,
         chat_id=body.get("chat_id") or req.query_params.get("chat_id"),
-        pet_id=int(pet_id_param) if pet_id_param else None,
+        pet_id=pet_id_param or None,
     )
     if isinstance(resolved, JSONResponse):
         return resolved
@@ -293,7 +307,7 @@ async def _gm_scheduled(req: Request, kind: str):
     resolved = await _gm_resolve_pet(
         req,
         chat_id=body.get("chat_id") or req.query_params.get("chat_id"),
-        pet_id=int(pet_id_param) if pet_id_param else None,
+        pet_id=pet_id_param or None,
     )
     if isinstance(resolved, JSONResponse):
         return resolved
@@ -342,7 +356,7 @@ async def gm_tick(req: Request):
     resolved = await _gm_resolve_pet(
         req,
         chat_id=chat_id_param,
-        pet_id=int(pet_id_param) if pet_id_param else None,
+        pet_id=pet_id_param or None,
     )
     if isinstance(resolved, JSONResponse):
         return resolved
