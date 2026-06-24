@@ -22,6 +22,9 @@ class AppConfig:
     model_name: str
     embed_model: str
     image_model: str
+    llm_provider: str
+    gemini_base_url: str
+    gemini_api_key: str
     db_path: Path
     feishu_base: str
 
@@ -134,6 +137,13 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
     feishu_encrypt_key = env.get("FEISHU_ENCRYPT_KEY", "")
     gm_token = env.get("GM_TOKEN") or feishu_verification_token
 
+    llm_provider = (env.get("LLM_PROVIDER", "openai") or "openai").strip().lower()
+    gemini_base_url = env.get("GEMINI_BASE_URL", "")
+    # provider=gemini 时缺 key 直接 KeyError 早死（符合 os.environ 直读约束）
+    gemini_api_key = (
+        env["GEMINI_API_KEY"] if llm_provider == "gemini" else env.get("GEMINI_API_KEY", "")
+    )
+
     prompts = _load_toml(ROOT_DIR / "prompts.toml")
     pet_style = _load_toml(ROOT_DIR / "pet_style.toml")
     pet_config = _load_toml(ROOT_DIR / "pet_config.toml")
@@ -183,9 +193,12 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         gm_token=gm_token,
         openai_base_url=env["OPENAI_BASE_URL"],
         openai_api_key=env["OPENAI_API_KEY"],
-        model_name=env.get("MODEL_NAME", "gpt-4o-mini"),
+        model_name=env.get("CHAT_MODEL", "gpt-4o-mini"),
         embed_model=env.get("EMBED_MODEL", "text-embedding-3-small"),
         image_model=env.get("IMAGE_MODEL", ""),
+        llm_provider=llm_provider,
+        gemini_base_url=gemini_base_url,
+        gemini_api_key=gemini_api_key,
         db_path=Path(env.get("STATE_DB", "state.db")),
         feishu_base="https://open.feishu.cn/open-apis",
         prompts=prompts,

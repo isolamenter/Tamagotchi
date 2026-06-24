@@ -10,19 +10,72 @@ from config import AppConfig
 log = logging.getLogger("tamagotchi")
 
 
+def _to_gemini_contents(messages: list[dict]) -> tuple[str, list[dict]]:
+    """把 OpenAI 风格 [{role, content}] 转成 Gemini 的 (system_instruction, contents)。
+
+    - 所有 role=system 的消息拼成一段 system_instruction（按出现顺序换行连接）。
+    - role=user → Gemini role "user"，role=assistant → "model"。
+    - contents 用 dict 结构（genai SDK 直接接受），保证本函数不依赖 google-genai。
+    """
+    system_parts: list[str] = []
+    contents: list[dict] = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content") or ""
+        if role == "system":
+            if content:
+                system_parts.append(content)
+            continue
+        gem_role = "model" if role == "assistant" else "user"
+        contents.append({"role": gem_role, "parts": [{"text": content}]})
+    return "\n".join(system_parts), contents
+
+
 class LLMClient:
+    """统一的 LLM 门面：按 config.llm_provider 在 OpenAI 兼容路径与 Gemini 原生 SDK 之间分流。
+
+    四个能力（chat_json / chat_text / embed_text / generate_image）对调用方暴露相同签名，
+    切换 provider 不需要改任何 service。
+    """
+
     def __init__(self, config: AppConfig):
         self.config = config
-        self.client = AsyncOpenAI(
-            base_url=config.openai_base_url,
-            api_key=config.openai_api_key,
-        )
+        self.provider = config.llm_provider
+        if self.provider == "gemini":
+            # 惰性 import：未装 google-genai 时本模块仍可导入（纯函数 helper 可单测）
+            from google import genai
+            from google.genai import types
+
+            self._types = types
+            http_options = (
+                types.HttpOptions(base_url=config.gemini_base_url)
+                if config.gemini_base_url
+                else None
+            )
+            self._genai = genai.Client(
+                api_key=config.gemini_api_key,
+                http_options=http_options,
+            )
+            self.client = None
+        else:
+            self._genai = None
+            self._types = None
+            self.client = AsyncOpenAI(
+                base_url=config.openai_base_url,
+                api_key=config.openai_api_key,
+            )
 
     async def embed_text(self, text: str) -> list[float] | None:
         text = (text or "").strip()
         if not text:
             return None
         try:
+            if self.provider == "gemini":
+                resp = await self._genai.aio.models.embed_content(
+                    model=self.config.embed_model,
+                    contents=text,
+                )
+                return list(resp.embeddings[0].values)
             resp = await self.client.embeddings.create(
                 model=self.config.embed_model,
                 input=text,
@@ -39,6 +92,13 @@ class LLMClient:
         max_tokens: int,
         temperature: float,
     ) -> str:
+        if self.provider == "gemini":
+            return await self._gemini_chat(
+                messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                json_mode=True,
+            )
         resp = await self.client.chat.completions.create(
             model=self.config.model_name,
             messages=messages,
@@ -48,15 +108,67 @@ class LLMClient:
         )
         return (resp.choices[0].message.content or "").strip()
 
-    async def generate_image(self, prompt: str) -> bytes | None:
-        """走 OpenAI 兼容的 /v1/images/generations 端点生成图，从 b64_json 解字节。
+    async def chat_text(
+        self,
+        messages: list[dict],
+        *,
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
+        if self.provider == "gemini":
+            return await self._gemini_chat(
+                messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                json_mode=False,
+            )
+        resp = await self.client.chat.completions.create(
+            model=self.config.model_name,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        return (resp.choices[0].message.content or "").strip()
 
-        适用于 imagen / gpt-image / dall-e 等纯图像生成模型；Gemini 系图像模型
-        协议不同（要走 chat.completions + modalities），这里不支持。
+    async def _gemini_chat(
+        self,
+        messages: list[dict],
+        *,
+        max_tokens: int,
+        temperature: float,
+        json_mode: bool,
+    ) -> str:
+        system_instruction, contents = _to_gemini_contents(messages)
+        config_kwargs = {
+            "temperature": temperature,
+            "max_output_tokens": max_tokens,
+        }
+        if system_instruction:
+            config_kwargs["system_instruction"] = system_instruction
+        if json_mode:
+            config_kwargs["response_mime_type"] = "application/json"
+        resp = await self._genai.aio.models.generate_content(
+            model=self.config.model_name,
+            contents=contents,
+            config=self._types.GenerateContentConfig(**config_kwargs),
+        )
+        return (resp.text or "").strip()
+
+    async def generate_image(self, prompt: str) -> bytes | None:
+        """生成梦境插图字节。
+
+        - openai 路径：走 OpenAI 兼容的 /v1/images/generations，从 b64_json 解字节，
+          适用于 imagen / gpt-image / dall-e 等模型；此路径**不支持** Gemini 系图像模型
+          （协议不同）。
+        - gemini 路径：走 google-genai 原生 generate_content + IMAGE modality，
+          从 inline_data 取字节，支持 Gemini 系图像模型。
+        生成 / 解码任一步失败安静返回 None，梦境卡回退纯文字。
         """
         prompt = (prompt or "").strip()
         if not self.config.image_model or not prompt:
             return None
+        if self.provider == "gemini":
+            return await self._gemini_image(prompt)
         try:
             resp = await self.client.images.generate(
                 model=self.config.image_model,
@@ -78,18 +190,25 @@ class LLMClient:
             log.exception("image base64 decode failed")
             return None
 
-    async def chat_text(
-        self,
-        messages: list[dict],
-        *,
-        max_tokens: int,
-        temperature: float,
-    ) -> str:
-        resp = await self.client.chat.completions.create(
-            model=self.config.model_name,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
-        return (resp.choices[0].message.content or "").strip()
-
+    async def _gemini_image(self, prompt: str) -> bytes | None:
+        try:
+            resp = await self._genai.aio.models.generate_content(
+                model=self.config.image_model,
+                contents=prompt,
+                config=self._types.GenerateContentConfig(
+                    response_modalities=["IMAGE"],
+                ),
+            )
+        except Exception:
+            log.exception("gemini image generation failed")
+            return None
+        candidates = getattr(resp, "candidates", None) or []
+        for cand in candidates:
+            content = getattr(cand, "content", None)
+            parts = getattr(content, "parts", None) or []
+            for part in parts:
+                inline = getattr(part, "inline_data", None)
+                if inline and getattr(inline, "data", None):
+                    return inline.data
+        log.warning("gemini image response had no inline image data")
+        return None

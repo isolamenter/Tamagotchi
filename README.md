@@ -135,11 +135,14 @@ curl http://localhost:8000/healthz
 | `FEISHU_APP_SECRET` | 飞书自建应用 App Secret | ✓ |
 | `FEISHU_VERIFICATION_TOKEN` | 事件订阅 Verification Token。**必填**（缺失启动失败）——空值会让公网 webhook 无鉴权 | ✓ |
 | `FEISHU_ENCRYPT_KEY` | 启用加密策略时填，否则留空 |  |
-| `OPENAI_BASE_URL` | OpenAI 兼容 API 端点（末尾通常带 `/v1`） | ✓ |
-| `OPENAI_API_KEY` | API Key | ✓ |
-| `MODEL_NAME` | 模型名（如 `gpt-4o-mini`、`claude-3-5-sonnet`、`gemini-...`） | ✓ |
+| `CHAT_MODEL` | chat 模型名（如 `gpt-4o-mini`、`claude-3-5-sonnet`、`gemini-...`） | ✓ |
 | `EMBED_MODEL` | RAG 用的 embedding 模型，默认 `text-embedding-3-small`。**换成不同维度的模型会使旧向量失配、历史召回失效，需重嵌** |  |
-| `IMAGE_MODEL` | 梦境插图的图像模型（如 `imagen-4.0-fast-generate-001` / `gpt-image-1` / `dall-e-3`，走 `/v1/images/generations`），留空 = 关闭插图、梦境退回纯文字卡 |  |
+| `IMAGE_MODEL` | 梦境插图的图像模型；openai 后端走 `/v1/images/generations`（如 `imagen-4.0-fast-generate-001` / `gpt-image-1` / `dall-e-3`），gemini 后端走原生 SDK（支持 Gemini 系图像模型）。留空 = 关闭插图、梦境退回纯文字卡 |  |
+| `LLM_PROVIDER` | LLM 后端，`openai`（OpenAI 兼容，缺省）或 `gemini`（google-genai 原生 SDK）；两个后端复用同一组 `CHAT_MODEL` / `EMBED_MODEL` / `IMAGE_MODEL` |  |
+| `OPENAI_BASE_URL` | OpenAI 兼容 API 端点（末尾通常带 `/v1`）；`LLM_PROVIDER=openai` 时使用 | ✓ |
+| `OPENAI_API_KEY` | OpenAI 兼容 API Key；`LLM_PROVIDER=openai` 时使用 | ✓ |
+| `GEMINI_BASE_URL` | Gemini 端点，留空 = Google 官方端点；仅 `LLM_PROVIDER=gemini` 时使用 |  |
+| `GEMINI_API_KEY` | Gemini API Key；`LLM_PROVIDER=gemini` 时**必填** |  |
 | `STATE_DB` | SQLite 持久化文件路径，默认 `state.db`（相对启动目录） |  |
 | `PORT` | 服务监听端口，默认 8000 |  |
 | `GM_TOKEN` | `/gm/*` Web 调试接口 token；留空则复用 `FEISHU_VERIFICATION_TOKEN` |  |
