@@ -93,6 +93,20 @@ low = 25
 high = 75
 low = 20
 
+[gameplay]
+# 状态玩法闭环：阈值触发需求事件，卡片按钮按规则结算，写入成长与日志。
+enabled = true
+need_ttl_sec = 7200
+state_log_max = 20
+daily_goal_reward_xp = 15
+
+[gameplay.need_thresholds]
+hungry = 80
+sleepy = 25
+sad = 30
+bored = 30
+lonely = 25
+
 [autonomous]
 # 心跳间隔（测试期 1 min；生产建议 600）。
 tick_interval_sec = 600

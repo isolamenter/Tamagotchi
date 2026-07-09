@@ -5,6 +5,7 @@ import unittest
 
 from config import load_config
 from domain.card import CardDomain
+from domain.gameplay import GameplayDomain
 from domain.memory import MemoryDomain
 from domain.state import StateDomain
 from services.autonomous_service import AutonomousService
@@ -62,6 +63,8 @@ class StateDomainTests(unittest.TestCase):
             None,
             None,
             None,
+            None,
+            None,
         )
         state = self.state.initial_state()
         self.assertIsNone(
@@ -75,7 +78,19 @@ class StateDomainTests(unittest.TestCase):
         import asyncio
 
         service = AutonomousService(
-            self.config, self.state, None, None, None, None, None, None, None, None, None
+            self.config,
+            self.state,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
         # 模拟「DB 里逐步累计 date_key 标记」：fake scheduled_speak 标记自己的 state_key 并回传整份状态
         db_state = dict(self.state.initial_state())
@@ -143,6 +158,76 @@ class CardDomainTests(unittest.TestCase):
 
         click_ts = {"u1": 1.0, "u2": 999.0, "bad": "old-shape"}
         self.assertEqual(self.card.prune_card_click_ts(click_ts, 1000.0), {"u2": 999.0})
+
+
+class GameplayDomainTests(unittest.TestCase):
+    def setUp(self):
+        self.config = make_config()
+        self.gameplay = GameplayDomain(self.config)
+
+    def test_need_detection_prefers_extreme_severity(self):
+        state = {
+            **self.config.initial_state,
+            "hunger": 81,
+            "energy": 5,
+        }
+        detected = self.gameplay.detect_need_kind(state, 1000.0)
+        self.assertEqual(detected, ("sleepy", 2))
+
+    def test_need_choice_resolves_state_xp_and_cooldown(self):
+        now = 1000.0
+        state = {
+            **self.config.initial_state,
+            "hunger": 90,
+            "daily_goal": {
+                "date": self.gameplay.local_date(now),
+                "kind": "play_once",
+                "title": "想玩一次",
+                "target": 1,
+                "progress": 0,
+                "completed": False,
+                "reward_xp": 15,
+            },
+        }
+        state, need = self.gameplay.maybe_create_need(state, now, pet_id=1)
+        self.assertEqual(need["kind"], "hungry")
+
+        result = self.gameplay.apply_choice(state, "feed", "群友-A", now + 1)
+        self.assertEqual(result.state["active_need"], {})
+        self.assertLess(result.state["hunger"], 90)
+        self.assertEqual(result.xp, 8)
+        self.assertEqual(result.state["progress"]["total_xp"], 8)
+        self.assertGreater(result.state["need_cooldowns"]["hungry"], now)
+        self.assertEqual(result.state["state_log"][-1]["kind"], "need_resolved")
+
+        detected = self.gameplay.detect_need_kind(result.state, now + 2)
+        self.assertIsNone(detected)
+
+    def test_daily_goal_reward_and_log_trim(self):
+        now = 1000.0
+        state = self.gameplay.ensure_daily_goal(
+            {**self.config.initial_state, "curiosity": 10}, now, pet_id=1
+        )
+        state["daily_goal"] = {
+            "date": self.gameplay.local_date(now),
+            "kind": "play_once",
+            "title": "想玩一次",
+            "target": 1,
+            "progress": 0,
+            "completed": False,
+            "reward_xp": 15,
+        }
+        state, _ = self.gameplay.maybe_create_need(state, now, pet_id=1)
+        result = self.gameplay.apply_choice(state, "play", "GM", now + 1)
+        self.assertTrue(result.goal_completed)
+        self.assertEqual(result.xp, 23)
+        self.assertTrue(result.state["daily_goal"]["completed"])
+
+        for i in range(self.config.gameplay_state_log_max + 5):
+            self.gameplay.append_log(result.state, {"ts": i, "kind": "x"})
+        self.assertEqual(
+            len(result.state["state_log"]), self.config.gameplay_state_log_max
+        )
 
 
 class MemoryDomainTests(unittest.TestCase):

@@ -7,6 +7,7 @@ import time
 
 from config import AppConfig
 from domain.card import CardDomain
+from domain.gameplay import GameplayDomain
 from domain.pet import PetDomain
 from domain.state import StateDomain
 from integrations.feishu_client import FeishuClient
@@ -15,6 +16,7 @@ from repositories.message_repo import MessageRepository
 from repositories.pet_repo import PetRepository
 from repositories.system_repo import SystemRepository
 from runtime import RuntimeState
+from services.gameplay_service import GameplayService
 from services.memory_service import MemoryService
 
 log = logging.getLogger("tamagotchi")
@@ -26,11 +28,13 @@ class CardService:
         config: AppConfig,
         runtime: RuntimeState,
         state_domain: StateDomain,
+        gameplay_domain: GameplayDomain,
         card_domain: CardDomain,
         pet_domain: PetDomain,
         pet_repo: PetRepository,
         message_repo: MessageRepository,
         system_repo: SystemRepository,
+        gameplay_service: GameplayService,
         memory_service: MemoryService,
         feishu: FeishuClient,
         llm: LLMClient,
@@ -38,11 +42,13 @@ class CardService:
         self.config = config
         self.runtime = runtime
         self.state_domain = state_domain
+        self.gameplay_domain = gameplay_domain
         self.card_domain = card_domain
         self.pet_domain = pet_domain
         self.pet_repo = pet_repo
         self.message_repo = message_repo
         self.system_repo = system_repo
+        self.gameplay_service = gameplay_service
         self.memory_service = memory_service
         self.feishu = feishu
         self.llm = llm
@@ -56,7 +62,12 @@ class CardService:
         return f"群友-{open_id[-4:]}"
 
     async def card_action_followup(
-        self, message_id: str, action_key: str, clicker_open_id: str
+        self,
+        message_id: str,
+        action_key: str,
+        clicker_open_id: str,
+        did_text: str | None = None,
+        pending_text: str | None = None,
     ) -> None:
         try:
             entry = self.runtime.card_followup_buffer.get(message_id)
@@ -71,6 +82,10 @@ class CardService:
             text_cfg = self.config.card_action_text.get(action_key, {})
             did = text_cfg.get("did", "和你互动了一下")
             pending = text_cfg.get("pending", "…")
+            if did_text:
+                did = did_text
+            if pending_text:
+                pending = pending_text
 
             await self.message_repo.append_message(
                 pet_id, "user", did, sender_name=sender_name, is_observer=False
@@ -150,6 +165,8 @@ class CardService:
             except (TypeError, ValueError):
                 pet_id = None
             action_key = value.get("action")
+            need_id = value.get("need_id") or ""
+            need_kind = value.get("need_kind") or ""
             card_keys = value.get("keys")
             is_fixed = bool(value.get("fixed"))
             built_at = value.get("built_at")
@@ -159,8 +176,18 @@ class CardService:
             message_id = context.get("open_message_id")
             operator = event.get("operator") or {}
             clicker_open_id = operator.get("open_id") or operator.get("union_id") or ""
+            sender_name = (
+                await self.resolve_user_name(clicker_open_id)
+                if clicker_open_id
+                else "群友"
+            )
 
-            if pet_id is None or action_key not in self.config.card_actions:
+            is_need_action = bool(
+                need_id and self.gameplay_domain.choice_for_action(need_kind, action_key)
+            )
+            if pet_id is None or (
+                not is_need_action and action_key not in self.config.card_actions
+            ):
                 return {"toast": {"type": "error", "content": "这个按钮点不动了…"}}
 
             now = time.time()
@@ -195,8 +222,31 @@ class CardService:
                         }
                     }
 
-                delta = self.config.card_actions[action_key].get("delta") or {}
-                new_state = self.state_domain.apply_card_delta(state, delta)
+                need_result = None
+                if is_need_action:
+                    current_need = self.gameplay_domain.current_need(state, now)
+                    if not current_need or current_need.get("id") != need_id:
+                        return {
+                            "toast": {
+                                "type": "info",
+                                "content": "这个需求已经变了，等下一张卡片吧~",
+                            }
+                        }
+                    try:
+                        need_result = self.gameplay_service.resolve_need_choice_state(
+                            state, action_key, sender_name, now
+                        )
+                    except ValueError:
+                        return {
+                            "toast": {
+                                "type": "error",
+                                "content": "这个照料动作已经接不上了…",
+                            }
+                        }
+                    new_state = need_result.state
+                else:
+                    delta = self.config.card_actions[action_key].get("delta") or {}
+                    new_state = self.state_domain.apply_card_delta(state, delta)
                 click_ts[clicker_open_id] = now
                 new_state["card_action_ts"] = self.card_domain.prune_card_click_ts(
                     click_ts, now
@@ -204,7 +254,18 @@ class CardService:
                 new_state["last_update_ts"] = now
                 await self.pet_repo.update_pet_state(pet_id, new_state)
 
-            pending = self.config.card_action_text.get(action_key, {}).get("pending", "…")
+            if is_need_action and need_result:
+                pending = need_result.pending
+                if need_result.xp:
+                    pending = f"{pending}\n+{need_result.xp} XP"
+                if need_result.leveled_up:
+                    pending = f"{pending}\n等级提升到 Lv.{need_result.state['progress']['level']}"
+                if need_result.goal_completed:
+                    pending = f"{pending}\n今日目标完成"
+                did_text = need_result.did
+            else:
+                pending = self.config.card_action_text.get(action_key, {}).get("pending", "…")
+                did_text = None
             if message_id:
                 entry = self.runtime.card_followup_buffer.setdefault(
                     message_id,
@@ -227,7 +288,13 @@ class CardService:
                     entry.get("img_key"),
                 )
                 asyncio.create_task(
-                    self.card_action_followup(message_id, action_key, clicker_open_id)
+                    self.card_action_followup(
+                        message_id,
+                        action_key,
+                        clicker_open_id,
+                        did_text=did_text,
+                        pending_text=pending,
+                    )
                 )
                 self.card_domain.prune_card_followup_buffer(
                     self.runtime.card_followup_buffer, now
@@ -252,4 +319,3 @@ class CardService:
         except Exception:
             log.exception("card action failed")
             return {"toast": {"type": "error", "content": "呜…出了点小问题"}}
-

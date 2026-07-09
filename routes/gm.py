@@ -7,6 +7,8 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from domain.gameplay import DAILY_GOALS, NEED_SPECS
+
 router = APIRouter()
 
 
@@ -97,6 +99,10 @@ async def gm_help(req: Request):
             "POST /gm/dream": "force dream; json: {chat_id|pet_id,mark?}",
             "POST /gm/diary": "force diary; json: {chat_id|pet_id,mark?}",
             "POST /gm/tick": "run one autonomous tick; json: {chat_id|pet_id?} — omit for all pets",
+            "GET /gm/gameplay": "read gameplay state; query: chat_id or pet_id",
+            "POST /gm/need": "create/clear active need; json: {chat_id|pet_id, kind?, clear?}",
+            "POST /gm/goal": "reset/set daily goal; json: {chat_id|pet_id, kind?}",
+            "POST /gm/resolve_need": "resolve active need; json: {chat_id|pet_id, action, actor?}",
             "GET /gm/cards": "list memory cards; query: chat_id or pet_id, limit?",
             "GET /gm/messages": "list recent messages; query: chat_id or pet_id, limit?",
             "GET /web": "html dashboard; open /web?token=...",
@@ -113,9 +119,7 @@ async def gm_pets(req: Request):
     rows = await container.pet_repo.get_gm_pets()
     pets = []
     for row in rows:
-        state = container.state_domain.decay_state(
-            container.pet_repo.decode_state(row["state_json"]), time.time(), row["id"]
-        )
+        state = await container.services.gameplay.ensure_pet_gameplay(row["id"])
         pets.append(
             {
                 "id": row["id"],
@@ -195,11 +199,183 @@ async def gm_get_state(req: Request):
         return resolved
     pet_id, chat_id = resolved
     container = _container(req)
-    state = await container.pet_repo.load_pet_state(pet_id)
+    state = await container.services.gameplay.ensure_pet_gameplay(pet_id)
     return {
         "pet_id": pet_id,
         "chat_id": chat_id,
         "state": container.state_domain.public_state(state),
+    }
+
+
+@router.get("/gm/gameplay")
+async def gm_gameplay(req: Request):
+    auth = _gm_auth(req)
+    if auth:
+        return auth
+    pet_id_param = req.query_params.get("pet_id")
+    resolved = await _gm_resolve_pet(
+        req,
+        chat_id=req.query_params.get("chat_id"),
+        pet_id=pet_id_param or None,
+    )
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    pet_id, chat_id = resolved
+    container = _container(req)
+    state = await container.services.gameplay.ensure_pet_gameplay(pet_id)
+    public = container.state_domain.public_state(state)
+    return {
+        "pet_id": pet_id,
+        "chat_id": chat_id,
+        "active_need": public["active_need"],
+        "daily_goal": public["daily_goal"],
+        "progress": public["progress"],
+        "state_log": public["state_log"],
+    }
+
+
+@router.post("/gm/need")
+async def gm_need(req: Request):
+    auth = _gm_auth(req)
+    if auth:
+        return auth
+    container = _container(req)
+    body = await _gm_body(req)
+    pet_id_param = body.get("pet_id") or req.query_params.get("pet_id")
+    resolved = await _gm_resolve_pet(
+        req,
+        chat_id=body.get("chat_id") or req.query_params.get("chat_id"),
+        pet_id=pet_id_param or None,
+    )
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    pet_id, chat_id = resolved
+    now = time.time()
+    clear = _gm_bool(body.get("clear", req.query_params.get("clear")), default=False)
+    kind = (body.get("kind") or req.query_params.get("kind") or "").strip()
+    if kind and kind not in NEED_SPECS:
+        return JSONResponse({"error": "unknown_need_kind", "kind": kind}, status_code=400)
+
+    created = None
+
+    def _mutator(state: dict) -> dict:
+        nonlocal created
+        state = container.gameplay_domain.ensure_daily_goal(state, now, pet_id)
+        if clear:
+            state["active_need"] = {}
+            return state
+        if kind:
+            created = container.gameplay_domain.build_need(
+                kind, int(body.get("severity", 1) or 1), now
+            )
+            state["active_need"] = created
+            return state
+        state, created = container.gameplay_domain.maybe_create_need(state, now, pet_id)
+        return state
+
+    state = await container.pet_repo.mutate_state(pet_id, _mutator)
+    return {
+        "ok": True,
+        "pet_id": pet_id,
+        "chat_id": chat_id,
+        "created": created,
+        "state": container.state_domain.public_state(state),
+    }
+
+
+@router.post("/gm/goal")
+async def gm_goal(req: Request):
+    auth = _gm_auth(req)
+    if auth:
+        return auth
+    container = _container(req)
+    body = await _gm_body(req)
+    pet_id_param = body.get("pet_id") or req.query_params.get("pet_id")
+    resolved = await _gm_resolve_pet(
+        req,
+        chat_id=body.get("chat_id") or req.query_params.get("chat_id"),
+        pet_id=pet_id_param or None,
+    )
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    pet_id, chat_id = resolved
+    now = time.time()
+    kind = (body.get("kind") or req.query_params.get("kind") or "").strip()
+    spec = None
+    if kind:
+        spec = next((item for item in DAILY_GOALS if item["kind"] == kind), None)
+        if spec is None:
+            return JSONResponse({"error": "unknown_goal_kind", "kind": kind}, status_code=400)
+
+    def _mutator(state: dict) -> dict:
+        state = container.gameplay_domain.normalize_state(state)
+        if spec is None:
+            state["daily_goal"] = {}
+            return container.gameplay_domain.ensure_daily_goal(state, now, pet_id)
+        state["daily_goal"] = {
+            "date": container.gameplay_domain.local_date(now),
+            "kind": spec["kind"],
+            "title": spec["title"],
+            "target": int(spec["target"]),
+            "progress": int(body.get("progress", 0) or 0),
+            "completed": False,
+            "reward_xp": container.config.gameplay_daily_goal_reward_xp,
+        }
+        return state
+
+    state = await container.pet_repo.mutate_state(pet_id, _mutator)
+    return {
+        "ok": True,
+        "pet_id": pet_id,
+        "chat_id": chat_id,
+        "state": container.state_domain.public_state(state),
+    }
+
+
+@router.post("/gm/resolve_need")
+async def gm_resolve_need(req: Request):
+    auth = _gm_auth(req)
+    if auth:
+        return auth
+    container = _container(req)
+    body = await _gm_body(req)
+    pet_id_param = body.get("pet_id") or req.query_params.get("pet_id")
+    resolved = await _gm_resolve_pet(
+        req,
+        chat_id=body.get("chat_id") or req.query_params.get("chat_id"),
+        pet_id=pet_id_param or None,
+    )
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    pet_id, chat_id = resolved
+    action = (body.get("action") or req.query_params.get("action") or "").strip()
+    actor = (body.get("actor") or req.query_params.get("actor") or "GM").strip()
+    now = time.time()
+
+    async with container.runtime.state_lock(pet_id):
+        state = await container.pet_repo.load_pet_state(pet_id)
+        need = container.gameplay_domain.current_need(state, now)
+        if not need:
+            return JSONResponse({"error": "no_active_need"}, status_code=400)
+        if not action:
+            choices = container.gameplay_domain.choice_keys_for_need(need["kind"])
+            action = choices[0] if choices else ""
+        try:
+            result = container.services.gameplay.resolve_need_choice_state(
+                state, action, actor, now
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc), "action": action}, status_code=400)
+        await container.pet_repo.update_pet_state(pet_id, result.state)
+
+    return {
+        "ok": True,
+        "pet_id": pet_id,
+        "chat_id": chat_id,
+        "action": action,
+        "delta": result.delta,
+        "xp": result.xp,
+        "state": container.state_domain.public_state(result.state),
     }
 
 
@@ -363,4 +539,3 @@ async def gm_tick(req: Request):
     pet_id, chat_id = resolved
     spoke = await container.services.autonomous.tick_pet(pet_id, chat_id)
     return {"ok": True, "scope": "pet", "pet_id": pet_id, "chat_id": chat_id, "spoke": spoke}
-

@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import random
+import time
 
 from config import AppConfig
+from domain.gameplay import GameplayDomain
 from domain.state import StateDomain
 
 
 class CardDomain:
-    def __init__(self, config: AppConfig, state_domain: StateDomain):
+    def __init__(
+        self,
+        config: AppConfig,
+        state_domain: StateDomain,
+        gameplay_domain: GameplayDomain | None = None,
+    ):
         self.config = config
         self.state_domain = state_domain
+        self.gameplay_domain = gameplay_domain
 
     def state_bar(self, value: float) -> str:
         value = max(0.0, min(100.0, value))
@@ -36,7 +44,36 @@ class CardDomain:
             lines.append(self.config.card_vibe_template.format(vibe=vibe))
         return "\n".join(lines)
 
+    def render_gameplay_status(self, state: dict, now: float) -> str:
+        if not self.gameplay_domain:
+            return ""
+        lines: list[str] = []
+        need = self.gameplay_domain.current_need(state, now)
+        if need:
+            lines.append(f"**{need.get('title', '需要照料')}**")
+            desc = (need.get("description") or "").strip()
+            if desc:
+                lines.append(desc)
+        goal = state.get("daily_goal") if isinstance(state.get("daily_goal"), dict) else {}
+        if goal and goal.get("kind"):
+            done = "已完成" if goal.get("completed") else f"{goal.get('progress', 0)}/{goal.get('target', 1)}"
+            lines.append(f"今日目标：{goal.get('title', '')} `{done}`")
+        progress = state.get("progress") if isinstance(state.get("progress"), dict) else {}
+        if progress:
+            lines.append(
+                f"Lv.{int(progress.get('level', 1) or 1)} "
+                f"XP `{int(progress.get('xp', 0) or 0)}` "
+                f"累计 `{int(progress.get('total_xp', 0) or 0)}`"
+            )
+        return "\n".join(line for line in lines if line)
+
     def pick_card_actions(self, state: dict) -> list[str]:
+        if self.gameplay_domain:
+            need = self.gameplay_domain.current_need(state, time.time())
+            if need:
+                return self.gameplay_domain.choice_keys_for_need(need["kind"])[
+                    : self.config.card_max_buttons
+                ]
         needed: list[tuple[int, str]] = []
         for key, cfg in self.config.card_actions.items():
             dim = cfg.get("need_dim")
@@ -88,14 +125,30 @@ class CardDomain:
                 }
             )
         bars = self.render_state_bars(state)
+        gameplay = self.render_gameplay_status(state, float(built_at))
+        if gameplay and action_keys is None:
+            elements.append({"tag": "hr"})
+            elements.append({"tag": "markdown", "content": gameplay})
         if bars:
             elements.append({"tag": "hr"})
             elements.append({"tag": "markdown", "content": bars})
         if with_actions:
             keys = self.pick_card_actions(state) if action_keys is None else action_keys
             buttons = []
+            active_need = (
+                self.gameplay_domain.current_need(state, float(built_at))
+                if self.gameplay_domain and action_keys is None
+                else {}
+            )
             for key in keys:
-                btn_text = self.config.card_action_text.get(key, {}).get("button", key)
+                gameplay_text = (
+                    self.gameplay_domain.action_text(key, active_need.get("kind"))
+                    if self.gameplay_domain and active_need
+                    else {}
+                )
+                btn_text = gameplay_text.get(
+                    "button", self.config.card_action_text.get(key, {}).get("button", key)
+                )
                 buttons.append(
                     {
                         "tag": "button",
@@ -104,6 +157,8 @@ class CardDomain:
                         "value": {
                             "pet_id": pet_id,
                             "action": key,
+                            "need_id": active_need.get("id", ""),
+                            "need_kind": active_need.get("kind", ""),
                             "keys": list(keys),
                             "fixed": is_fixed,
                             "built_at": built_at,
@@ -171,4 +226,3 @@ class CardDomain:
             if isinstance(ts, (int, float))
             and now - ts < self.config.card_action_cooldown_sec
         }
-

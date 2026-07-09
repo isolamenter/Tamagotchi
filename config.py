@@ -111,6 +111,12 @@ class AppConfig:
     card_action_reply_prompt: str
     card_image_timeout_sec: int
 
+    gameplay_enabled: bool
+    gameplay_need_ttl_sec: int
+    gameplay_state_log_max: int
+    gameplay_daily_goal_reward_xp: int
+    gameplay_need_thresholds: dict[str, float]
+
 
 def _load_toml(path: Path) -> dict:
     with open(path, "rb") as f:
@@ -179,6 +185,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
     trigger_thresholds = autonomous_config["trigger_thresholds"]
 
     card_config = pet_config.get("card", {})
+    gameplay_config = pet_config.get("gameplay", {})
     card_prompts = prompts.get("card", {})
     card_bars = dict(card_prompts.get("bars", {}))
     card_vibe_template = card_bars.pop("vibe_template", "✨ {vibe}")
@@ -278,4 +285,23 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         card_action_text={k: dict(v) for k, v in card_prompts.get("actions", {}).items()},
         card_action_reply_prompt=card_prompts.get("action_reply", {}).get("prompt", ""),
         card_image_timeout_sec=int(card_config.get("image_timeout_sec", 120)),
+        gameplay_enabled=bool(gameplay_config.get("enabled", True)),
+        gameplay_need_ttl_sec=int(gameplay_config.get("need_ttl_sec", 7200)),
+        gameplay_state_log_max=int(gameplay_config.get("state_log_max", 20)),
+        gameplay_daily_goal_reward_xp=int(
+            gameplay_config.get("daily_goal_reward_xp", 15)
+        ),
+        gameplay_need_thresholds={
+            k: float(v)
+            for k, v in gameplay_config.get(
+                "need_thresholds",
+                {
+                    "hungry": 80,
+                    "sleepy": 25,
+                    "sad": 30,
+                    "bored": 30,
+                    "lonely": 25,
+                },
+            ).items()
+        },
     )

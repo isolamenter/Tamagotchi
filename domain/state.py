@@ -25,6 +25,11 @@ class StateDomain:
             "last_diary_date": "",
             "recent_vibe": "",
             "recent_vibe_date": "",
+            "active_need": {},
+            "daily_goal": {},
+            "progress": {"xp": 0, "level": 1, "total_xp": 0},
+            "state_log": [],
+            "need_cooldowns": {},
         }
 
     def local_time(self, now_ts: float) -> time.struct_time:
@@ -192,4 +197,50 @@ class StateDomain:
         out["last_reply_ts"] = state.get("last_reply_ts")
         out["last_dream_date"] = state.get("last_dream_date", "")
         out["last_diary_date"] = state.get("last_diary_date", "")
+        active_need = state.get("active_need") if isinstance(state.get("active_need"), dict) else {}
+        if active_need and not active_need.get("resolved"):
+            out["active_need"] = {
+                "id": active_need.get("id", ""),
+                "kind": active_need.get("kind", ""),
+                "title": active_need.get("title", ""),
+                "description": active_need.get("description", ""),
+                "created_at": active_need.get("created_at"),
+                "expires_at": active_need.get("expires_at"),
+                "severity": active_need.get("severity", 1),
+                "source": active_need.get("source", ""),
+            }
+        else:
+            out["active_need"] = {}
+        goal = state.get("daily_goal") if isinstance(state.get("daily_goal"), dict) else {}
+        out["daily_goal"] = {
+            "date": goal.get("date", ""),
+            "kind": goal.get("kind", ""),
+            "title": goal.get("title", ""),
+            "target": int(goal.get("target", 0) or 0),
+            "progress": int(goal.get("progress", 0) or 0),
+            "completed": bool(goal.get("completed", False)),
+            "reward_xp": int(goal.get("reward_xp", 0) or 0),
+        } if goal else {}
+        progress = state.get("progress") if isinstance(state.get("progress"), dict) else {}
+        out["progress"] = {
+            "xp": int(progress.get("xp", 0) or 0),
+            "level": int(progress.get("level", 1) or 1),
+            "total_xp": int(progress.get("total_xp", 0) or 0),
+        }
+        raw_log = state.get("state_log") if isinstance(state.get("state_log"), list) else []
+        out["state_log"] = [
+            {
+                "ts": item.get("ts"),
+                "kind": item.get("kind", ""),
+                "actor": item.get("actor", ""),
+                "text": item.get("text", ""),
+                "delta": item.get("delta", {}),
+                "xp": int(item.get("xp", 0) or 0),
+                "need_kind": item.get("need_kind", ""),
+                "goal_kind": item.get("goal_kind", ""),
+                "action": item.get("action", ""),
+            }
+            for item in raw_log[-self.config.gameplay_state_log_max :]
+            if isinstance(item, dict)
+        ]
         return out

@@ -8,6 +8,7 @@ import time
 
 from config import AppConfig
 from domain.card import CardDomain
+from domain.gameplay import GameplayDomain
 from domain.pet import PetDomain
 from domain.state import StateDomain
 from integrations.feishu_client import FeishuClient
@@ -15,6 +16,7 @@ from integrations.llm_client import LLMClient
 from repositories.message_repo import MessageRepository
 from repositories.pet_repo import PetRepository
 from repositories.system_repo import SystemRepository
+from services.gameplay_service import GameplayService
 from services.memory_service import MemoryService
 from services.observer_service import ObserverService
 
@@ -26,11 +28,13 @@ class AutonomousService:
         self,
         config: AppConfig,
         state_domain: StateDomain,
+        gameplay_domain: GameplayDomain,
         card_domain: CardDomain,
         pet_domain: PetDomain,
         pet_repo: PetRepository,
         message_repo: MessageRepository,
         system_repo: SystemRepository,
+        gameplay_service: GameplayService,
         memory_service: MemoryService,
         observer_service: ObserverService,
         feishu: FeishuClient,
@@ -38,11 +42,13 @@ class AutonomousService:
     ):
         self.config = config
         self.state_domain = state_domain
+        self.gameplay_domain = gameplay_domain
         self.card_domain = card_domain
         self.pet_domain = pet_domain
         self.pet_repo = pet_repo
         self.message_repo = message_repo
         self.system_repo = system_repo
+        self.gameplay_service = gameplay_service
         self.memory_service = memory_service
         self.observer_service = observer_service
         self.feishu = feishu
@@ -203,6 +209,30 @@ class AutonomousService:
             as_card=True,
         )
 
+    async def need_speak(
+        self, pet_id: int, chat_id: str, current: dict | None = None, now: float | None = None
+    ) -> tuple[dict, dict] | None:
+        now = time.time() if now is None else now
+        if not self.config.card_enabled or not self.config.gameplay_enabled:
+            return None
+        state, need = await self.gameplay_service.maybe_create_need(pet_id, now)
+        if not need:
+            return None
+        text = f"{need.get('title', '需要照料')}：{need.get('description', '')}"
+        await self.feishu.send_card(
+            chat_id,
+            self.card_domain.build_pet_card(pet_id, text, state, built_at=int(now)),
+        )
+        await self.message_repo.append_message(pet_id, "assistant", text)
+        log.info(
+            "pet %d NEED %s severity=%s state=%s",
+            pet_id,
+            need.get("kind"),
+            need.get("severity"),
+            {key: round(state.get(key, 0)) for key in self.config.state_numeric_keys},
+        )
+        return need, state
+
     async def scheduled_speak(
         self,
         pet_id: int,
@@ -260,6 +290,9 @@ class AutonomousService:
                 break
             _, current = result
         if fired_scheduled:
+            return True
+        need_result = await self.need_speak(pet_id, chat_id, current=current, now=now)
+        if need_result is not None:
             return True
         last_active_ts = max(
             float(current.get("last_proactive_ts", 0) or 0),
