@@ -207,8 +207,7 @@ function setBusy(busy) {
 function renderState(pet) {
   const st = pet.state;
   document.getElementById("bars").innerHTML = numericKeys.map(dim => {
-    const raw = st[dim] == null ? 50 : st[dim];
-    const shown = dim === "hunger" ? 100 - raw : raw;
+    const shown = st[dim] == null ? 50 : st[dim];
     const label = barLabels[dim] || dim;
     return '<div class="bar-row" data-dim="' + dim + '">'
       + '<span class="bar-label">' + esc(label) + '</span>'
@@ -344,7 +343,7 @@ function saveState() {
     const dim = row.dataset.dim;
     const shown = Math.max(0, Math.min(100,
       Number(row.querySelector(".bar-input").value) || 0));
-    set[dim] = dim === "hunger" ? 100 - shown : shown;
+    set[dim] = shown;
   });
   const body = { pet_id: Number(currentPet), set: set };
   const vibe = document.getElementById("vibeInput").value.trim();

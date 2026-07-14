@@ -81,7 +81,7 @@ class AppConfig:
     quiet_hours: tuple[int, int]
     quiet_weekends: bool
     scheduled_events: tuple[dict, ...]
-    hunger_trigger: float
+    satiety_trigger: float
     mood_trigger: float
     energy_trigger: float
     curiosity_trigger: float
@@ -111,6 +111,7 @@ class AppConfig:
 
     gameplay_enabled: bool
     gameplay_need_ttl_sec: int
+    gameplay_need_cooldown_sec: int
     gameplay_need_thresholds: dict[str, float]
 
 
@@ -253,7 +254,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         quiet_hours=quiet_hours,
         quiet_weekends=bool(autonomous_config.get("quiet_weekends", False)),
         scheduled_events=scheduled_events,
-        hunger_trigger=float(trigger_thresholds["hunger"]),
+        satiety_trigger=float(trigger_thresholds["satiety"]),
         mood_trigger=float(trigger_thresholds["mood"]),
         energy_trigger=float(trigger_thresholds["energy"]),
         curiosity_trigger=float(trigger_thresholds["curiosity"]),
@@ -281,6 +282,11 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         card_image_timeout_sec=int(card_config.get("image_timeout_sec", 120)),
         gameplay_enabled=bool(gameplay_config.get("enabled", True)),
         gameplay_need_ttl_sec=int(gameplay_config.get("need_ttl_sec", 7200)),
+        gameplay_need_cooldown_sec=int(
+            gameplay_config.get(
+                "need_cooldown_sec", gameplay_config.get("need_ttl_sec", 7200)
+            )
+        ),
         gameplay_need_thresholds={
             k: float(v)
             for k, v in gameplay_config.get(

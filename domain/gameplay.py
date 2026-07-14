@@ -11,10 +11,11 @@ from config import AppConfig
 
 NEED_ORDER = ("hungry", "sleepy", "sad", "bored", "lonely")
 
-NEED_SPECS: dict[str, dict[str, str]] = {
+NEED_SPECS: dict[str, dict[str, Any]] = {
     "hungry": {
-        "dim": "hunger",
-        "side": "high",
+        "dim": "satiety",
+        "side": "low",
+        "severity_gap": 10,
         "title": "饿肚子",
         "description": "它闻起来像快把梦里的面包都啃完了。",
     },
@@ -51,22 +52,22 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "button": "🍖 投喂",
             "did": "给你喂了点吃的",
             "pending": "（小口小口……饿意终于退下去一点）",
-            "delta": {"hunger": -35, "mood": 4, "affection": 1},
+            "delta": {"satiety": 45, "mood": 4, "affection": 2},
         },
         {
             "action": "snack_hunt",
             "button": "🌃 找夜宵",
             "did": "带你去找夜宵",
             "pending": "（闻着味道一路小跑，眼睛亮了起来）",
-            "delta": {"hunger": -20, "curiosity": 8, "energy": -5},
+            "delta": {"satiety": 22, "curiosity": 18, "energy": -15},
         },
         {
             "action": "promise_food",
             "button": "🫓 画饼充饥",
             "did": "给你画了一张很香的饼",
             "pending": "（认真盯着那张饼，半信半疑地咽了咽口水）",
-            "delta": {"hunger": -8, "curiosity": 4},
-            "random_delta": {"mood": (-3, 6)},
+            "delta": {"satiety": 5, "curiosity": 8},
+            "random_delta": {"mood": (-12, 8)},
         },
     ),
     "sleepy": (
@@ -75,21 +76,21 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "button": "💤 哄睡",
             "did": "哄你休息了一会儿",
             "pending": "（打了个哈欠……终于能安心眯一会儿）",
-            "delta": {"energy": 30, "hunger": 5, "mood": 2},
+            "delta": {"energy": 40, "satiety": -10, "mood": 3},
         },
         {
             "action": "quiet_story",
             "button": "📖 讲睡前故事",
             "did": "给你讲了一个很轻的睡前故事",
             "pending": "（把故事叼进梦里，尾音慢慢变轻）",
-            "delta": {"energy": 18, "mood": 6, "curiosity": 3},
+            "delta": {"energy": 18, "mood": 15, "curiosity": 12},
         },
         {
             "action": "tuck_in",
             "button": "🛏️ 盖小被子",
             "did": "给你盖好了小被子",
             "pending": "（缩进被角，只露出一点安心的呼吸）",
-            "delta": {"energy": 25, "affection": 3},
+            "delta": {"energy": 25, "affection": 12},
         },
     ),
     "sad": (
@@ -98,21 +99,21 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "button": "🫧 哄一哄",
             "did": "轻声哄了哄你",
             "pending": "（闷闷的心情松开了一点）",
-            "delta": {"mood": 25, "affection": 3},
+            "delta": {"mood": 35, "affection": 4},
         },
         {
             "action": "listen",
             "button": "👂 听它碎碎念",
             "did": "认真听你碎碎念了一会儿",
             "pending": "（被听见以后，委屈少了一小块）",
-            "delta": {"mood": 16, "affection": 5, "energy": -2},
+            "delta": {"mood": 18, "affection": 15, "energy": -8},
         },
         {
             "action": "make_joke",
             "button": "🎭 逗它笑",
             "did": "努力把你逗笑",
             "pending": "（先绷着脸，最后还是噗地笑了一声）",
-            "delta": {"mood": 14, "curiosity": 5, "energy": -4},
+            "delta": {"mood": 12, "curiosity": 15, "energy": -12},
         },
     ),
     "bored": (
@@ -121,21 +122,21 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "button": "🎲 逗它玩",
             "did": "陪你玩了个小游戏",
             "pending": "（一下蹦起来——有人陪我玩啦！）",
-            "delta": {"curiosity": 25, "mood": 8, "energy": -8, "hunger": 5},
+            "delta": {"curiosity": 35, "mood": 10, "energy": -15, "satiety": -10},
         },
         {
             "action": "tell_news",
             "button": "🗞️ 讲新鲜事",
             "did": "给你讲了一个新鲜事",
             "pending": "（耳朵立起来，开始追问后续）",
-            "delta": {"curiosity": 18, "affection": 2},
+            "delta": {"curiosity": 22, "affection": 8},
         },
         {
             "action": "send_explore",
             "button": "🧭 派去探险",
             "did": "派你去附近探险",
             "pending": "（叼着小地图冲出去，又带着亮晶晶的眼神回来）",
-            "delta": {"curiosity": 12, "energy": -10, "mood": 5},
+            "delta": {"curiosity": 15, "energy": -20, "mood": 12, "satiety": -12},
         },
     ),
     "lonely": (
@@ -144,21 +145,21 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "button": "🤚 摸摸头",
             "did": "摸了摸你的头",
             "pending": "（眯起眼睛……被注意到的时候最安心了）",
-            "delta": {"affection": 20, "mood": 5},
+            "delta": {"affection": 30, "mood": 5},
         },
         {
             "action": "sit_together",
             "button": "🪑 陪它坐会儿",
             "did": "安静陪你坐了一会儿",
             "pending": "（靠近一点点，确认这里还有自己的位置）",
-            "delta": {"affection": 16, "mood": 7, "energy": 2},
+            "delta": {"affection": 18, "mood": 14, "energy": 5},
         },
         {
             "action": "call_name",
             "button": "📣 喊它过来",
             "did": "喊你过来一起待着",
             "pending": "（听见有人叫，立刻探出头来）",
-            "delta": {"affection": 12, "curiosity": 4, "mood": 4},
+            "delta": {"affection": 10, "curiosity": 14, "mood": 8},
         },
     ),
 }
@@ -189,8 +190,13 @@ class GameplayDomain:
 
     def expired_need_cleared(self, state: dict, now: float) -> dict:
         out = dict(state)
-        need = out["active_need"]
+        need = out.get("active_need") or {}
         if need and not need.get("resolved") and float(need.get("expires_at") or 0) <= now:
+            kind = need.get("kind")
+            if kind in NEED_SPECS:
+                cooldowns = dict(out.get("need_cooldowns") or {})
+                cooldowns[kind] = now + self.config.gameplay_need_cooldown_sec
+                out["need_cooldowns"] = cooldowns
             out["active_need"] = {}
         return out
 
@@ -220,7 +226,8 @@ class GameplayDomain:
                 severity = 2 if value >= min(100.0, threshold + 10) else 1
             else:
                 matched = value <= threshold
-                severity = 2 if value <= max(0.0, threshold - 15) else 1
+                severe_gap = float(spec.get("severity_gap", 15))
+                severity = 2 if value <= max(0.0, threshold - severe_gap) else 1
             if matched:
                 candidates.append((-severity, idx, kind))
         if not candidates:
@@ -374,7 +381,7 @@ class GameplayDomain:
         if settle_need:
             out["active_need"] = {}
             cooldowns = dict(out["need_cooldowns"])
-            cooldowns[need_kind] = now + self.config.gameplay_need_ttl_sec
+            cooldowns[need_kind] = now + self.config.gameplay_need_cooldown_sec
             out["need_cooldowns"] = cooldowns
         out["last_update_ts"] = now
 

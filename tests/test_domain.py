@@ -111,7 +111,7 @@ class StateDomainTests(unittest.TestCase):
         self.assertEqual(set(calls), {"dream", "diary"})
 
     def test_state_band(self):
-        self.assertEqual(self.state.state_band("hunger", 90), "hunger_extreme_high")
+        self.assertEqual(self.state.state_band("satiety", 10), "satiety_extreme_low")
         self.assertEqual(self.state.state_band("mood", 10), "mood_extreme_low")
 
     def test_decay_updates_timestamp_and_bounds_values(self):
@@ -132,7 +132,7 @@ class CardDomainTests(unittest.TestCase):
 
     def test_card_actions_and_text_helpers(self):
         pet_state = {key: 50.0 for key in self.config.state_numeric_keys}
-        pet_state["hunger"] = 90.0
+        pet_state["satiety"] = 10.0
         self.assertIn("feed", self.card.pick_card_actions(pet_state))
 
         text = self.card.compose_card_text("hello", ["one"], "two")
@@ -153,7 +153,7 @@ class GameplayDomainTests(unittest.TestCase):
     def test_need_detection_prefers_extreme_severity(self):
         state = {
             **self.state.initial_state(),
-            "hunger": 81,
+            "satiety": 19,
             "energy": 5,
         }
         detected = self.gameplay.detect_need_kind(state, 1000.0)
@@ -163,14 +163,16 @@ class GameplayDomainTests(unittest.TestCase):
         now = 1000.0
         state = {
             **self.state.initial_state(),
-            "hunger": 90,
+            "satiety": 10,
         }
         state, need = self.gameplay.maybe_create_need(state, now, pet_id=1)
         self.assertEqual(need["kind"], "hungry")
 
         result = self.gameplay.apply_choice(state, "feed", "群友-A", now + 1)
         self.assertEqual(result.state["active_need"], {})
-        self.assertLess(result.state["hunger"], 90)
+        self.assertEqual(result.state["satiety"], 55)
+        self.assertEqual(result.state["mood"], 74)
+        self.assertEqual(result.state["affection"], 52)
         self.assertGreater(result.state["need_cooldowns"]["hungry"], now)
         detected = self.gameplay.detect_need_kind(result.state, now + 2)
         self.assertIsNone(detected)
@@ -179,13 +181,14 @@ class GameplayDomainTests(unittest.TestCase):
         now = 1000.0
         state = {
             **self.state.initial_state(),
-            "hunger": 90,
+            "satiety": 10,
         }
 
         result = self.gameplay.apply_card_action(state, "feed", "群友-A", now)
 
-        self.assertEqual(result.state["hunger"], 55)
-        self.assertEqual(result.state["mood"], 83)
+        self.assertEqual(result.state["satiety"], 55)
+        self.assertEqual(result.state["mood"], 74)
+        self.assertEqual(result.state["affection"], 52)
         self.assertEqual(result.state["need_cooldowns"], {})
 
     def test_fixed_card_can_use_free_rule_without_resolving_need(self):
@@ -200,8 +203,26 @@ class GameplayDomainTests(unittest.TestCase):
         )
 
         self.assertEqual(result.state["active_need"]["kind"], "hungry")
-        self.assertEqual(result.state["mood"], 88)
-        self.assertEqual(result.state["affection"], 35)
+        self.assertEqual(result.state["mood"], 74)
+        self.assertEqual(result.state["affection"], 53)
+
+    def test_expired_need_starts_a_cooldown(self):
+        now = 1000.0
+        state = {
+            **self.state.initial_state(),
+            "satiety": 10,
+            "active_need": self.gameplay.build_need("hungry", 1, now - 3600),
+        }
+        state["active_need"]["expires_at"] = now - 1
+
+        cleared = self.gameplay.expired_need_cleared(state, now)
+
+        self.assertEqual(cleared["active_need"], {})
+        self.assertEqual(
+            cleared["need_cooldowns"]["hungry"],
+            now + self.config.gameplay_need_cooldown_sec,
+        )
+        self.assertIsNone(self.gameplay.detect_need_kind(cleared, now + 1))
 
 
 class MemoryDomainTests(unittest.TestCase):

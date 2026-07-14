@@ -37,71 +37,73 @@ card_reply_max_tokens = 150
 [state]
 
 [state.initial]
-# 0-100 浮点：hunger 0=饱 100=极饿；mood/energy/curiosity/affection 0=糟 100=满。
-hunger = 20.0
-mood = 80.0
-energy = 80.0
-curiosity = 60.0
-affection = 30.0
+# 0-100 浮点：satiety 0=极饿 100=饱；其余四项 0=糟 100=满。
+satiety = 75.0
+mood = 70.0
+energy = 85.0
+curiosity = 65.0
+affection = 50.0
 
 # 衰减模型：每个维度向 baseline 指数收敛（v = baseline + (v-baseline)*exp(-rate*h)），
 # 没人互动时漂回中段而不是钉死在极端档。rate = 每小时收敛速率常数（半衰期 ≈ 0.693/rate 小时）。
 [state.decay_active]
 # 清醒时段的收敛目标 / 速率。
-hunger    = { baseline = 95.0,  rate = 0.20 }  # 没人喂会慢慢饿到接近极饿
-mood      = { baseline = 50.0,  rate = 0.22 }  # 没互动回落到平淡中段
-energy    = { baseline = 35.0,  rate = 0.18 }  # 清醒时精力往略低档漂
-curiosity = { baseline = 45.0,  rate = 0.25 }  # 探索欲淡回中段，需要互动重新点燃
-affection = { baseline = 40.0,  rate = 0.04 }  # 对群的感情漂得很慢
+satiety   = { baseline = 5.0,  rate = 0.18 }  # 白天逐步变饿；通常每天需要照料一次
+mood      = { baseline = 25.0, rate = 0.11 }  # 长时间冷落会积累成低落
+energy    = { baseline = 15.0, rate = 0.18 }  # 白天会明显疲惫，夜间再恢复
+curiosity = { baseline = 20.0, rate = 0.12 }  # 没新鲜事会逐步无聊
+affection = { baseline = 15.0, rate = 0.05 }  # 很慢地疏远，约数个活跃日才需要关注
 
 [state.decay_quiet]
 # 静默时段（睡觉时间）的收敛目标 / 速率。
-hunger    = { baseline = 80.0,  rate = 0.06 }  # 睡觉代谢慢，饿得慢
-mood      = { baseline = 55.0,  rate = 0.05 }  # 睡觉时心情基本稳定
-energy    = { baseline = 100.0, rate = 0.45 }  # 睡觉快速回血
-curiosity = { baseline = 50.0,  rate = 0.0  }  # 睡觉不衰减探索欲
-affection = { baseline = 40.0,  rate = 0.0  }  # 睡觉不衰减感情
+satiety   = { baseline = 20.0, rate = 0.06 }   # 睡觉代谢慢，饿得慢
+mood      = { baseline = 70.0, rate = 0.10 }   # 睡眠会缓和低落
+energy    = { baseline = 95.0, rate = 0.30 }   # 睡眠显著回血
+curiosity = { baseline = 70.0, rate = 0.10 }   # 休息后恢复一点新鲜感
+affection = { baseline = 50.0, rate = 0.035 }  # 休息时缓慢回暖
 
 # 极端档 / 高档 / 低档判定（不在范围内 = 中段，state_render 直接不渲染该维度）。
-[state.bands.hunger]
-extreme_high = 85
-high = 60
+[state.bands.satiety]
+extreme_low = 10
+low = 30
 
 [state.bands.mood]
-extreme_low = 15
-low = 40
+extreme_low = 25
+low = 50
 high = 80
 
 [state.bands.energy]
-extreme_low = 15
-low = 40
+extreme_low = 20
+low = 50
 high = 80
 
 [state.bands.curiosity]
 high = 80
-low = 25
+low = 45
 
 [state.bands.affection]
 high = 75
-low = 20
+low = 40
 
 [gameplay]
 # 状态玩法：阈值触发需求事件，卡片按钮按规则确定性结算五维状态。
 enabled = true
-need_ttl_sec = 7200
+need_ttl_sec = 1800
+# 已处理与已过期的需求都进入这个冷却，防止同一需求反复刷卡。
+need_cooldown_sec = 7200
 
 [gameplay.need_thresholds]
-hungry = 80
-sleepy = 25
-sad = 30
-bored = 30
-lonely = 25
+hungry = 20
+sleepy = 35
+sad = 40
+bored = 35
+lonely = 30
 
 [autonomous]
 # 心跳间隔（测试期 1 min；生产建议 600）。
 tick_interval_sec = 600
 # 普通主动发言冷却（测试期 0；生产建议 14400，即 4h）。
-cooldown_sec = 3600
+cooldown_sec = 7200
 # 静默时段用的本地时区偏移（默认上海 +8）。
 timezone_offset_hours = 8.0
 # 休息时段：本地时间落在此区间内不普通主动发言。支持跨午夜（start > end）。
@@ -111,15 +113,15 @@ quiet_end_hour = 10
 # 周末整天也算休息时间；自动冒泡、梦境、日记都会停掉，@ 时只回睡眠文案。
 quiet_weekends = true
 # 状态没触发时，每 tick 自发说话的概率。
-spontaneous_prob = 0.50
+spontaneous_prob = 0.20
 
 [autonomous.trigger_thresholds]
-# hunger >= 此值 -> 主动抱怨饿。
-hunger = 85.0
+# satiety <= 此值 -> 主动抱怨饿。
+satiety = 10.0
 # mood <= 此值 -> 主动发情绪。
-mood = 15.0
+mood = 25.0
 # energy <= 此值 -> 主动说要睡。
-energy = 15.0
+energy = 20.0
 # curiosity <= 此值 -> 主动想找人玩。
 curiosity = 20.0
 # affection <= 此值 -> 主动想求关注。
@@ -155,34 +157,34 @@ image_timeout_sec = 120
 #   need_side = "low"  -> 维度进入 low / extreme_low 档时浮现
 # delta 是点击后套用的「确定性」状态变化，不经过 LLM。
 [card.actions.feed]
-need_dim = "hunger"
-need_side = "high"
-delta = { hunger = -35, mood = 3 }
+need_dim = "satiety"
+need_side = "low"
+delta = { satiety = 45, mood = 4, affection = 2 }
 
 [card.actions.rest]
 need_dim = "energy"
 need_side = "low"
-delta = { energy = 30, hunger = 5 }
+delta = { energy = 40, satiety = -10, mood = 3 }
 
 [card.actions.soothe]
 need_dim = "mood"
 need_side = "low"
-delta = { mood = 25, affection = 3 }
+delta = { mood = 35, affection = 4 }
 
 [card.actions.play]
 need_dim = "curiosity"
 need_side = "low"
-delta = { curiosity = 25, mood = 8, energy = -8, hunger = 5 }
+delta = { curiosity = 35, mood = 10, energy = -15, satiety = -10 }
 
 [card.actions.pet]
 need_dim = "affection"
 need_side = "low"
-delta = { affection = 20, mood = 5 }
+delta = { affection = 30, mood = 5 }
 
 # 日记 / 梦境卡片的固定按钮。没有 need_dim/need_side，不会出现在主动发言卡片上，
 # 只在 prompts.toml [[scheduled_events]] 的 card_action 指定时随对应卡片出现。
 [card.actions.goodnight]
-delta = { mood = 8, affection = 5 }
+delta = { mood = 4, affection = 3 }
 
 [card.actions.goodmorning]
-delta = { mood = 8, curiosity = 8, affection = 5 }
+delta = { mood = 4, curiosity = 5, affection = 2 }

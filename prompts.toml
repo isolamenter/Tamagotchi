@@ -94,8 +94,8 @@ line_prefix = "- "
 vibe_template = "今天身上带着一点'{vibe}'的色彩"
 
 [state_render.lines]
-hunger_extreme_high = "你饿到注意力难集中，反复想着吃的，回应短促"
-hunger_high = "你嘴有点馋，闻到食物气味会分神"
+satiety_extreme_low = "你饿到注意力难集中，反复想着吃的，回应短促"
+satiety_low = "你嘴有点馋，闻到食物气味会分神"
 mood_extreme_low = "你心情糟透了，回应短、带刺，不太想接梗"
 mood_low = "你心里闷闷的，话少，想被人哄一下"
 mood_high = "你心情很好，话多，想多玩、多扯新话题"
@@ -119,7 +119,7 @@ prompt = """【系统主动触发——不是群友发言】
 不要输出 state_delta；主动发言只影响这次说话的内容，不修改五维玩法状态。"""
 
 [proactive_triggers]
-hunger = "你已经很饿了（hunger {hunger}/100），很久没人喂你，想找人要吃的"
+satiety = "你已经很饿了（satiety {satiety}/100），很久没人喂你，想找人要吃的"
 mood = "你心情糟透了（mood {mood}/100），很久没人理你，想抱怨 / 撒娇求安慰"
 energy = "你已经困得不行（energy {energy}/100），想宣告自己要睡觉了"
 curiosity = "你有点无聊了（curiosity {curiosity}/100），很久没新鲜事，想找群友玩点什么"
@@ -198,8 +198,8 @@ toast_expired = "这张卡片已经过期啦，等我下次冒泡再来玩吧~"
 followup_prefix = "↳ "
 
 [card.bars]
-# 五维进度条的 label（含 emoji）。hunger 以「饱腹度」(100-hunger) 展示，让所有条都是「满 = 好」。
-hunger = "🍖 饱腹"
+# 五维进度条的 label（含 emoji）。satiety 与其它维度一样，满 = 好。
+satiety = "🍖 饱腹"
 mood = "😊 心情"
 energy = "⚡ 精力"
 curiosity = "🔍 好奇"

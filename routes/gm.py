@@ -94,7 +94,7 @@ async def gm_help(req: Request):
         "endpoints": {
             "GET /gm/pets": "list pets",
             "GET /gm/state": "read state; query: chat_id or pet_id",
-            "POST /gm/state": "set/delta state; json: {chat_id|pet_id, set:{hunger,mood,energy,curiosity,affection}, delta:{...}, recent_vibe?: '...' | 'random'}",
+            "POST /gm/state": "set/delta state; json: {chat_id|pet_id, set:{satiety,mood,energy,curiosity,affection}, delta:{...}, recent_vibe?: '...' | 'random'}",
             "POST /gm/speak": "force proactive speech; json: {chat_id|pet_id,trigger?}",
             "POST /gm/dream": "force dream; json: {chat_id|pet_id,mark?}",
             "POST /gm/diary": "force diary; json: {chat_id|pet_id,mark?}",

@@ -36,8 +36,7 @@ class CardDomain:
             label = self.config.card_bar_labels.get(dim)
             if not label:
                 continue
-            raw = float(state.get(dim, 50.0))
-            shown = 100.0 - raw if dim == "hunger" else raw
+            shown = float(state.get(dim, 50.0))
             lines.append(f"{label}  {self.state_bar(shown)}  `{int(round(shown))}`")
         vibe = (state.get("recent_vibe") or "").strip()
         if vibe:

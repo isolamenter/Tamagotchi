@@ -147,15 +147,11 @@ class PetRepository:
         with self.db.connect() as conn:
             rows = conn.execute(
                 "SELECT p.id, p.chat_id, p.born_at, p.summary_until_id, p.state_json, "
-                "COUNT(DISTINCT m.id) AS message_count, "
-                "COUNT(DISTINCT c.id) AS card_count "
-                "FROM pets p "
-                "LEFT JOIN messages m ON m.pet_id = p.id "
-                "LEFT JOIN memory_cards c ON c.pet_id = p.id "
-                "GROUP BY p.id ORDER BY p.id"
+                "(SELECT COUNT(*) FROM messages m WHERE m.pet_id = p.id) AS message_count, "
+                "(SELECT COUNT(*) FROM memory_cards c WHERE c.pet_id = p.id) AS card_count "
+                "FROM pets p ORDER BY p.id"
             ).fetchall()
         return [dict(row) for row in rows]
 
     async def get_gm_pets(self) -> list[dict]:
         return await asyncio.to_thread(self._get_gm_pets)
-

@@ -61,9 +61,9 @@ class AutonomousService:
             return None
         if now - last_active_ts < self.config.proactive_cooldown_sec:
             return None
-        if state["hunger"] >= self.config.hunger_trigger:
-            return self.config.proactive_trigger_templates["hunger"].format(
-                hunger=round(state["hunger"])
+        if state["satiety"] <= self.config.satiety_trigger:
+            return self.config.proactive_trigger_templates["satiety"].format(
+                satiety=round(state["satiety"])
             )
         if state["mood"] <= self.config.mood_trigger:
             return self.config.proactive_trigger_templates["mood"].format(

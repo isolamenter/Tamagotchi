@@ -58,7 +58,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         history, state = await self.pets.load_pet_context(pet_id)
         self.assertEqual(history[0]["id"], msg_id)
         self.assertEqual(history[0]["content"], "hello")
-        self.assertIn("hunger", state)
+        self.assertIn("satiety", state)
         self.assertEqual(await self.messages.count_unsummarized(pet_id), 1)
 
         self.assertFalse(await self.system.check_and_register_event("evt-1"))
@@ -108,21 +108,19 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         pet_id = await self.pets.get_or_create_pet("oc_mutate")
         await self.pets.update_pet_state(
             pet_id,
-            {**self.state_domain.initial_state(), "hunger": 50.0, "last_update_ts": time.time()},
+            {**self.state_domain.initial_state(), "satiety": 50.0, "last_update_ts": time.time()},
         )
 
         async def add_one():
             await self.pets.mutate_state(
                 pet_id,
-                lambda s: {**s, "hunger": s["hunger"] + 1.0, "last_update_ts": time.time()},
+                lambda s: {**s, "satiety": s["satiety"] + 1.0, "last_update_ts": time.time()},
             )
 
         await asyncio.gather(*[add_one() for _ in range(20)])
         final = await self.pets.load_pet_state(pet_id)
         # 串行化下 20 次 +1 全部生效（约 70）；若丢失更新会远低于此（接近 51）
-        self.assertGreater(final["hunger"], 69.0)
-
+        self.assertGreater(final["satiety"], 69.0)
 
 if __name__ == "__main__":
     unittest.main()
-
