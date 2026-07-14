@@ -13,11 +13,11 @@
 - 基于飞书事件订阅（`im.message.receive_v1`），群里 @ 触发回复（带可配置回复节流间隔，被刷屏时只记不回）；非 @ 消息会被宠物"旁听"进上下文（缓冲后按 tick 批量落库）
 - **每个 `chat_id` 一只独立宠物，对话历史用 SQLite 持久化（stdlib，零额外依赖）**
 - **长期记忆 = 事件卡片 + RAG**：消息累积后压成结构化卡片（when/who/what/vibe/hooks）+ 向量索引；回复时按相关性 + 时序双路召回，塞回 system message 当"想起的事"
-- **状态系统：hunger / mood / energy / curiosity / affection 五维 + 每日 vibe 词；中段不渲染，只在极端档给一句模糊感受。LLM 走 JSON 结构化输出同时返回 reply + 多维 state_delta**
-- **状态玩法化 V1：五维状态会触发 `active_need` 需求事件，卡片给出 2-3 个选择；点击后由规则确定性结算状态、XP、等级、每日目标和 `state_log`，LLM 只生成反馈台词**
+- **状态系统：hunger / mood / energy / curiosity / affection 五维 + 每日 vibe 词；中段不渲染，只在极端档给一句模糊感受。普通对话只读 state，state 只由卡片按钮的确定性规则修改**
+- **状态玩法：五维状态会触发 `active_need` 需求事件，卡片给出 2-3 个选择；点击后由规则确定性结算五维状态，LLM 只生成反馈台词**
 - **主动发言：进程内常驻 asyncio 心跳，宠物会按固定时刻写日记 / 说梦境；在普通主动发言前会优先生成需求卡片**
 - **交互卡片：主动发言、需求事件、梦境 / 日记都以飞书消息卡片呈现，底部带玩法状态、五维状态进度条和互动按钮。梦境卡还会额外调图像模型生成一张插图嵌进卡里**
-- **Web 可视化面板：`/web` 单页面板，展示宠物列表、五维状态、当前需求、今日目标、XP/level、状态日志、记忆卡片与消息时间线，每 15 秒自动刷新**
+- **Web 可视化面板：`/web` 单页面板，展示宠物列表、五维状态、当前需求、记忆卡片与消息时间线，每 15 秒自动刷新**
 - LLM 走 OpenAI 兼容 API（适配 OpenAI / NewApi / 各类代理网关）
 - AES 加密回调可选支持
 - 飞书要求 3s 内响应，长任务自动走 `BackgroundTasks` 异步
@@ -51,8 +51,8 @@ tests/                 # local unittest coverage; not needed on the server
                                         │   ├─ 距上次回复 < 节流间隔 → 只记消息、不回复
                                         │   ├─ 读未压缩 history + 当前 state
                                         │   ├─ RAG: embed(user_text) → top-K 卡片 + top-N 最近
-                                        │   ├─ OpenAI 兼容 API → JSON {reply, state_delta}
-                                        │   ├─ append message + 更新 state
+                                        │   ├─ OpenAI 兼容 API → JSON {reply, speaker_name}
+                                        │   ├─ append message + 更新 last_reply_ts（不改五维 state）
                                         │   └─ POST /im/v1/messages/{id}/reply
                                         ├─ observer：缓冲进内存，autonomous tick 批量落库
                                         └─ 未压缩条数 > 阈值 → 异步压缩任务
@@ -179,7 +179,7 @@ ssh gcp-vps 'systemctl status tamagotchi --no-pager'
 
 - `pet_style.toml`：电子宠物的风格、人设底色、口吻、默认互动方式。
 - `prompts.toml`：玩法流程，包括记忆压缩、状态渲染、主动发言、日记 / 梦境、GM 默认触发文案、兜底回复和 JSON 输出契约。
-- `pet_config.toml`：运行参数，包括记忆压缩阈值、`[reply]` 群 @ 回复节流间隔、`[observer]` 旁听缓冲上限、初始状态、状态衰减、`[gameplay]` 需求事件 / 日志 / 每日目标参数、主动发言间隔 / 冷却 / 静默时段 / 触发阈值、`[card]` 交互卡片开关 / 进度条格数 / 点击冷却。
+- `pet_config.toml`：运行参数，包括记忆压缩阈值、`[reply]` 群 @ 回复节流间隔、`[observer]` 旁听缓冲上限、初始状态、状态衰减、`[gameplay]` 需求事件参数、主动发言间隔 / 冷却 / 静默时段 / 触发阈值、`[card]` 交互卡片开关 / 进度条格数 / 点击冷却。
 
 常改的是 `pet_style.toml [style].prompt`：默认是通用电子宠物，可换成毒舌猫、哲学家小狗、傲娇龙、机器人团子等。玩法类规则继续放在 `prompts.toml`，不要写进业务代码。
 
@@ -234,34 +234,29 @@ ssh gcp-vps 'systemctl status tamagotchi --no-pager'
 - **存在 `pets.state_json` 一个字段里**，浮点 + `last_update_ts` + 各种 last_* 时间戳
 - **lazy compute**：没后台 cron，读时按"距上次更新过了多久"算到当前；每次互动后写回新值
 - **衰减 = 向 baseline 指数收敛**：每维不再线性单调走到 0/100，而是 `v = baseline + (v-baseline)·exp(-rate·h)` 漂向各自 baseline（多在中段）。好处：长期没人理的宠物状态回落到中段（→ 不渲染 → LLM 自由发挥），不会五维全贴极端档把回复钉死。清醒 / 睡觉两段各有一组 baseline（如 energy 睡觉段 baseline=100 = 回血）
-- **LLM 走 JSON 结构化输出**：每次回复返回 `{"reply": "...", "state_delta": {"hunger": -30, "mood": +5, ...}, "speaker_name": "..."}`，reply 发给用户，state_delta 各值按维度上限（`[state.delta_clamp]`，缺维度兜底 ±30）clamp 后叠加到当前 state（再 clamp 0-100）。`curiosity` / `affection` 在 JSON 中可省略，省略 = 0；`speaker_name` 可选，当前说话人报了名字才填，用来从对话里学群友名字（写进 `user_names` 表）
+- **LLM 走 JSON 结构化输出**：普通回复只返回 `{"reply": "...", "speaker_name": "..."}`。state 作为只读上下文影响回复语气、长度和话题倾向，不由 LLM 返回或修改五维数值。`speaker_name` 可选，当前说话人报了名字才填，用来从对话里学群友名字（写进 `user_names` 表）
 - LLM 输出不是合法 JSON 时，把整段当 reply 兜底，state 不变（不会让宠物挂掉）
 - **状态渲染只在极端档触发**：每维都看 `pet_config.toml [state.bands.<dim>]` 的 extreme_high / high / low / extreme_low；落在中段就完全不渲染该维度，避免把回复钉死成同质化语气
 - 全维度都中段、且 vibe 为空时，整个状态感受块都不注入——LLM 自由发挥
 
 初始值在 `pet_config.toml [state.initial]`，衰减的 baseline / rate 在 `[state.decay_active]` / `[state.decay_quiet]`，单次 delta 上限在 `[state.delta_clamp]`，分档阈值 `[state.bands.<dim>]`，每档对应的感受句在 `prompts.toml [state_render.lines]`。
 
-## 🎮 状态玩法化 V1
+## 🎮 状态需求事件
 
 玩法层复用 `pets.state_json`，不新增表。当前新增字段：
 
 ```json
 {
   "active_need": {},
-  "daily_goal": {},
-  "progress": {"xp": 0, "level": 1, "total_xp": 0},
-  "state_log": [],
   "need_cooldowns": {}
 }
 ```
 
-- `domain/gameplay.py` 是纯规则层：需求判定、选择规则、XP/level、daily goal、日志裁剪都在这里。
+- `domain/gameplay.py` 是纯规则层：需求判定、选择规则和卡片动作的五维状态结算都在这里。
 - `services/gameplay_service.py` 是编排层：tick 创建需求、GM/卡片结算时复用同一套规则。
 - `active_need` 同时只保留一个需求事件，候选类型为 `hungry / sleepy / sad / bored / lonely`，优先级按生理急迫和严重度排序。
 - 每个需求事件提供 2-3 个选择，例如饿了可以 `feed / snack_hunt / promise_food`，无聊可以 `play / tell_news / send_explore`。
-- 点击选择后，核心数值变化、XP、等级、每日目标进度、日志都由规则结算；LLM 只负责生成一句人格化反馈，不决定奖励和扣减。
-- `daily_goal` 每天首次读取/展示玩法状态时生成，完成后只奖励一次；Web/GM 都能看到进度。
-- `state_log` 存最近 `[gameplay].state_log_max` 条，供 Web 展示，也能作为后续叙事/记忆素材。
+- 点击选择后，核心五维数值由规则结算；LLM 只负责生成一句人格化反馈，不决定数值变化。
 
 相关配置在 `pet_config.toml [gameplay]`：
 
@@ -269,8 +264,6 @@ ssh gcp-vps 'systemctl status tamagotchi --no-pager'
 [gameplay]
 enabled = true
 need_ttl_sec = 7200
-state_log_max = 20
-daily_goal_reward_xp = 15
 
 [gameplay.need_thresholds]
 hungry = 80
@@ -304,19 +297,19 @@ lonely = 25
 
 **主动发言**（宠物自己冒泡）、**梦境**、**日记**都会以飞书消息卡片呈现；@ 回复仍是纯文本。
 
-卡片结构：宠物的话（或梦/日记文本）+ 玩法状态（当前需求 / 今日目标 / XP）+ 五维状态进度条 + 一排互动按钮。梦境卡额外在文字下方插一张图像模型生成的插图。
+卡片结构：宠物的话（或梦/日记文本）+ 当前需求（若有）+ 五维状态进度条 + 一排互动按钮。梦境卡额外在文字下方插一张图像模型生成的插图。
 
 - **进度条**：`hunger` 反转成「饱腹度」展示，让五条都是「满 = 好」，直觉一致
 - **需求卡片按钮由 `active_need` 决定**：如果状态触发了需求事件，按钮来自 `domain/gameplay.py` 的 choice 规则，同一个需求会给 2-3 个带权衡的选择。
-- **普通主动卡片兼容旧按钮**：没有 `active_need` 时，仍按 `[card.actions.*].need_dim/need_side` 从状态维度动态挑按钮；全维度中段时从 `[card].default_actions` 随机兜底。梦境 / 日记卡按钮固定（☀️ 早上好 / 🌙 晚安）
+- **卡片按钮统一结算**：有 `active_need` 时显示该需求的 choice；没有 `active_need` 时显示自由互动按钮；两者都经过 `GameplayDomain` 的统一卡片结算入口。梦境 / 日记卡按钮也是固定的卡片动作（☀️ 早上好 / 🌙 晚安）
 - **梦境插图**：梦境这条 `[[scheduled_events]]` 配了 `gen_image = true`，LLM 输出短梦话同时返回 `image_prompt`；服务用它调 `IMAGE_MODEL`（`/v1/images/generations`）拿 base64 → 上传飞书拿 `image_key` → 嵌入卡片。`IMAGE_MODEL` 留空或生成 / 上传任一步失败都安静回退成纯文字梦境卡；超时在 `pet_config.toml [card].image_timeout_sec`。日记不生成图
-- **点击 = 确定性结算**：需求按钮走 `gameplay` 规则结算状态、XP、等级、每日目标和日志；普通旧按钮仍套用 `pet_config.toml [card.actions.*].delta`。两条路径都不让 LLM 决定核心数值。
+- **点击 = 确定性结算**：所有卡片按钮都走统一的卡片结算入口；Need choice 和自由互动按钮都使用确定性的五维 delta。LLM 只生成反馈台词，不决定核心数值。
 - **多人可参与，不是首点即焚**：点击后卡片保留按钮，群里其他人可继续照料——动态卡按新状态重挑按钮（喂饱后投喂按钮自然消失），固定卡（梦境 / 日记）保持原按钮
 - **卡片时效**：卡片发出 `[card].button_ttl_sec`（默认 30min）后按钮失效，过期点击只弹 toast 不改状态，避免昨天的梦境卡一直能点
 - **有人格的反馈逐条累积**：每次点击后台单独用 LLM 生成一句符合宠物风格的反馈台词，**向下追加**进卡片文本日志而不是整段刷新——多人点击时各自的台词逐条堆叠在卡片里（最多保留 `[card].card_log_max_lines` 条）
 - **防刷**：点击冷却是 **per-user** 的（`[card].action_cooldown_sec`）——同一个人点过任意按钮后，冷却内再点任何按钮只弹 toast，不同人各自独立；飞书重试按 `event_id` 去重，不会让状态变化翻倍；多人同时点击用 per-pet 锁串行，不丢状态变化
 
-展示文案在 `prompts.toml [card]`，旧按钮运行数值在 `pet_config.toml [card]`，需求选择规则在 `domain/gameplay.py`。`[card].enabled = false` 时主动发言、需求事件、梦境、日记都退回纯文本 / 不发需求卡。需要在飞书开发者后台开启「卡片回传交互」能力（见上文飞书应用配置）。
+展示文案在 `prompts.toml [card]`，自由互动按钮的可见条件和确定性 delta 在 `pet_config.toml [card]`，需求 choice 和统一结算在 `domain/gameplay.py`。`[card].enabled = false` 时主动发言、需求事件、梦境、日记都退回纯文本 / 不发需求卡。需要在飞书开发者后台开启「卡片回传交互」能力（见上文飞书应用配置）。
 
 ## 🧪 GM Web 调试接口
 
@@ -350,11 +343,6 @@ curl -X POST 'https://<your-domain>/gm/resolve_need?token=TOKEN' \
   -H 'Content-Type: application/json' \
   -d '{"chat_id":"oc_xxx","action":"feed","actor":"GM"}'
 
-# 重置/指定今日目标
-curl -X POST 'https://<your-domain>/gm/goal?token=TOKEN' \
-  -H 'Content-Type: application/json' \
-  -d '{"chat_id":"oc_xxx","kind":"play_once"}'
-
 # 手动主动说话 / 梦境 / 日记
 curl -X POST 'https://<your-domain>/gm/speak?token=TOKEN' \
   -H 'Content-Type: application/json' \
@@ -371,7 +359,7 @@ curl -X POST 'https://<your-domain>/gm/diary?token=TOKEN' \
 
 ## 📊 Web 可视化面板
 
-浏览器打开 `https://<your-domain>/web?token=TOKEN`,得到一个单页面板:宠物列表下拉、五维状态进度条（`hunger` 反转成「饱腹度」,满 = 好）、今日 vibe、当前需求、今日目标、XP/level、最近状态日志、记忆卡片列表、最近消息时间线,每 15 秒自动刷新;鉴权同 GM（`GM_TOKEN`,留空复用 `FEISHU_VERIFICATION_TOKEN`）。面板还能直接做 GM 操作:改五维数值并保存、重抽 vibe、手动触发主动发言 / 梦境 / 日记 / tick——全部走现有 GM 接口,无额外后端。
+浏览器打开 `https://<your-domain>/web?token=TOKEN`,得到一个单页面板:宠物列表下拉、五维状态进度条（`hunger` 反转成「饱腹度」,满 = 好）、今日 vibe、当前需求、记忆卡片列表、最近消息时间线,每 15 秒自动刷新;鉴权同 GM（`GM_TOKEN`,留空复用 `FEISHU_VERIFICATION_TOKEN`）。面板还能直接做 GM 操作:改五维数值并保存、重抽 vibe、手动触发主动发言 / 梦境 / 日记 / tick——全部走现有 GM 接口,无额外后端。
 
 ## 📄 License
 

@@ -98,14 +98,10 @@ class ReplyService:
         try:
             data = json.loads(content)
             reply = (data.get("reply") or "").strip()
-            delta = data.get("state_delta") or {}
-            if not isinstance(delta, dict):
-                delta = {}
             speaker_name = (data.get("speaker_name") or "").strip()
         except json.JSONDecodeError:
             log.warning("LLM returned non-JSON: %r", content[:200])
             reply = content
-            delta = {}
 
         if not reply:
             reply = self.config.fallback_replies["empty_llm"]
@@ -128,16 +124,16 @@ class ReplyService:
                 )
 
         def _mutator(state: dict) -> dict:
-            out = self.state_domain.apply_delta(state, delta)
+            # 普通对话只读取 state；五维玩法状态只能由卡片动作修改。
+            out = dict(state)
             out["last_update_ts"] = time.time()
             return out
 
         new_state = await self.pet_repo.mutate_state(pet_id, _mutator)
         log.info(
-            "pet %d state: %s + delta=%s -> %s",
+            "pet %d state read-only: %s -> %s",
             pet_id,
             {key: round(current_state.get(key, 0)) for key in self.config.state_numeric_keys},
-            delta,
             {key: round(new_state.get(key, 0)) for key in self.config.state_numeric_keys},
         )
 
@@ -313,4 +309,3 @@ class ReplyService:
             )
 
         await self._maybe_compress(pet_id)
-

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import random
 import time
 import uuid
@@ -53,8 +52,6 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "did": "给你喂了点吃的",
             "pending": "（小口小口……饿意终于退下去一点）",
             "delta": {"hunger": -35, "mood": 4, "affection": 1},
-            "xp": 8,
-            "goal": "be_fed",
         },
         {
             "action": "snack_hunt",
@@ -62,7 +59,6 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "did": "带你去找夜宵",
             "pending": "（闻着味道一路小跑，眼睛亮了起来）",
             "delta": {"hunger": -20, "curiosity": 8, "energy": -5},
-            "xp": 10,
         },
         {
             "action": "promise_food",
@@ -71,7 +67,6 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "pending": "（认真盯着那张饼，半信半疑地咽了咽口水）",
             "delta": {"hunger": -8, "curiosity": 4},
             "random_delta": {"mood": (-3, 6)},
-            "xp": 4,
         },
     ),
     "sleepy": (
@@ -81,7 +76,6 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "did": "哄你休息了一会儿",
             "pending": "（打了个哈欠……终于能安心眯一会儿）",
             "delta": {"energy": 30, "hunger": 5, "mood": 2},
-            "xp": 8,
         },
         {
             "action": "quiet_story",
@@ -89,7 +83,6 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "did": "给你讲了一个很轻的睡前故事",
             "pending": "（把故事叼进梦里，尾音慢慢变轻）",
             "delta": {"energy": 18, "mood": 6, "curiosity": 3},
-            "xp": 10,
         },
         {
             "action": "tuck_in",
@@ -97,7 +90,6 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "did": "给你盖好了小被子",
             "pending": "（缩进被角，只露出一点安心的呼吸）",
             "delta": {"energy": 25, "affection": 3},
-            "xp": 9,
         },
     ),
     "sad": (
@@ -107,8 +99,6 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "did": "轻声哄了哄你",
             "pending": "（闷闷的心情松开了一点）",
             "delta": {"mood": 25, "affection": 3},
-            "xp": 8,
-            "goal": "be_comforted",
         },
         {
             "action": "listen",
@@ -116,7 +106,6 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "did": "认真听你碎碎念了一会儿",
             "pending": "（被听见以后，委屈少了一小块）",
             "delta": {"mood": 16, "affection": 5, "energy": -2},
-            "xp": 10,
         },
         {
             "action": "make_joke",
@@ -124,7 +113,6 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "did": "努力把你逗笑",
             "pending": "（先绷着脸，最后还是噗地笑了一声）",
             "delta": {"mood": 14, "curiosity": 5, "energy": -4},
-            "xp": 9,
         },
     ),
     "bored": (
@@ -134,8 +122,6 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "did": "陪你玩了个小游戏",
             "pending": "（一下蹦起来——有人陪我玩啦！）",
             "delta": {"curiosity": 25, "mood": 8, "energy": -8, "hunger": 5},
-            "xp": 8,
-            "goal": "play_once",
         },
         {
             "action": "tell_news",
@@ -143,8 +129,6 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "did": "给你讲了一个新鲜事",
             "pending": "（耳朵立起来，开始追问后续）",
             "delta": {"curiosity": 18, "affection": 2},
-            "xp": 10,
-            "goal": "hear_news",
         },
         {
             "action": "send_explore",
@@ -152,7 +136,6 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "did": "派你去附近探险",
             "pending": "（叼着小地图冲出去，又带着亮晶晶的眼神回来）",
             "delta": {"curiosity": 12, "energy": -10, "mood": 5},
-            "xp": 12,
         },
     ),
     "lonely": (
@@ -162,7 +145,6 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "did": "摸了摸你的头",
             "pending": "（眯起眼睛……被注意到的时候最安心了）",
             "delta": {"affection": 20, "mood": 5},
-            "xp": 8,
         },
         {
             "action": "sit_together",
@@ -170,7 +152,6 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "did": "安静陪你坐了一会儿",
             "pending": "（靠近一点点，确认这里还有自己的位置）",
             "delta": {"affection": 16, "mood": 7, "energy": 2},
-            "xp": 10,
         },
         {
             "action": "call_name",
@@ -178,28 +159,9 @@ CHOICE_RULES: dict[str, tuple[dict[str, Any], ...]] = {
             "did": "喊你过来一起待着",
             "pending": "（听见有人叫，立刻探出头来）",
             "delta": {"affection": 12, "curiosity": 4, "mood": 4},
-            "xp": 7,
         },
     ),
 }
-
-DAILY_GOALS: tuple[dict[str, Any], ...] = (
-    {
-        "kind": "hear_news",
-        "title": "想听一个新鲜事",
-        "target": 1,
-        "actions": ("tell_news",),
-    },
-    {"kind": "be_fed", "title": "想被投喂一次", "target": 1, "actions": ("feed",)},
-    {
-        "kind": "be_comforted",
-        "title": "想被安慰一下",
-        "target": 1,
-        "actions": ("soothe",),
-    },
-    {"kind": "play_once", "title": "想玩一次", "target": 1, "actions": ("play",)},
-)
-
 
 @dataclass(frozen=True)
 class GameplayResult:
@@ -209,69 +171,21 @@ class GameplayResult:
     did: str
     pending: str
     delta: dict[str, float]
-    xp: int
-    leveled_up: bool
-    goal_completed: bool
-    log_text: str
 
 
 class GameplayDomain:
     def __init__(self, config: AppConfig):
         self.config = config
 
-    def default_progress(self) -> dict:
-        return {"xp": 0, "level": 1, "total_xp": 0}
-
     def normalize_state(self, state: dict) -> dict:
         out = dict(state)
         if not isinstance(out.get("active_need"), dict):
             out["active_need"] = {}
-        if not isinstance(out.get("daily_goal"), dict):
-            out["daily_goal"] = {}
-        progress = out.get("progress")
-        if not isinstance(progress, dict):
-            progress = self.default_progress()
-        progress = {
-            **self.default_progress(),
-            "xp": int(progress.get("xp", 0) or 0),
-            "level": int(progress.get("level", 1) or 1),
-            "total_xp": int(progress.get("total_xp", 0) or 0),
-        }
-        progress["level"] = self.level_for_total_xp(progress["total_xp"])
-        out["progress"] = progress
-        if not isinstance(out.get("state_log"), list):
-            out["state_log"] = []
+        # 兼容已落库的 V1 字段：正常写回时会清理它们，五维 state 不受影响。
+        for key in ("daily_goal", "progress", "state_log"):
+            out.pop(key, None)
         if not isinstance(out.get("need_cooldowns"), dict):
             out["need_cooldowns"] = {}
-        return out
-
-    def level_for_total_xp(self, total_xp: int) -> int:
-        return int(math.floor(math.sqrt(max(0, total_xp) / 50.0))) + 1
-
-    def local_date(self, now: float) -> str:
-        local = time.gmtime(now + self.config.proactive_tz_offset_hours * 3600)
-        return time.strftime("%Y-%m-%d", local)
-
-    def ensure_daily_goal(
-        self, state: dict, now: float, pet_id: int | None = None
-    ) -> dict:
-        out = self.normalize_state(state)
-        date_key = self.local_date(now)
-        current = out.get("daily_goal") or {}
-        if current.get("date") == date_key and current.get("kind"):
-            return out
-
-        seed = f"{pet_id or 0}:{date_key}"
-        spec = random.Random(seed).choice(DAILY_GOALS)
-        out["daily_goal"] = {
-            "date": date_key,
-            "kind": spec["kind"],
-            "title": spec["title"],
-            "target": int(spec["target"]),
-            "progress": 0,
-            "completed": False,
-            "reward_xp": self.config.gameplay_daily_goal_reward_xp,
-        }
         return out
 
     def current_need(self, state: dict, now: float | None = None) -> dict:
@@ -343,7 +257,7 @@ class GameplayDomain:
     def maybe_create_need(
         self, state: dict, now: float, pet_id: int | None = None
     ) -> tuple[dict, dict | None]:
-        out = self.ensure_daily_goal(state, now, pet_id)
+        out = self.normalize_state(state)
         out = self.expired_need_cleared(out, now)
         detected = self.detect_need_kind(out, now)
         if detected is None:
@@ -376,6 +290,8 @@ class GameplayDomain:
     def action_text(self, action: str, need_kind: str | None = None) -> dict[str, str]:
         choice = self.choice_for_action(need_kind, action)
         if not choice:
+            choice = self.free_card_rule(action)
+        if not choice:
             return {}
         return {
             "button": str(choice.get("button", action)),
@@ -383,17 +299,71 @@ class GameplayDomain:
             "pending": str(choice.get("pending", "…")),
         }
 
+    def free_card_rule(self, action: str) -> dict[str, Any] | None:
+        config_rule = self.config.card_actions.get(action)
+        if not config_rule:
+            return None
+        text_rule = self.config.card_action_text.get(action, {})
+        return {
+            **dict(config_rule),
+            "action": action,
+            "button": text_rule.get("button", action),
+            "did": text_rule.get("did", "和你互动了一下"),
+            "pending": text_rule.get("pending", "…"),
+        }
+
     def apply_choice(
         self, state: dict, action: str, actor_name: str, now: float
     ) -> GameplayResult:
-        out = self.ensure_daily_goal(state, now)
+        return self._apply_card_action(
+            state, action, actor_name, now, require_active_need=True
+        )
+
+    def apply_card_action(
+        self,
+        state: dict,
+        action: str,
+        actor_name: str,
+        now: float,
+        *,
+        prefer_free: bool = False,
+    ) -> GameplayResult:
+        """统一结算所有会改变 state 的卡片按钮。"""
+        return self._apply_card_action(
+            state,
+            action,
+            actor_name,
+            now,
+            require_active_need=False,
+            prefer_free=prefer_free,
+        )
+
+    def _apply_card_action(
+        self,
+        state: dict,
+        action: str,
+        actor_name: str,
+        now: float,
+        *,
+        require_active_need: bool,
+        prefer_free: bool = False,
+    ) -> GameplayResult:
+        out = self.normalize_state(state)
         need = self.current_need(out, now)
-        if not need:
+        if not need and require_active_need:
             raise ValueError("no_active_need")
-        need_kind = need["kind"]
-        rule = self.choice_for_action(need_kind, action)
-        if not rule:
-            raise ValueError("invalid_need_action")
+
+        settle_need = bool(need and not prefer_free)
+        if settle_need:
+            need_kind = need["kind"]
+            rule = self.choice_for_action(need_kind, action)
+            if not rule:
+                raise ValueError("invalid_need_action")
+        else:
+            need_kind = ""
+            rule = self.free_card_rule(action)
+            if not rule:
+                raise ValueError("invalid_card_action")
 
         delta = {k: float(v) for k, v in dict(rule.get("delta") or {}).items()}
         for key, bounds in dict(rule.get("random_delta") or {}).items():
@@ -412,104 +382,18 @@ class GameplayDomain:
                 ),
             )
 
-        xp = int(rule.get("xp", 0) or 0)
-        progress = dict(out.get("progress") or self.default_progress())
-        old_level = int(progress.get("level", 1) or 1)
-        progress["xp"] = int(progress.get("xp", 0) or 0) + xp
-        progress["total_xp"] = int(progress.get("total_xp", 0) or 0) + xp
-        progress["level"] = self.level_for_total_xp(progress["total_xp"])
-        out["progress"] = progress
-
-        goal_completed = self.advance_daily_goal(out, action, rule)
-        if goal_completed:
-            reward_xp = int(out["daily_goal"].get("reward_xp", 0) or 0)
-            progress["xp"] += reward_xp
-            progress["total_xp"] += reward_xp
-            progress["level"] = self.level_for_total_xp(progress["total_xp"])
-            out["progress"] = progress
-
-        out["active_need"] = {}
-        cooldowns = dict(out.get("need_cooldowns") or {})
-        cooldowns[need_kind] = now + self.config.gameplay_need_ttl_sec
-        out["need_cooldowns"] = cooldowns
+        if settle_need:
+            out["active_need"] = {}
+            cooldowns = dict(out.get("need_cooldowns") or {})
+            cooldowns[need_kind] = now + self.config.gameplay_need_ttl_sec
+            out["need_cooldowns"] = cooldowns
         out["last_update_ts"] = now
-
-        log_text = self.resolve_log_text(actor_name, rule, need_kind)
-        reward_xp = int(out["daily_goal"].get("reward_xp", 0) or 0) if goal_completed else 0
-        total_xp = xp + reward_xp
-        self.append_log(
-            out,
-            {
-                "ts": int(now),
-                "kind": "need_resolved",
-                "actor": actor_name,
-                "text": log_text,
-                "delta": {k: v for k, v in delta.items() if v},
-                "xp": xp,
-                "need_kind": need_kind,
-                "action": action,
-            },
-        )
-        if goal_completed:
-            self.append_log(
-                out,
-                {
-                    "ts": int(now),
-                    "kind": "daily_goal_completed",
-                    "actor": actor_name,
-                    "text": f"今日目标「{out['daily_goal'].get('title')}」完成了。",
-                    "delta": {},
-                    "xp": reward_xp,
-                    "goal_kind": out["daily_goal"].get("kind"),
-                },
-            )
 
         return GameplayResult(
             state=out,
-            need=dict(need),
+            need=dict(need if settle_need else {}),
             action=action,
             did=str(rule.get("did", "")),
             pending=str(rule.get("pending", "…")),
             delta=delta,
-            xp=total_xp,
-            leveled_up=progress["level"] > old_level,
-            goal_completed=goal_completed,
-            log_text=log_text,
         )
-
-    def advance_daily_goal(
-        self, state: dict, action: str, rule: dict[str, Any] | None = None
-    ) -> bool:
-        goal = state.get("daily_goal") or {}
-        if not goal or goal.get("completed"):
-            return False
-        goal_kind = goal.get("kind")
-        matched = False
-        if rule and rule.get("goal") == goal_kind:
-            matched = True
-        else:
-            for spec in DAILY_GOALS:
-                if spec["kind"] == goal_kind and action in spec["actions"]:
-                    matched = True
-                    break
-        if not matched:
-            return False
-        goal = dict(goal)
-        goal["progress"] = min(
-            int(goal.get("target", 1) or 1), int(goal.get("progress", 0) or 0) + 1
-        )
-        if goal["progress"] >= int(goal.get("target", 1) or 1):
-            goal["completed"] = True
-        state["daily_goal"] = goal
-        return bool(goal.get("completed"))
-
-    def append_log(self, state: dict, entry: dict) -> None:
-        log = list(state.get("state_log") or [])
-        log.append(entry)
-        max_len = max(1, int(self.config.gameplay_state_log_max))
-        state["state_log"] = log[-max_len:]
-
-    def resolve_log_text(self, actor_name: str, rule: dict[str, Any], need_kind: str) -> str:
-        did = str(rule.get("did") or "照料了它")
-        title = NEED_SPECS.get(need_kind, {}).get("title", need_kind)
-        return f"{actor_name} {did}，处理了「{title}」。"

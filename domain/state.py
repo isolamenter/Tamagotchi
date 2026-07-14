@@ -26,9 +26,6 @@ class StateDomain:
             "recent_vibe": "",
             "recent_vibe_date": "",
             "active_need": {},
-            "daily_goal": {},
-            "progress": {"xp": 0, "level": 1, "total_xp": 0},
-            "state_log": [],
             "need_cooldowns": {},
         }
 
@@ -137,19 +134,6 @@ class StateDomain:
             )
         return out
 
-    def apply_card_delta(self, state: dict, delta: dict) -> dict:
-        out = dict(state)
-        for key in self.config.state_numeric_keys:
-            try:
-                d = float(delta.get(key, 0))
-            except (TypeError, ValueError):
-                d = 0.0
-            out[key] = max(
-                0.0,
-                min(100.0, float(out.get(key, self.config.initial_state.get(key, 50.0))) + d),
-            )
-        return out
-
     def state_band(self, dim: str, value: float) -> str | None:
         bands = self.config.state_bands.get(dim)
         if not bands:
@@ -211,36 +195,4 @@ class StateDomain:
             }
         else:
             out["active_need"] = {}
-        goal = state.get("daily_goal") if isinstance(state.get("daily_goal"), dict) else {}
-        out["daily_goal"] = {
-            "date": goal.get("date", ""),
-            "kind": goal.get("kind", ""),
-            "title": goal.get("title", ""),
-            "target": int(goal.get("target", 0) or 0),
-            "progress": int(goal.get("progress", 0) or 0),
-            "completed": bool(goal.get("completed", False)),
-            "reward_xp": int(goal.get("reward_xp", 0) or 0),
-        } if goal else {}
-        progress = state.get("progress") if isinstance(state.get("progress"), dict) else {}
-        out["progress"] = {
-            "xp": int(progress.get("xp", 0) or 0),
-            "level": int(progress.get("level", 1) or 1),
-            "total_xp": int(progress.get("total_xp", 0) or 0),
-        }
-        raw_log = state.get("state_log") if isinstance(state.get("state_log"), list) else []
-        out["state_log"] = [
-            {
-                "ts": item.get("ts"),
-                "kind": item.get("kind", ""),
-                "actor": item.get("actor", ""),
-                "text": item.get("text", ""),
-                "delta": item.get("delta", {}),
-                "xp": int(item.get("xp", 0) or 0),
-                "need_kind": item.get("need_kind", ""),
-                "goal_kind": item.get("goal_kind", ""),
-                "action": item.get("action", ""),
-            }
-            for item in raw_log[-self.config.gameplay_state_log_max :]
-            if isinstance(item, dict)
-        ]
         return out

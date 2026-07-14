@@ -139,9 +139,6 @@ class AutonomousService:
             data = json.loads(content)
             reply = (data.get("reply") or "").strip()
             image_prompt = (data.get("image_prompt") or "").strip()
-            delta = data.get("state_delta") or {}
-            if not isinstance(delta, dict):
-                delta = {}
         except json.JSONDecodeError:
             log.warning("autonomous LLM returned non-JSON, skipping: %r", content[:200])
             return None
@@ -153,7 +150,8 @@ class AutonomousService:
         now = time.time()
 
         def _mutator(state: dict) -> dict:
-            out = self.state_domain.apply_delta(state, delta)
+            # 主动文本只读 state；卡片按钮才允许修改五维玩法状态。
+            out = dict(state)
             out["last_update_ts"] = now
             if set_last_proactive:
                 out["last_proactive_ts"] = now

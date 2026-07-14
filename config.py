@@ -113,8 +113,6 @@ class AppConfig:
 
     gameplay_enabled: bool
     gameplay_need_ttl_sec: int
-    gameplay_state_log_max: int
-    gameplay_daily_goal_reward_xp: int
     gameplay_need_thresholds: dict[str, float]
 
 
@@ -287,10 +285,6 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         card_image_timeout_sec=int(card_config.get("image_timeout_sec", 120)),
         gameplay_enabled=bool(gameplay_config.get("enabled", True)),
         gameplay_need_ttl_sec=int(gameplay_config.get("need_ttl_sec", 7200)),
-        gameplay_state_log_max=int(gameplay_config.get("state_log_max", 20)),
-        gameplay_daily_goal_reward_xp=int(
-            gameplay_config.get("daily_goal_reward_xp", 15)
-        ),
         gameplay_need_thresholds={
             k: float(v)
             for k, v in gameplay_config.get(

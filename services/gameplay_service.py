@@ -22,7 +22,6 @@ class GameplayService:
         now = time.time() if now is None else now
 
         def _mutator(state: dict) -> dict:
-            state = self.gameplay_domain.ensure_daily_goal(state, now, pet_id)
             return self.gameplay_domain.expired_need_cleared(state, now)
 
         return await self.pet_repo.mutate_state(pet_id, _mutator)
@@ -48,3 +47,17 @@ class GameplayService:
     ) -> GameplayResult:
         now = time.time() if now is None else now
         return self.gameplay_domain.apply_choice(state, action, actor_name, now)
+
+    def resolve_card_action_state(
+        self,
+        state: dict,
+        action: str,
+        actor_name: str,
+        now: float | None = None,
+        *,
+        prefer_free: bool = False,
+    ) -> GameplayResult:
+        now = time.time() if now is None else now
+        return self.gameplay_domain.apply_card_action(
+            state, action, actor_name, now, prefer_free=prefer_free
+        )

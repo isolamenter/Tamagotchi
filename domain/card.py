@@ -54,17 +54,6 @@ class CardDomain:
             desc = (need.get("description") or "").strip()
             if desc:
                 lines.append(desc)
-        goal = state.get("daily_goal") if isinstance(state.get("daily_goal"), dict) else {}
-        if goal and goal.get("kind"):
-            done = "已完成" if goal.get("completed") else f"{goal.get('progress', 0)}/{goal.get('target', 1)}"
-            lines.append(f"今日目标：{goal.get('title', '')} `{done}`")
-        progress = state.get("progress") if isinstance(state.get("progress"), dict) else {}
-        if progress:
-            lines.append(
-                f"Lv.{int(progress.get('level', 1) or 1)} "
-                f"XP `{int(progress.get('xp', 0) or 0)}` "
-                f"累计 `{int(progress.get('total_xp', 0) or 0)}`"
-            )
         return "\n".join(line for line in lines if line)
 
     def pick_card_actions(self, state: dict) -> list[str]:

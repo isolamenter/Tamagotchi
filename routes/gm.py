@@ -7,7 +7,7 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from domain.gameplay import DAILY_GOALS, NEED_SPECS
+from domain.gameplay import NEED_SPECS
 
 router = APIRouter()
 
@@ -99,9 +99,8 @@ async def gm_help(req: Request):
             "POST /gm/dream": "force dream; json: {chat_id|pet_id,mark?}",
             "POST /gm/diary": "force diary; json: {chat_id|pet_id,mark?}",
             "POST /gm/tick": "run one autonomous tick; json: {chat_id|pet_id?} — omit for all pets",
-            "GET /gm/gameplay": "read gameplay state; query: chat_id or pet_id",
+            "GET /gm/gameplay": "read active need; query: chat_id or pet_id",
             "POST /gm/need": "create/clear active need; json: {chat_id|pet_id, kind?, clear?}",
-            "POST /gm/goal": "reset/set daily goal; json: {chat_id|pet_id, kind?}",
             "POST /gm/resolve_need": "resolve active need; json: {chat_id|pet_id, action, actor?}",
             "GET /gm/cards": "list memory cards; query: chat_id or pet_id, limit?",
             "GET /gm/messages": "list recent messages; query: chat_id or pet_id, limit?",
@@ -228,9 +227,6 @@ async def gm_gameplay(req: Request):
         "pet_id": pet_id,
         "chat_id": chat_id,
         "active_need": public["active_need"],
-        "daily_goal": public["daily_goal"],
-        "progress": public["progress"],
-        "state_log": public["state_log"],
     }
 
 
@@ -260,7 +256,6 @@ async def gm_need(req: Request):
 
     def _mutator(state: dict) -> dict:
         nonlocal created
-        state = container.gameplay_domain.ensure_daily_goal(state, now, pet_id)
         if clear:
             state["active_need"] = {}
             return state
@@ -279,55 +274,6 @@ async def gm_need(req: Request):
         "pet_id": pet_id,
         "chat_id": chat_id,
         "created": created,
-        "state": container.state_domain.public_state(state),
-    }
-
-
-@router.post("/gm/goal")
-async def gm_goal(req: Request):
-    auth = _gm_auth(req)
-    if auth:
-        return auth
-    container = _container(req)
-    body = await _gm_body(req)
-    pet_id_param = body.get("pet_id") or req.query_params.get("pet_id")
-    resolved = await _gm_resolve_pet(
-        req,
-        chat_id=body.get("chat_id") or req.query_params.get("chat_id"),
-        pet_id=pet_id_param or None,
-    )
-    if isinstance(resolved, JSONResponse):
-        return resolved
-    pet_id, chat_id = resolved
-    now = time.time()
-    kind = (body.get("kind") or req.query_params.get("kind") or "").strip()
-    spec = None
-    if kind:
-        spec = next((item for item in DAILY_GOALS if item["kind"] == kind), None)
-        if spec is None:
-            return JSONResponse({"error": "unknown_goal_kind", "kind": kind}, status_code=400)
-
-    def _mutator(state: dict) -> dict:
-        state = container.gameplay_domain.normalize_state(state)
-        if spec is None:
-            state["daily_goal"] = {}
-            return container.gameplay_domain.ensure_daily_goal(state, now, pet_id)
-        state["daily_goal"] = {
-            "date": container.gameplay_domain.local_date(now),
-            "kind": spec["kind"],
-            "title": spec["title"],
-            "target": int(spec["target"]),
-            "progress": int(body.get("progress", 0) or 0),
-            "completed": False,
-            "reward_xp": container.config.gameplay_daily_goal_reward_xp,
-        }
-        return state
-
-    state = await container.pet_repo.mutate_state(pet_id, _mutator)
-    return {
-        "ok": True,
-        "pet_id": pet_id,
-        "chat_id": chat_id,
         "state": container.state_domain.public_state(state),
     }
 
@@ -374,7 +320,6 @@ async def gm_resolve_need(req: Request):
         "chat_id": chat_id,
         "action": action,
         "delta": result.delta,
-        "xp": result.xp,
         "state": container.state_domain.public_state(result.state),
     }
 

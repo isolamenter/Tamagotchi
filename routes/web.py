@@ -76,15 +76,11 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .gm-result { margin-top: 12px; font-size: 13px; color: var(--muted); min-height: 20px; }
   .gm-result.ok { color: var(--good); }
   .gm-result.bad { color: var(--bad); }
-  .gameplay-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
   .gameplay-box {
     border: 1px solid var(--line); border-radius: 8px; padding: 12px;
     background: #00000018;
   }
   .gameplay-box h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
-  .log-item { padding: 8px 0; border-bottom: 1px solid var(--line); }
-  .log-item:last-child { border-bottom: none; }
-  .log-item .xp { color: var(--good); margin-left: 8px; }
   .card {
     border-left: 3px solid var(--accent); padding: 6px 12px;
     margin-bottom: 10px; background: #00000022; border-radius: 0 6px 6px 0;
@@ -142,20 +138,9 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="gm-result" id="gmResult"></div>
   </div>
   <div class="panel span2">
-    <h2>玩法状态</h2>
-    <div class="gameplay-grid">
-      <div class="gameplay-box">
-        <h3>当前需求</h3>
-        <div id="needBox"></div>
-      </div>
-      <div class="gameplay-box">
-        <h3>今日目标 / 成长</h3>
-        <div id="goalBox"></div>
-      </div>
-    </div>
-    <div class="gameplay-box" style="margin-top:14px">
-      <h3>最近状态日志</h3>
-      <div class="scroll small" id="stateLog"></div>
+    <h2>当前需求</h2>
+    <div class="gameplay-box">
+      <div id="needBox"></div>
     </div>
   </div>
   <div class="panel span2">
@@ -257,32 +242,12 @@ function renderState(pet) {
 
 function renderGameplay(st) {
   const need = st.active_need || {};
-  const goal = st.daily_goal || {};
-  const progress = st.progress || {};
-  const logs = st.state_log || [];
   document.getElementById("needBox").innerHTML = need.kind
     ? '<div><strong>' + esc(need.title || need.kind) + '</strong></div>'
       + '<div>' + esc(need.description || "") + '</div>'
       + '<div class="muted">severity ' + esc(need.severity || 1)
       + ' · expires ' + fmtTime(need.expires_at) + '</div>'
     : '<div class="empty">暂无需求</div>';
-  const goalText = goal.kind
-    ? '<div><strong>' + esc(goal.title || goal.kind) + '</strong></div>'
-      + '<div>' + (goal.completed ? '已完成' : esc((goal.progress || 0) + "/" + (goal.target || 1)))
-      + ' · reward ' + esc(goal.reward_xp || 0) + ' XP</div>'
-    : '<div class="empty">暂无今日目标</div>';
-  document.getElementById("goalBox").innerHTML = goalText
-    + '<div class="muted">Lv.' + esc(progress.level || 1)
-    + ' · XP ' + esc(progress.xp || 0)
-    + ' · total ' + esc(progress.total_xp || 0) + '</div>';
-  document.getElementById("stateLog").innerHTML = logs.length
-    ? logs.slice().reverse().map(item =>
-        '<div class="log-item">'
-        + '<div class="muted">' + fmtTime(item.ts) + ' · ' + esc(item.kind || "") + '</div>'
-        + '<div>' + esc(item.text || "") + (item.xp ? '<span class="xp">+' + esc(item.xp) + ' XP</span>' : '') + '</div>'
-        + '</div>'
-      ).join("")
-    : '<div class="empty">还没有状态日志</div>';
 }
 
 function renderCards(cards) {

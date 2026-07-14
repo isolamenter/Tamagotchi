@@ -222,7 +222,6 @@ class CardService:
                         }
                     }
 
-                need_result = None
                 if is_need_action:
                     current_need = self.gameplay_domain.current_need(state, now)
                     if not current_need or current_need.get("id") != need_id:
@@ -232,21 +231,22 @@ class CardService:
                                 "content": "这个需求已经变了，等下一张卡片吧~",
                             }
                         }
-                    try:
-                        need_result = self.gameplay_service.resolve_need_choice_state(
-                            state, action_key, sender_name, now
-                        )
-                    except ValueError:
-                        return {
-                            "toast": {
-                                "type": "error",
-                                "content": "这个照料动作已经接不上了…",
-                            }
+                try:
+                    card_result = self.gameplay_service.resolve_card_action_state(
+                        state,
+                        action_key,
+                        sender_name,
+                        now,
+                        prefer_free=is_fixed,
+                    )
+                except ValueError:
+                    return {
+                        "toast": {
+                            "type": "error",
+                            "content": "这个卡片动作已经接不上了…",
                         }
-                    new_state = need_result.state
-                else:
-                    delta = self.config.card_actions[action_key].get("delta") or {}
-                    new_state = self.state_domain.apply_card_delta(state, delta)
+                    }
+                new_state = card_result.state
                 click_ts[clicker_open_id] = now
                 new_state["card_action_ts"] = self.card_domain.prune_card_click_ts(
                     click_ts, now
@@ -254,18 +254,8 @@ class CardService:
                 new_state["last_update_ts"] = now
                 await self.pet_repo.update_pet_state(pet_id, new_state)
 
-            if is_need_action and need_result:
-                pending = need_result.pending
-                if need_result.xp:
-                    pending = f"{pending}\n+{need_result.xp} XP"
-                if need_result.leveled_up:
-                    pending = f"{pending}\n等级提升到 Lv.{need_result.state['progress']['level']}"
-                if need_result.goal_completed:
-                    pending = f"{pending}\n今日目标完成"
-                did_text = need_result.did
-            else:
-                pending = self.config.card_action_text.get(action_key, {}).get("pending", "…")
-                did_text = None
+            pending = card_result.pending
+            did_text = card_result.did
             if message_id:
                 entry = self.runtime.card_followup_buffer.setdefault(
                     message_id,

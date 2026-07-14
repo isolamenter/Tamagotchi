@@ -44,7 +44,7 @@ energy = 80.0
 curiosity = 60.0
 affection = 30.0
 
-# LLM 单次 state_delta 的绝对值上限，按维度配置，防 outlier。缺维度兜底 30。
+# 兼容旧 state_delta 工具函数的单次变化上限；普通对话不再写入 state，卡片使用自己的确定性 delta。
 [state.delta_clamp]
 hunger = 30
 mood = 25
@@ -94,11 +94,9 @@ high = 75
 low = 20
 
 [gameplay]
-# 状态玩法闭环：阈值触发需求事件，卡片按钮按规则结算，写入成长与日志。
+# 状态玩法：阈值触发需求事件，卡片按钮按规则确定性结算五维状态。
 enabled = true
 need_ttl_sec = 7200
-state_log_max = 20
-daily_goal_reward_xp = 15
 
 [gameplay.need_thresholds]
 hungry = 80

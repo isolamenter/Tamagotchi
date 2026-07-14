@@ -174,20 +174,32 @@ class GameplayDomainTests(unittest.TestCase):
         detected = self.gameplay.detect_need_kind(state, 1000.0)
         self.assertEqual(detected, ("sleepy", 2))
 
-    def test_need_choice_resolves_state_xp_and_cooldown(self):
+    def test_retiring_progress_fields_preserves_numeric_state(self):
+        state = {
+            **self.config.initial_state,
+            "hunger": 91.5,
+            "mood": 32.25,
+            "energy": 47.0,
+            "curiosity": 18.75,
+            "affection": 61.5,
+            "daily_goal": {"kind": "play_once"},
+            "progress": {"xp": 99, "level": 2, "total_xp": 99},
+            "state_log": [{"kind": "card_action"}],
+        }
+
+        cleaned = self.gameplay.normalize_state(state)
+
+        for key in self.config.state_numeric_keys:
+            self.assertEqual(cleaned[key], state[key])
+        self.assertNotIn("daily_goal", cleaned)
+        self.assertNotIn("progress", cleaned)
+        self.assertNotIn("state_log", cleaned)
+
+    def test_need_choice_resolves_state_and_cooldown(self):
         now = 1000.0
         state = {
             **self.config.initial_state,
             "hunger": 90,
-            "daily_goal": {
-                "date": self.gameplay.local_date(now),
-                "kind": "play_once",
-                "title": "想玩一次",
-                "target": 1,
-                "progress": 0,
-                "completed": False,
-                "reward_xp": 15,
-            },
         }
         state, need = self.gameplay.maybe_create_need(state, now, pet_id=1)
         self.assertEqual(need["kind"], "hungry")
@@ -195,39 +207,41 @@ class GameplayDomainTests(unittest.TestCase):
         result = self.gameplay.apply_choice(state, "feed", "群友-A", now + 1)
         self.assertEqual(result.state["active_need"], {})
         self.assertLess(result.state["hunger"], 90)
-        self.assertEqual(result.xp, 8)
-        self.assertEqual(result.state["progress"]["total_xp"], 8)
         self.assertGreater(result.state["need_cooldowns"]["hungry"], now)
-        self.assertEqual(result.state["state_log"][-1]["kind"], "need_resolved")
+        self.assertNotIn("daily_goal", result.state)
+        self.assertNotIn("progress", result.state)
+        self.assertNotIn("state_log", result.state)
 
         detected = self.gameplay.detect_need_kind(result.state, now + 2)
         self.assertIsNone(detected)
 
-    def test_daily_goal_reward_and_log_trim(self):
+    def test_free_card_action_uses_same_settlement_path(self):
         now = 1000.0
-        state = self.gameplay.ensure_daily_goal(
-            {**self.config.initial_state, "curiosity": 10}, now, pet_id=1
-        )
-        state["daily_goal"] = {
-            "date": self.gameplay.local_date(now),
-            "kind": "play_once",
-            "title": "想玩一次",
-            "target": 1,
-            "progress": 0,
-            "completed": False,
-            "reward_xp": 15,
+        state = {
+            **self.config.initial_state,
+            "hunger": 90,
         }
-        state, _ = self.gameplay.maybe_create_need(state, now, pet_id=1)
-        result = self.gameplay.apply_choice(state, "play", "GM", now + 1)
-        self.assertTrue(result.goal_completed)
-        self.assertEqual(result.xp, 23)
-        self.assertTrue(result.state["daily_goal"]["completed"])
 
-        for i in range(self.config.gameplay_state_log_max + 5):
-            self.gameplay.append_log(result.state, {"ts": i, "kind": "x"})
-        self.assertEqual(
-            len(result.state["state_log"]), self.config.gameplay_state_log_max
+        result = self.gameplay.apply_card_action(state, "feed", "群友-A", now)
+
+        self.assertEqual(result.state["hunger"], 55)
+        self.assertEqual(result.state["mood"], 83)
+        self.assertEqual(result.state["need_cooldowns"], {})
+
+    def test_fixed_card_can_use_free_rule_without_resolving_need(self):
+        now = 1000.0
+        state = {
+            **self.config.initial_state,
+            "active_need": self.gameplay.build_need("hungry", 1, now),
+        }
+
+        result = self.gameplay.apply_card_action(
+            state, "goodnight", "系统", now, prefer_free=True
         )
+
+        self.assertEqual(result.state["active_need"]["kind"], "hungry")
+        self.assertEqual(result.state["mood"], 88)
+        self.assertEqual(result.state["affection"], 35)
 
 
 class MemoryDomainTests(unittest.TestCase):
