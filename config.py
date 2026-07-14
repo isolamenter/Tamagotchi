@@ -71,8 +71,6 @@ class AppConfig:
     initial_state: dict[str, float]
     decay_active: dict
     decay_quiet: dict
-    default_delta_clamp: int
-    state_delta_clamp: dict
     state_bands: dict
     state_numeric_keys: tuple[str, ...]
     recent_vibe_pool: list
@@ -246,8 +244,6 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         initial_state=initial_state,
         decay_active=decay_active,
         decay_quiet=decay_quiet,
-        default_delta_clamp=30,
-        state_delta_clamp={k: int(v) for k, v in state_config.get("delta_clamp", {}).items()},
         state_bands={k: dict(v) for k, v in state_config.get("bands", {}).items()},
         state_numeric_keys=state_numeric_keys,
         recent_vibe_pool=list(pet_style.get("recent_vibes", {}).get("pool", [])),

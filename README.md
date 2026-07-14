@@ -239,7 +239,7 @@ ssh gcp-vps 'systemctl status tamagotchi --no-pager'
 - **状态渲染只在极端档触发**：每维都看 `pet_config.toml [state.bands.<dim>]` 的 extreme_high / high / low / extreme_low；落在中段就完全不渲染该维度，避免把回复钉死成同质化语气
 - 全维度都中段、且 vibe 为空时，整个状态感受块都不注入——LLM 自由发挥
 
-初始值在 `pet_config.toml [state.initial]`，衰减的 baseline / rate 在 `[state.decay_active]` / `[state.decay_quiet]`，单次 delta 上限在 `[state.delta_clamp]`，分档阈值 `[state.bands.<dim>]`，每档对应的感受句在 `prompts.toml [state_render.lines]`。
+初始值在 `pet_config.toml [state.initial]`，衰减的 baseline / rate 在 `[state.decay_active]` / `[state.decay_quiet]`，分档阈值在 `[state.bands.<dim>]`，每档对应的感受句在 `prompts.toml [state_render.lines]`。
 
 ## 🎮 状态需求事件
 

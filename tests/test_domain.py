@@ -110,25 +110,9 @@ class StateDomainTests(unittest.TestCase):
         self.assertTrue(spoke)
         self.assertEqual(set(calls), {"dream", "diary"})
 
-    def test_delta_clamp_and_band(self):
-        current = {key: 50.0 for key in self.config.state_numeric_keys}
-        updated = self.state.apply_delta(current, {"hunger": 999, "mood": -999})
-        self.assertEqual(updated["hunger"], 80.0)
-        self.assertEqual(updated["mood"], 25.0)
+    def test_state_band(self):
         self.assertEqual(self.state.state_band("hunger", 90), "hunger_extreme_high")
         self.assertEqual(self.state.state_band("mood", 10), "mood_extreme_low")
-
-    def test_apply_delta_accepts_fractional_values(self):
-        base = {key: 50.0 for key in self.config.state_numeric_keys}
-        # 浮点小数不再被 int() 截断成 0
-        out = self.state.apply_delta(base, {"affection": 0.8})
-        self.assertAlmostEqual(out["affection"], 50.8, places=5)
-        # 带小数的数字字符串也能解析（旧版 int("2.5") 会抛错→丢弃）
-        out2 = self.state.apply_delta(base, {"affection": "2.5"})
-        self.assertAlmostEqual(out2["affection"], 52.5, places=5)
-        # 非数字仍安全降级为 0
-        out3 = self.state.apply_delta(base, {"affection": "abc"})
-        self.assertAlmostEqual(out3["affection"], 50.0, places=5)
 
     def test_decay_updates_timestamp_and_bounds_values(self):
         stored = self.state.initial_state()
@@ -163,42 +147,22 @@ class CardDomainTests(unittest.TestCase):
 class GameplayDomainTests(unittest.TestCase):
     def setUp(self):
         self.config = make_config()
+        self.state = StateDomain(self.config)
         self.gameplay = GameplayDomain(self.config)
 
     def test_need_detection_prefers_extreme_severity(self):
         state = {
-            **self.config.initial_state,
+            **self.state.initial_state(),
             "hunger": 81,
             "energy": 5,
         }
         detected = self.gameplay.detect_need_kind(state, 1000.0)
         self.assertEqual(detected, ("sleepy", 2))
 
-    def test_retiring_progress_fields_preserves_numeric_state(self):
-        state = {
-            **self.config.initial_state,
-            "hunger": 91.5,
-            "mood": 32.25,
-            "energy": 47.0,
-            "curiosity": 18.75,
-            "affection": 61.5,
-            "daily_goal": {"kind": "play_once"},
-            "progress": {"xp": 99, "level": 2, "total_xp": 99},
-            "state_log": [{"kind": "card_action"}],
-        }
-
-        cleaned = self.gameplay.normalize_state(state)
-
-        for key in self.config.state_numeric_keys:
-            self.assertEqual(cleaned[key], state[key])
-        self.assertNotIn("daily_goal", cleaned)
-        self.assertNotIn("progress", cleaned)
-        self.assertNotIn("state_log", cleaned)
-
     def test_need_choice_resolves_state_and_cooldown(self):
         now = 1000.0
         state = {
-            **self.config.initial_state,
+            **self.state.initial_state(),
             "hunger": 90,
         }
         state, need = self.gameplay.maybe_create_need(state, now, pet_id=1)
@@ -208,17 +172,13 @@ class GameplayDomainTests(unittest.TestCase):
         self.assertEqual(result.state["active_need"], {})
         self.assertLess(result.state["hunger"], 90)
         self.assertGreater(result.state["need_cooldowns"]["hungry"], now)
-        self.assertNotIn("daily_goal", result.state)
-        self.assertNotIn("progress", result.state)
-        self.assertNotIn("state_log", result.state)
-
         detected = self.gameplay.detect_need_kind(result.state, now + 2)
         self.assertIsNone(detected)
 
     def test_free_card_action_uses_same_settlement_path(self):
         now = 1000.0
         state = {
-            **self.config.initial_state,
+            **self.state.initial_state(),
             "hunger": 90,
         }
 
@@ -231,7 +191,7 @@ class GameplayDomainTests(unittest.TestCase):
     def test_fixed_card_can_use_free_rule_without_resolving_need(self):
         now = 1000.0
         state = {
-            **self.config.initial_state,
+            **self.state.initial_state(),
             "active_need": self.gameplay.build_need("hungry", 1, now),
         }
 

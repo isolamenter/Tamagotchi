@@ -177,19 +177,8 @@ class GameplayDomain:
     def __init__(self, config: AppConfig):
         self.config = config
 
-    def normalize_state(self, state: dict) -> dict:
-        out = dict(state)
-        if not isinstance(out.get("active_need"), dict):
-            out["active_need"] = {}
-        # 兼容已落库的 V1 字段：正常写回时会清理它们，五维 state 不受影响。
-        for key in ("daily_goal", "progress", "state_log"):
-            out.pop(key, None)
-        if not isinstance(out.get("need_cooldowns"), dict):
-            out["need_cooldowns"] = {}
-        return out
-
     def current_need(self, state: dict, now: float | None = None) -> dict:
-        need = self.normalize_state(state).get("active_need") or {}
+        need = state["active_need"]
         if not need or need.get("resolved"):
             return {}
         if now is not None and float(need.get("expires_at") or 0) <= now:
@@ -199,8 +188,8 @@ class GameplayDomain:
         return need
 
     def expired_need_cleared(self, state: dict, now: float) -> dict:
-        out = self.normalize_state(state)
-        need = out.get("active_need") or {}
+        out = dict(state)
+        need = out["active_need"]
         if need and not need.get("resolved") and float(need.get("expires_at") or 0) <= now:
             out["active_need"] = {}
         return out
@@ -211,7 +200,7 @@ class GameplayDomain:
         state = self.expired_need_cleared(state, now)
         if self.current_need(state, now):
             return None
-        cooldowns = state.get("need_cooldowns") or {}
+        cooldowns = state["need_cooldowns"]
         candidates: list[tuple[int, int, str]] = []
         for idx, kind in enumerate(NEED_ORDER):
             raw_until = cooldowns.get(kind, 0)
@@ -257,7 +246,7 @@ class GameplayDomain:
     def maybe_create_need(
         self, state: dict, now: float, pet_id: int | None = None
     ) -> tuple[dict, dict | None]:
-        out = self.normalize_state(state)
+        out = dict(state)
         out = self.expired_need_cleared(out, now)
         detected = self.detect_need_kind(out, now)
         if detected is None:
@@ -348,7 +337,7 @@ class GameplayDomain:
         require_active_need: bool,
         prefer_free: bool = False,
     ) -> GameplayResult:
-        out = self.normalize_state(state)
+        out = dict(state)
         need = self.current_need(out, now)
         if not need and require_active_need:
             raise ValueError("no_active_need")
@@ -384,7 +373,7 @@ class GameplayDomain:
 
         if settle_need:
             out["active_need"] = {}
-            cooldowns = dict(out.get("need_cooldowns") or {})
+            cooldowns = dict(out["need_cooldowns"])
             cooldowns[need_kind] = now + self.config.gameplay_need_ttl_sec
             out["need_cooldowns"] = cooldowns
         out["last_update_ts"] = now

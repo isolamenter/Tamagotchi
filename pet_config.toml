@@ -44,14 +44,6 @@ energy = 80.0
 curiosity = 60.0
 affection = 30.0
 
-# 兼容旧 state_delta 工具函数的单次变化上限；普通对话不再写入 state，卡片使用自己的确定性 delta。
-[state.delta_clamp]
-hunger = 30
-mood = 25
-energy = 25
-curiosity = 20
-affection = 12
-
 # 衰减模型：每个维度向 baseline 指数收敛（v = baseline + (v-baseline)*exp(-rate*h)），
 # 没人互动时漂回中段而不是钉死在极端档。rate = 每小时收敛速率常数（半衰期 ≈ 0.693/rate 小时）。
 [state.decay_active]
@@ -161,7 +153,7 @@ image_timeout_sec = 120
 # need_dim + need_side 决定按钮何时浮现：该维度进入对应方向的非中段档位才显示。
 #   need_side = "high" -> 维度进入 high / extreme_high 档时浮现（如饿了才出现投喂）
 #   need_side = "low"  -> 维度进入 low / extreme_low 档时浮现
-# delta 是点击后套用的「确定性」状态变化，不经过 LLM，不受 [state].delta_clamp 限制。
+# delta 是点击后套用的「确定性」状态变化，不经过 LLM。
 [card.actions.feed]
 need_dim = "hunger"
 need_side = "high"

@@ -119,21 +119,6 @@ class StateDomain:
 
         return self.maybe_rotate_vibe(result, now, pet_id)
 
-    def apply_delta(self, state: dict, delta: dict) -> dict:
-        out = dict(state)
-        for key in self.config.state_numeric_keys:
-            try:
-                d = float(delta.get(key, 0))
-            except (TypeError, ValueError):
-                d = 0.0
-            clamp = self.config.state_delta_clamp.get(key, self.config.default_delta_clamp)
-            d = max(-clamp, min(clamp, d))
-            out[key] = max(
-                0.0,
-                min(100.0, float(out.get(key, self.config.initial_state.get(key, 50.0))) + d),
-            )
-        return out
-
     def state_band(self, dim: str, value: float) -> str | None:
         bands = self.config.state_bands.get(dim)
         if not bands:
