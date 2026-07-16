@@ -185,14 +185,13 @@ name_learned = "（叮~）记住啦，以后就叫你「{name}」啦~"
 default_speak_trigger = "GM 手动触发：测试普通主动发言"
 
 [card]
-# 主动发言交互卡片的展示文案。运行数值（开关 / 进度条格数 / 冷却 / delta）在 pet_config.toml [card]。
+# 主动发言交互卡片的展示文案。运行数值（开关 / 进度条格数 / 一次性结算 / delta）在 pet_config.toml [card]。
 bar_filled = "▰"
 bar_empty = "▱"
 # 状态条区域上方的小标题；留空则不渲染。
 bars_header = "—— 我现在的样子 ——"
-# 按钮点击成功 / 处于冷却 / 卡片过期时的 toast 文案。
+# 按钮点击成功或卡片过期时的 toast 文案。
 toast_done = "做到啦 ❤️"
-toast_cooldown = "它还在回味上一次的互动，等一下下~"
 toast_expired = "这张卡片已经过期啦，等我下次冒泡再来玩吧~"
 # 多人点击时，每条反馈台词在卡片文本里向下追加的行前缀。
 followup_prefix = "↳ "

@@ -71,6 +71,10 @@ class StateDomainTests(unittest.TestCase):
             service.scheduled_event_due(state, self.local_ts(2026, 1, 3, 12))
         )
         self.assertIsNotNone(
+            service.scheduled_event_due(state, self.local_ts(2026, 1, 5, 10))
+        )
+        # Restarting hours later must not replay a whole day's scheduled cards.
+        self.assertIsNone(
             service.scheduled_event_due(state, self.local_ts(2026, 1, 5, 12))
         )
 
@@ -102,13 +106,13 @@ class StateDomainTests(unittest.TestCase):
             return "reply", dict(db_state)
 
         service.scheduled_speak = fake_scheduled
-        # 周一 20:00：非周末，且已过 dream(10) 与 diary(19) 两个钟点 → 两个事件都欠着
-        now = self.local_ts(2026, 1, 5, 20)
+        # 定时事件只在一小时补发窗口内触发；19:00 这一 tick 只触发日记。
+        now = self.local_ts(2026, 1, 5, 19)
         spoke = asyncio.run(
             service.tick_pet(1, "chat", current=dict(db_state), now=now)
         )
         self.assertTrue(spoke)
-        self.assertEqual(set(calls), {"dream", "diary"})
+        self.assertEqual(calls, ["diary"])
 
     def test_state_band(self):
         self.assertEqual(self.state.state_band("satiety", 10), "satiety_extreme_low")
@@ -140,8 +144,12 @@ class CardDomainTests(unittest.TestCase):
         self.assertIn("one", text)
         self.assertIn("two", text)
 
-        click_ts = {"u1": 1.0, "u2": 999.0, "bad": "old-shape"}
-        self.assertEqual(self.card.prune_card_click_ts(click_ts, 1000.0), {"u2": 999.0})
+        card = self.card.build_pet_card(1, "hello", pet_state, action_keys=["feed"])
+        value = card["elements"][-1]["actions"][0]["value"]
+        self.assertEqual(value["v"], 2)
+        self.assertIn("card_id", value)
+        self.assertIn("expires_at", value)
+
 
 
 class GameplayDomainTests(unittest.TestCase):
@@ -206,7 +214,7 @@ class GameplayDomainTests(unittest.TestCase):
         self.assertEqual(result.state["mood"], 74)
         self.assertEqual(result.state["affection"], 53)
 
-    def test_expired_need_starts_a_cooldown(self):
+    def test_expired_need_escalates_and_keeps_the_problem(self):
         now = 1000.0
         state = {
             **self.state.initial_state(),
@@ -217,12 +225,34 @@ class GameplayDomainTests(unittest.TestCase):
 
         cleared = self.gameplay.expired_need_cleared(state, now)
 
-        self.assertEqual(cleared["active_need"], {})
+        self.assertEqual(cleared["active_need"]["kind"], "hungry")
+        self.assertEqual(cleared["active_need"]["severity"], 2)
+        self.assertEqual(cleared["active_need"]["round"], 1)
+        self.assertEqual(cleared["active_need"]["announced_card_id"], "")
+        self.assertEqual(cleared["need_cooldowns"], {})
+
+    def test_weak_need_choice_is_partial_and_continues_with_new_round(self):
+        now = 1000.0
+        state = {**self.state.initial_state(), "satiety": 10}
+        state, _ = self.gameplay.maybe_create_need(state, now, pet_id=1)
+        result = self.gameplay.apply_choice(state, "promise_food", "群友-A", now + 1)
+        self.assertFalse(result.resolved)
+        self.assertEqual(result.state["active_need"]["kind"], "hungry")
+        self.assertEqual(result.state["active_need"]["round"], 1)
+        self.assertEqual(result.state["active_need"]["announced_card_id"], "")
+
+    def test_need_ttl_pauses_and_resumes(self):
+        state = {**self.state.initial_state(), "active_need": self.gameplay.build_need("hungry", 1, 1000)}
+        paused = self.gameplay.pause_need(state, 1100)
         self.assertEqual(
-            cleared["need_cooldowns"]["hungry"],
-            now + self.config.gameplay_need_cooldown_sec,
+            paused["active_need"]["remaining_ttl_sec"],
+            self.config.gameplay_need_ttl_sec - 100,
         )
-        self.assertIsNone(self.gameplay.detect_need_kind(cleared, now + 1))
+        resumed = self.gameplay.resume_need(paused, 2000)
+        self.assertEqual(
+            resumed["active_need"]["expires_at"],
+            2000 + self.config.gameplay_need_ttl_sec - 100,
+        )
 
 
 class MemoryDomainTests(unittest.TestCase):
@@ -257,6 +287,20 @@ class ConfigTests(unittest.TestCase):
                     "STATE_DB": "state.db",
                 }
             )
+
+    def test_gemini_only_config_does_not_require_openai_keys(self):
+        config = load_config(
+            {
+                "FEISHU_APP_ID": "app",
+                "FEISHU_APP_SECRET": "secret",
+                "FEISHU_VERIFICATION_TOKEN": "verify-token",
+                "LLM_PROVIDER": "gemini",
+                "GEMINI_API_KEY": "gemini-key",
+                "STATE_DB": "state.db",
+            }
+        )
+        self.assertEqual(config.llm_provider, "gemini")
+        self.assertEqual(config.openai_api_key, "")
 
 
 if __name__ == "__main__":

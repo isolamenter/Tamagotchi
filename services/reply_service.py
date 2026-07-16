@@ -7,6 +7,7 @@ import time
 
 from config import AppConfig
 from domain.pet import PetDomain
+from domain.gameplay import GameplayDomain
 from domain.state import StateDomain
 from integrations.feishu_client import FeishuClient
 from integrations.llm_client import LLMClient
@@ -16,6 +17,7 @@ from repositories.system_repo import SystemRepository
 from runtime import RuntimeState
 from services.memory_service import MemoryService
 from services.observer_service import ObserverService
+from services.card_service import CardService
 
 log = logging.getLogger("tamagotchi")
 
@@ -26,24 +28,28 @@ class ReplyService:
         config: AppConfig,
         runtime: RuntimeState,
         state_domain: StateDomain,
+        gameplay_domain: GameplayDomain,
         pet_domain: PetDomain,
         pet_repo: PetRepository,
         message_repo: MessageRepository,
         system_repo: SystemRepository,
         memory_service: MemoryService,
         observer_service: ObserverService,
+        card_service: CardService,
         feishu: FeishuClient,
         llm: LLMClient,
     ):
         self.config = config
         self.runtime = runtime
         self.state_domain = state_domain
+        self.gameplay_domain = gameplay_domain
         self.pet_domain = pet_domain
         self.pet_repo = pet_repo
         self.message_repo = message_repo
         self.system_repo = system_repo
         self.memory_service = memory_service
         self.observer_service = observer_service
+        self.card_service = card_service
         self.feishu = feishu
         self.llm = llm
 
@@ -127,6 +133,7 @@ class ReplyService:
             # 普通对话只读取 state；五维玩法状态只能由卡片动作修改。
             out = dict(state)
             out["last_update_ts"] = time.time()
+            out["last_social_ts"] = time.time()
             return out
 
         new_state = await self.pet_repo.mutate_state(pet_id, _mutator)
@@ -144,19 +151,56 @@ class ReplyService:
             pet_id, lambda s: {**s, "last_reply_ts": time.time()}
         )
 
-    async def is_direct_to_bot(self, mentions: list[dict]) -> bool:
+    async def is_direct_to_bot(self, chat_type: str, mentions: list[dict]) -> bool:
+        # A p2p message is intrinsically addressed to the bot.  In groups we
+        # require a real @mention; when bot identity cannot be fetched, fail
+        # closed and keep observing instead of unexpectedly interrupting chat.
+        if chat_type == "p2p":
+            return True
         try:
             bot_open_id = await self.feishu.get_bot_open_id()
         except Exception:
-            log.exception(
-                "get bot open_id failed; falling back to treating all messages as direct"
-            )
-            return True
+            log.exception("get bot open_id failed; group message stays observer-only")
+            return False
         return any((mention.get("id") or {}).get("open_id") == bot_open_id for mention in mentions)
+
+    async def _send_response(
+        self, chat_type: str, chat_id: str, message_id: str, text: str
+    ) -> None:
+        if chat_type == "p2p":
+            await self.feishu.send_text(chat_id, text)
+        else:
+            await self.feishu.reply_text(message_id, text)
 
     async def _maybe_compress(self, pet_id: int) -> None:
         if await self.message_repo.count_unsummarized(pet_id) > self.config.compress_threshold:
             asyncio.create_task(self.memory_service.compress_pet_memory(pet_id))
+
+    async def _attach_first_need_cta(
+        self, pet_id: int, chat_id: str, state: dict
+    ) -> None:
+        """Send an unannounced need card once; ordinary dialogue never settles it."""
+        if not self.config.card_enabled or not self.config.gameplay_enabled:
+            return
+        now = time.time()
+        async with self.runtime.state_lock(pet_id):
+            current = await self.pet_repo.load_pet_state(pet_id)
+            current = self.gameplay_domain.expired_need_cleared(current, now)
+            need = self.gameplay_domain.current_need(current, now)
+            if not need or need.get("announced_card_id"):
+                return
+            text = f"{need.get('title', '需要照料')}：{need.get('description', '')}"
+            try:
+                card_id, _ = await self.card_service.send_persistent_card(
+                    pet_id, chat_id, text, current, mode="need"
+                )
+            except Exception:
+                # Keep active_need unannounced.  A later direct message or tick
+                # can retry without manufacturing a new need.
+                log.exception("failed to attach need CTA for pet %d", pet_id)
+                return
+            current["active_need"] = {**need, "announced_card_id": card_id}
+            await self.pet_repo.update_pet_state(pet_id, current)
 
     async def handle_message_event(self, event: dict) -> None:
         msg = event.get("message") or {}
@@ -166,6 +210,7 @@ class ReplyService:
             return
 
         mentions = msg.get("mentions") or []
+        chat_type = msg.get("chat_type") or "group"
         sender_open_id = (
             ((event.get("sender") or {}).get("sender_id") or {}).get("open_id")
         ) or ""
@@ -173,7 +218,7 @@ class ReplyService:
             await self.resolve_user_name(sender_open_id) if sender_open_id else "群友"
         )
 
-        is_direct = await self.is_direct_to_bot(mentions)
+        is_direct = await self.is_direct_to_bot(chat_type, mentions)
         msg_type = msg.get("message_type")
 
         if not is_direct:
@@ -210,7 +255,7 @@ class ReplyService:
             return
 
         if msg_type != "text":
-            await self.feishu.reply_text(message_id, self.config.fallback_replies["non_text"])
+            await self._send_response(chat_type, chat_id, message_id, self.config.fallback_replies["non_text"])
             return
 
         try:
@@ -221,7 +266,7 @@ class ReplyService:
 
         user_text = self.pet_domain.clean_text(content.get("text", ""), mentions)
         if not user_text:
-            await self.feishu.reply_text(message_id, self.config.fallback_replies["empty_text"])
+            await self._send_response(chat_type, chat_id, message_id, self.config.fallback_replies["empty_text"])
             return
 
         pet_id = await self.pet_repo.get_or_create_pet(chat_id)
@@ -244,9 +289,7 @@ class ReplyService:
                 is_observer=False,
                 sender_open_id=sender_open_id,
             )
-            await self.feishu.reply_text(
-                message_id, self.config.fallback_replies["quiet_hours"]
-            )
+            await self._send_response(chat_type, chat_id, message_id, self.config.fallback_replies["quiet_hours"])
             log.info("pet %d @ during quiet hours, sent sleeping reply", pet_id)
             await self._maybe_compress(pet_id)
             return
@@ -283,8 +326,9 @@ class ReplyService:
             sender_open_id=sender_open_id,
         )
         learned_name = ""
+        reply_state = await self.pet_repo.load_pet_state(pet_id)
         try:
-            reply, _, learned_name = await self.call_llm_with_memory(
+            reply, reply_state, learned_name = await self.call_llm_with_memory(
                 pet_id,
                 user_text,
                 sender_name=sender_name,
@@ -298,13 +342,22 @@ class ReplyService:
             )
         log.info("reply=%r", reply)
 
+        try:
+            await self._send_response(chat_type, chat_id, message_id, reply)
+        except Exception:
+            # The conversation history must reflect what users actually saw.
+            # Release the in-memory gate so a transport outage does not turn
+            # into a phantom reply cooldown.
+            self.runtime.reply_gate.pop(pet_id, None)
+            log.exception("reply delivery failed for pet %d", pet_id)
+            return
         await self.message_repo.append_message(pet_id, "assistant", reply)
-        await self.feishu.reply_text(message_id, reply)
         await self.mark_replied(pet_id)
+        await self._attach_first_need_cta(pet_id, chat_id, reply_state)
 
         if learned_name:
-            await self.feishu.reply_text(
-                message_id,
+            await self._send_response(
+                chat_type, chat_id, message_id,
                 self.config.fallback_replies["name_learned"].format(name=learned_name),
             )
 

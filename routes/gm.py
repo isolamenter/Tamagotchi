@@ -118,7 +118,7 @@ async def gm_pets(req: Request):
     rows = await container.pet_repo.get_gm_pets()
     pets = []
     for row in rows:
-        state = await container.services.gameplay.ensure_pet_gameplay(row["id"])
+        state = await container.pet_repo.load_pet_state(row["id"])
         pets.append(
             {
                 "id": row["id"],
@@ -198,7 +198,7 @@ async def gm_get_state(req: Request):
         return resolved
     pet_id, chat_id = resolved
     container = _container(req)
-    state = await container.services.gameplay.ensure_pet_gameplay(pet_id)
+    state = await container.pet_repo.load_pet_state(pet_id)
     return {
         "pet_id": pet_id,
         "chat_id": chat_id,
@@ -221,7 +221,7 @@ async def gm_gameplay(req: Request):
         return resolved
     pet_id, chat_id = resolved
     container = _container(req)
-    state = await container.services.gameplay.ensure_pet_gameplay(pet_id)
+    state = await container.pet_repo.load_pet_state(pet_id)
     public = container.state_domain.public_state(state)
     return {
         "pet_id": pet_id,

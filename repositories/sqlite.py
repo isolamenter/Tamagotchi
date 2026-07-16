@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from config import AppConfig
 
@@ -9,11 +11,19 @@ class Database:
     def __init__(self, config: AppConfig):
         self.config = config
 
-    def connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.config.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def init_db(self) -> None:
         with self.connect() as conn:
@@ -84,6 +94,36 @@ class Database:
                     name TEXT NOT NULL,
                     updated_at REAL NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS card_instances (
+                    card_id TEXT PRIMARY KEY,
+                    pet_id INTEGER NOT NULL REFERENCES pets(id),
+                    message_id TEXT NOT NULL DEFAULT '',
+                    mode TEXT NOT NULL,
+                    need_id TEXT NOT NULL DEFAULT '',
+                    need_round INTEGER NOT NULL DEFAULT 0,
+                    built_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    max_settlements INTEGER NOT NULL DEFAULT 1,
+                    settlement_count INTEGER NOT NULL DEFAULT 0,
+                    announced INTEGER NOT NULL DEFAULT 0,
+                    base_text TEXT NOT NULL DEFAULT '',
+                    action_keys_json TEXT NOT NULL DEFAULT '[]',
+                    img_key TEXT NOT NULL DEFAULT '',
+                    feedback_lines_json TEXT NOT NULL DEFAULT '[]',
+                    version INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_card_instances_pet ON card_instances(pet_id, expires_at);
+
+                CREATE TABLE IF NOT EXISTS card_claims (
+                    card_id TEXT NOT NULL REFERENCES card_instances(card_id),
+                    actor_open_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    settled_at REAL NOT NULL,
+                    state_applied INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (card_id, actor_open_id)
+                );
                 """
             )
             try:
@@ -100,4 +140,3 @@ class Database:
                 )
             except sqlite3.OperationalError:
                 pass
-

@@ -90,8 +90,8 @@ class AppConfig:
 
     card_enabled: bool
     card_bar_width: int
-    card_action_cooldown_sec: int
     card_max_buttons: int
+    card_scheduled_max_settlements: int
     card_default_actions: list
     card_button_ttl_sec: int
     card_log_max_lines: int
@@ -100,7 +100,6 @@ class AppConfig:
     card_bar_empty: str
     card_bars_header: str
     card_toast_done: str
-    card_toast_cooldown: str
     card_toast_expired: str
     card_followup_prefix: str
     card_vibe_template: str
@@ -113,6 +112,9 @@ class AppConfig:
     gameplay_need_ttl_sec: int
     gameplay_need_cooldown_sec: int
     gameplay_need_thresholds: dict[str, float]
+    gameplay_resolution_thresholds: dict[str, float]
+    gameplay_need_severe_ttl_sec: int
+    scheduled_grace_sec: int
 
 
 def _load_toml(path: Path) -> dict:
@@ -141,6 +143,8 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
     gm_token = env.get("GM_TOKEN") or feishu_verification_token
 
     llm_provider = (env.get("LLM_PROVIDER", "openai") or "openai").strip().lower()
+    if llm_provider not in {"openai", "gemini"}:
+        raise ValueError("LLM_PROVIDER must be 'openai' or 'gemini'")
     gemini_base_url = env.get("GEMINI_BASE_URL", "")
     # provider=gemini 时缺 key 直接 KeyError 早死（符合 os.environ 直读约束）
     gemini_api_key = (
@@ -195,8 +199,10 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         feishu_verification_token=feishu_verification_token,
         feishu_encrypt_key=feishu_encrypt_key,
         gm_token=gm_token,
-        openai_base_url=env["OPENAI_BASE_URL"],
-        openai_api_key=env["OPENAI_API_KEY"],
+        # The two providers are alternatives: a Gemini-only deployment should
+        # not require unused OpenAI credentials at startup.
+        openai_base_url=(env["OPENAI_BASE_URL"] if llm_provider == "openai" else env.get("OPENAI_BASE_URL", "")),
+        openai_api_key=(env["OPENAI_API_KEY"] if llm_provider == "openai" else env.get("OPENAI_API_KEY", "")),
         model_name=env.get("CHAT_MODEL", "gpt-4o-mini"),
         embed_model=env.get("EMBED_MODEL", "text-embedding-3-small"),
         image_model=env.get("IMAGE_MODEL", ""),
@@ -262,8 +268,8 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         spontaneous_prob=float(autonomous_config["spontaneous_prob"]),
         card_enabled=bool(card_config.get("enabled", False)),
         card_bar_width=int(card_config.get("bar_width", 10)),
-        card_action_cooldown_sec=int(card_config.get("action_cooldown_sec", 60)),
         card_max_buttons=int(card_config.get("max_buttons", 3)),
+        card_scheduled_max_settlements=int(card_config.get("scheduled_max_settlements", 3)),
         card_default_actions=list(card_config.get("default_actions", [])),
         card_button_ttl_sec=int(card_config.get("button_ttl_sec", 1800)),
         card_log_max_lines=int(card_config.get("card_log_max_lines", 6)),
@@ -272,7 +278,6 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         card_bar_empty=card_prompts.get("bar_empty", "▱"),
         card_bars_header=card_prompts.get("bars_header", ""),
         card_toast_done=card_prompts.get("toast_done", "✓"),
-        card_toast_cooldown=card_prompts.get("toast_cooldown", "稍等一下~"),
         card_toast_expired=card_prompts.get("toast_expired", "这张卡片过期了~"),
         card_followup_prefix=card_prompts.get("followup_prefix", "↳ "),
         card_vibe_template=card_vibe_template,
@@ -300,4 +305,12 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
                 },
             ).items()
         },
+        gameplay_resolution_thresholds={
+            k: float(v)
+            for k, v in gameplay_config.get("resolution_thresholds", {}).items()
+        },
+        gameplay_need_severe_ttl_sec=int(
+            gameplay_config.get("need_severe_ttl_sec", gameplay_config.get("need_ttl_sec", 7200))
+        ),
+        scheduled_grace_sec=int(autonomous_config.get("scheduled_grace_sec", 3600)),
     )

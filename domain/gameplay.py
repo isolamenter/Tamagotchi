@@ -172,6 +172,7 @@ class GameplayResult:
     did: str
     pending: str
     delta: dict[str, float]
+    resolved: bool
 
 
 class GameplayDomain:
@@ -182,6 +183,8 @@ class GameplayDomain:
         need = state["active_need"]
         if not need or need.get("resolved"):
             return {}
+        if need.get("paused_at"):
+            return need
         if now is not None and float(need.get("expires_at") or 0) <= now:
             return {}
         if need.get("kind") not in NEED_SPECS:
@@ -191,13 +194,48 @@ class GameplayDomain:
     def expired_need_cleared(self, state: dict, now: float) -> dict:
         out = dict(state)
         need = out.get("active_need") or {}
-        if need and not need.get("resolved") and float(need.get("expires_at") or 0) <= now:
+        if (
+            need
+            and not need.get("resolved")
+            and not need.get("paused_at")
+            and float(need.get("expires_at") or 0) <= now
+        ):
+            # 错过卡不再把问题静默冷却；升级后在下一活跃窗口重新通知。
             kind = need.get("kind")
-            if kind in NEED_SPECS:
-                cooldowns = dict(out.get("need_cooldowns") or {})
-                cooldowns[kind] = now + self.config.gameplay_need_cooldown_sec
-                out["need_cooldowns"] = cooldowns
-            out["active_need"] = {}
+            severity = min(2, int(need.get("severity", 1) or 1) + 1)
+            ttl = (
+                self.config.gameplay_need_severe_ttl_sec
+                if severity >= 2
+                else self.config.gameplay_need_ttl_sec
+            )
+            out["active_need"] = {
+                **need,
+                "severity": severity,
+                "round": int(need.get("round", 0) or 0) + 1,
+                "status": "expired",
+                "expires_at": int(now + ttl),
+                "announced_card_id": "",
+            }
+        return out
+
+    def pause_need(self, state: dict, now: float) -> dict:
+        out = dict(state)
+        need = dict(out.get("active_need") or {})
+        if need and not need.get("paused_at"):
+            need["remaining_ttl_sec"] = max(0, float(need.get("expires_at", now)) - now)
+            need["paused_at"] = now
+            out["active_need"] = need
+        return out
+
+    def resume_need(self, state: dict, now: float) -> dict:
+        out = dict(state)
+        need = dict(out.get("active_need") or {})
+        if need and need.get("paused_at"):
+            remaining = max(0, float(need.get("remaining_ttl_sec", 0) or 0))
+            need.pop("paused_at", None)
+            need.pop("remaining_ttl_sec", None)
+            need["expires_at"] = int(now + remaining)
+            out["active_need"] = need
         return out
 
     def detect_need_kind(self, state: dict, now: float) -> tuple[str, int] | None:
@@ -209,6 +247,8 @@ class GameplayDomain:
         cooldowns = state["need_cooldowns"]
         candidates: list[tuple[int, int, str]] = []
         for idx, kind in enumerate(NEED_ORDER):
+            if kind in {"bored", "lonely"} and now - float(state.get("last_social_ts", 0) or 0) < self.config.proactive_cooldown_sec:
+                continue
             raw_until = cooldowns.get(kind, 0)
             try:
                 if float(raw_until) > now:
@@ -244,8 +284,18 @@ class GameplayDomain:
             "title": spec["title"],
             "description": spec["description"],
             "created_at": int(now),
-            "expires_at": int(now + self.config.gameplay_need_ttl_sec),
+            "expires_at": int(
+                now
+                + (
+                    self.config.gameplay_need_severe_ttl_sec
+                    if severity >= 2
+                    else self.config.gameplay_need_ttl_sec
+                )
+            ),
             "severity": severity,
+            "round": 0,
+            "status": "open",
+            "announced_card_id": "",
             "resolved": False,
             "source": "state_threshold",
         }
@@ -293,7 +343,23 @@ class GameplayDomain:
             "button": str(choice.get("button", action)),
             "did": str(choice.get("did", "")),
             "pending": str(choice.get("pending", "…")),
+            "effect_hint": self.effect_hint(choice),
         }
+
+    def effect_hint(self, rule: dict[str, Any]) -> str:
+        delta = dict(rule.get("delta") or {})
+        positives = [key for key, value in delta.items() if float(value) > 0]
+        negatives = [key for key, value in delta.items() if float(value) < 0]
+        labels = {"satiety": "饱腹", "mood": "心情", "energy": "精力", "curiosity": "好奇", "affection": "亲近"}
+        gain = "、".join(labels.get(key, key) for key in positives[:2])
+        cost = "、".join(labels.get(key, key) for key in negatives[:1])
+        if gain and cost:
+            return f"提升{gain}，会消耗{cost}"
+        if gain:
+            return f"提升{gain}"
+        if cost:
+            return f"会消耗{cost}"
+        return "陪它待一会儿"
 
     def free_card_rule(self, action: str) -> dict[str, Any] | None:
         config_rule = self.config.card_actions.get(action)
@@ -378,11 +444,25 @@ class GameplayDomain:
                 ),
             )
 
+        resolved = False
         if settle_need:
-            out["active_need"] = {}
-            cooldowns = dict(out["need_cooldowns"])
-            cooldowns[need_kind] = now + self.config.gameplay_need_cooldown_sec
-            out["need_cooldowns"] = cooldowns
+            threshold = self.config.gameplay_resolution_thresholds.get(
+                need_kind,
+                self.config.gameplay_need_thresholds.get(need_kind, 0.0),
+            )
+            dim = NEED_SPECS[need_kind]["dim"]
+            resolved = float(out.get(dim, 0.0)) >= threshold
+            if resolved:
+                out["active_need"] = {}
+                cooldowns = dict(out["need_cooldowns"])
+                cooldowns[need_kind] = now + self.config.gameplay_need_cooldown_sec
+                out["need_cooldowns"] = cooldowns
+            else:
+                continued = dict(need)
+                continued["round"] = int(continued.get("round", 0) or 0) + 1
+                continued["status"] = "partial"
+                continued["announced_card_id"] = ""
+                out["active_need"] = continued
         out["last_update_ts"] = now
 
         return GameplayResult(
@@ -392,4 +472,5 @@ class GameplayDomain:
             did=str(rule.get("did", "")),
             pending=str(rule.get("pending", "…")),
             delta=delta,
+            resolved=resolved,
         )

@@ -67,18 +67,38 @@ class MemoryService:
         return self.memory_domain.render_recall_block(list(cards_by_id.values()))
 
     async def _record_compress_failure(
-        self, pet_id: int, compress_fail_count: int, new_until_id: int
+        self, pet_id: int, compress_fail_count: int, new_until_id: int, rows: list[dict]
     ) -> None:
         next_fail_count = await self.memory_repo.handle_compress_failure(
             pet_id, compress_fail_count, new_until_id
         )
         if next_fail_count >= 5:
             log.error(
-                "compression failed 5 times for pet %d. Forcefully skipping chunk "
-                "to until_id=%d to prevent locking the buffer.",
-                pet_id,
-                new_until_id,
+                "compression failed 5 times for pet %d; using deterministic "
+                "memory cards instead of discarding history.", pet_id,
             )
+            fallback = [
+                {
+                    "when": "聊天记录",
+                    "who": row.get("sender_name") or ("宠物" if row.get("role") == "assistant" else "群友"),
+                    "what": (row.get("content") or "").strip(),
+                    "vibe": "确定性备忘",
+                    "hooks": "",
+                }
+                for row in rows
+                if (row.get("content") or "").strip()
+            ]
+            inserted = await self.memory_repo.save_compressed_cards(
+                pet_id, fallback, new_until_id
+            )
+            if inserted:
+                for card_id, card in inserted:
+                    asyncio.create_task(
+                        self.embed_and_store(
+                            pet_id, "card", card_id,
+                            self.memory_domain.format_card_for_embed(card),
+                        )
+                    )
         else:
             log.warning(
                 "memory compression failed for pet %d. fail_count is now %d.",
@@ -146,7 +166,7 @@ class MemoryService:
             except Exception:
                 log.exception("compress llm call failed for pet %d", pet_id)
                 await self._record_compress_failure(
-                    pet_id, compress_fail_count, new_until_id
+                    pet_id, compress_fail_count, new_until_id, to_compress
                 )
                 return
 
@@ -163,7 +183,7 @@ class MemoryService:
                     content[:200],
                 )
                 await self._record_compress_failure(
-                    pet_id, compress_fail_count, new_until_id
+                    pet_id, compress_fail_count, new_until_id, to_compress
                 )
                 return
 
@@ -174,20 +194,20 @@ class MemoryService:
             except Exception:
                 log.exception("failed to save compressed cards for pet %d", pet_id)
                 await self._record_compress_failure(
-                    pet_id, compress_fail_count, new_until_id
+                    pet_id, compress_fail_count, new_until_id, to_compress
                 )
                 return
 
             if not inserted:
-                # 解析成功但 0 张可用卡片：summary_until_id 未推进，按失败计数走退避，
-                # 累计到 5 次由 _handle_compress_failure 强推 until_id 清毒缓冲，避免永久卡死。
+                # 解析成功但 0 张可用卡片：不推进 summary_until_id，失败五次后
+                # 改用逐条确定性记忆卡，绝不丢弃原始历史。
                 log.warning(
                     "compress produced no usable cards for pet %d (raw=%d)",
                     pet_id,
                     len(cards_raw),
                 )
                 await self._record_compress_failure(
-                    pet_id, compress_fail_count, new_until_id
+                    pet_id, compress_fail_count, new_until_id, to_compress
                 )
                 return
 
@@ -204,4 +224,3 @@ class MemoryService:
                 asyncio.create_task(
                     self.embed_and_store(pet_id, "card", card_id, text)
                 )
-

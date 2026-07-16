@@ -154,8 +154,11 @@ class MemoryRepository:
                 else 0.0
             )
             rows = conn.execute(
-                "SELECT id, role, content, sender_name, is_observer FROM messages "
-                "WHERE pet_id = ? AND id > ? ORDER BY id",
+                "SELECT m.id, m.role, m.content, "
+                "COALESCE(u.name, m.sender_name) AS sender_name, "
+                "m.sender_open_id, m.is_observer FROM messages m "
+                "LEFT JOIN user_names u ON u.open_id = m.sender_open_id "
+                "WHERE m.pet_id = ? AND m.id > ? ORDER BY m.id",
                 (pet_id, summary_until_id),
             ).fetchall()
         return (
@@ -219,18 +222,13 @@ class MemoryRepository:
         now = time.time()
         next_fail_count = current_fail_count + 1
         with self.db.connect() as conn:
-            if next_fail_count >= 5:
-                conn.execute(
-                    "UPDATE pets SET summary_until_id = ?, compress_fail_count = 0, "
-                    "last_compress_attempt = ? WHERE id = ?",
-                    (new_until_id, now, pet_id),
-                )
-            else:
-                conn.execute(
-                    "UPDATE pets SET compress_fail_count = ?, last_compress_attempt = ? "
-                    "WHERE id = ?",
-                    (next_fail_count, now, pet_id),
-                )
+            # A failure must never advance summary_until_id: doing so removes
+            # raw history without a durable memory card.
+            conn.execute(
+                "UPDATE pets SET compress_fail_count = ?, last_compress_attempt = ? "
+                "WHERE id = ?",
+                (next_fail_count, now, pet_id),
+            )
         return next_fail_count
 
     async def handle_compress_failure(
@@ -239,4 +237,3 @@ class MemoryRepository:
         return await asyncio.to_thread(
             self._handle_compress_failure, pet_id, current_fail_count, new_until_id
         )
-

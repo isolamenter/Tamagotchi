@@ -17,6 +17,7 @@ from integrations.feishu_client import FeishuClient
 from integrations.llm_client import LLMClient
 from repositories.memory_repo import MemoryRepository
 from repositories.message_repo import MessageRepository
+from repositories.card_repo import CardRepository
 from repositories.pet_repo import PetRepository
 from repositories.sqlite import Database
 from repositories.system_repo import SystemRepository
@@ -61,6 +62,7 @@ class AppContainer:
     pet_repo: PetRepository
     message_repo: MessageRepository
     memory_repo: MemoryRepository
+    card_repo: CardRepository
     feishu: FeishuClient
     llm: LLMClient
     services: AppServices
@@ -83,6 +85,7 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
     pet_repo = PetRepository(db, state_domain, runtime)
     message_repo = MessageRepository(db)
     memory_repo = MemoryRepository(db, memory_domain, config)
+    card_repo = CardRepository(db)
 
     llm = LLMClient(config)
     feishu_client = FeishuClient(config, system_repo, runtime)
@@ -100,11 +103,28 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
         runtime,
         message_repo,
         memory_service,
+        pet_repo,
     )
     gameplay_service = GameplayService(
         state_domain,
         gameplay_domain,
         pet_repo,
+    )
+    card_service = CardService(
+        config,
+        runtime,
+        state_domain,
+        gameplay_domain,
+        card_domain,
+        pet_domain,
+        pet_repo,
+        card_repo,
+        message_repo,
+        system_repo,
+        gameplay_service,
+        memory_service,
+        feishu_client,
+        llm,
     )
     autonomous_service = AutonomousService(
         config,
@@ -120,32 +140,20 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
         observer_service,
         feishu_client,
         llm,
-    )
-    card_service = CardService(
-        config,
-        runtime,
-        state_domain,
-        gameplay_domain,
-        card_domain,
-        pet_domain,
-        pet_repo,
-        message_repo,
-        system_repo,
-        gameplay_service,
-        memory_service,
-        feishu_client,
-        llm,
+        card_service=card_service,
     )
     reply_service = ReplyService(
         config,
         runtime,
         state_domain,
+        gameplay_domain,
         pet_domain,
         pet_repo,
         message_repo,
         system_repo,
         memory_service,
         observer_service,
+        card_service,
         feishu_client,
         llm,
     )
@@ -172,6 +180,7 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
         pet_repo=pet_repo,
         message_repo=message_repo,
         memory_repo=memory_repo,
+        card_repo=card_repo,
         feishu=feishu_client,
         llm=llm,
         services=services,

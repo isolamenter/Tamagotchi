@@ -26,6 +26,17 @@ class GameplayService:
 
         return await self.pet_repo.mutate_state(pet_id, _mutator)
 
+    async def sync_need_clock(self, pet_id: int, quiet: bool, now: float | None = None) -> dict:
+        now = time.time() if now is None else now
+
+        def _mutator(state: dict) -> dict:
+            if quiet:
+                return self.gameplay_domain.pause_need(state, now)
+            state = self.gameplay_domain.resume_need(state, now)
+            return self.gameplay_domain.expired_need_cleared(state, now)
+
+        return await self.pet_repo.mutate_state(pet_id, _mutator)
+
     async def maybe_create_need(
         self, pet_id: int, now: float | None = None
     ) -> tuple[dict, dict | None]:

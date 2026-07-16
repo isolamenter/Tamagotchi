@@ -128,6 +128,7 @@ class FeishuClient:
         )
         if not data or data.get("code") != 0:
             log.error("reply failed: %s", data)
+            raise RuntimeError(f"feishu reply failed: {data}")
 
     async def send_text(self, chat_id: str, text: str) -> None:
         data = await self._authed_request(
@@ -159,7 +160,7 @@ class FeishuClient:
             return None
         return (data.get("data") or {}).get("image_key")
 
-    async def send_card(self, chat_id: str, card: dict) -> None:
+    async def send_card(self, chat_id: str, card: dict) -> str:
         data = await self._authed_request(
             "POST",
             f"{self.config.feishu_base}/im/v1/messages",
@@ -175,6 +176,10 @@ class FeishuClient:
         if not data or data.get("code") != 0:
             log.error("send card failed: %s", data)
             raise RuntimeError(f"feishu send card failed: {data}")
+        message_id = str((data.get("data") or {}).get("message_id") or "")
+        if not message_id:
+            raise RuntimeError(f"feishu send card returned no message_id: {data}")
+        return message_id
 
     async def update_card_message(self, message_id: str, card: dict) -> None:
         data = await self._authed_request(
@@ -186,4 +191,4 @@ class FeishuClient:
         )
         if not data or data.get("code") != 0:
             log.error("update card failed: %s", data)
-
+            raise RuntimeError(f"feishu update card failed: {data}")

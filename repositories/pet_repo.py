@@ -21,7 +21,7 @@ class PetRepository:
             stored = json.loads(state_json or "{}")
         except json.JSONDecodeError:
             stored = {}
-        return stored or self.state_domain.initial_state()
+        return self.state_domain.normalize_state(stored)
 
     def _get_or_create_pet(self, chat_id: str) -> int:
         now = time.time()

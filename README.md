@@ -10,12 +10,12 @@
 ## ✨ 特性
 
 - 模块化 FastAPI 服务，正式 ASGI 入口为 `tamagotchi:app`
-- 基于飞书事件订阅（`im.message.receive_v1`），群里 @ 触发回复（带可配置回复节流间隔，被刷屏时只记不回）；非 @ 消息会被宠物"旁听"进上下文（缓冲后按 tick 批量落库）
+- 基于飞书事件订阅（`im.message.receive_v1`）：群里只有真实 @ 才触发回复，p2p 私聊直接回复；非 @ 群消息会被宠物"旁听"进上下文（缓冲后按 tick 批量落库）
 - **每个 `chat_id` 一只独立宠物，对话历史用 SQLite 持久化（stdlib，零额外依赖）**
 - **长期记忆 = 事件卡片 + RAG**：消息累积后压成结构化卡片（when/who/what/vibe/hooks）+ 向量索引；回复时按相关性 + 时序双路召回，塞回 system message 当"想起的事"
 - **状态系统：satiety / mood / energy / curiosity / affection 五维 + 每日 vibe 词；中段不渲染，只在极端档给一句模糊感受。普通对话只读 state，state 只由卡片按钮的确定性规则修改**
-- **状态玩法：五维状态会触发 `active_need` 需求事件，卡片给出 2-3 个选择；点击后由规则确定性结算五维状态，LLM 只生成反馈台词**
-- **主动发言：进程内常驻 asyncio 心跳，宠物会按固定时刻写日记 / 说梦境；在普通主动发言前会优先生成需求卡片**
+- **状态玩法：五维状态会触发 `active_need` 需求事件，卡片给出 2-3 个选择；卡片绑定不可变 ID，需求/自由卡全群只结算一次，定时卡每人一次、最多三次；LLM 只生成反馈台词**
+- **主动发言：进程内常驻 asyncio 心跳，宠物会按固定时刻写日记 / 说梦境；休息时暂停自动需求和普通主动卡、冻结已有需求计时，醒来后恢复**
 - **交互卡片：主动发言、需求事件、梦境 / 日记都以飞书消息卡片呈现，底部带玩法状态、五维状态进度条和互动按钮。梦境卡还会额外调图像模型生成一张插图嵌进卡里**
 - **Web 可视化面板：`/web` 单页面板，展示宠物列表、五维状态、当前需求、记忆卡片与消息时间线，每 15 秒自动刷新**
 - LLM 走 OpenAI 兼容 API（适配 OpenAI / NewApi / 各类代理网关）
@@ -47,12 +47,12 @@ tests/                 # local unittest coverage; not needed on the server
                                         ▼
                                  BackgroundTask
                                         │
-                                        ├─ direct（被 @）：
+                                        ├─ direct（群里被 @ / p2p 私聊）：
                                         │   ├─ 距上次回复 < 节流间隔 → 只记消息、不回复
                                         │   ├─ 读未压缩 history + 当前 state
                                         │   ├─ RAG: embed(user_text) → top-K 卡片 + top-N 最近
                                         │   ├─ OpenAI 兼容 API → JSON {reply, speaker_name}
-                                        │   ├─ append message + 更新 last_reply_ts（不改五维 state）
+                                        │   ├─ 发送成功后 append assistant + 更新 last_reply_ts（不改五维 state）
                                         │   └─ POST /im/v1/messages/{id}/reply
                                         ├─ observer：缓冲进内存，autonomous tick 批量落库
                                         └─ 未压缩条数 > 阈值 → 异步压缩任务
@@ -179,7 +179,7 @@ ssh gcp-vps 'systemctl status tamagotchi --no-pager'
 
 - `pet_style.toml`：电子宠物的风格、人设底色、口吻、默认互动方式。
 - `prompts.toml`：玩法流程，包括记忆压缩、状态渲染、主动发言、日记 / 梦境、GM 默认触发文案、兜底回复和 JSON 输出契约。
-- `pet_config.toml`：运行参数，包括记忆压缩阈值、`[reply]` 群 @ 回复节流间隔、`[observer]` 旁听缓冲上限、初始状态、状态衰减、`[gameplay]` 需求事件参数、主动发言间隔 / 冷却 / 静默时段 / 触发阈值、`[card]` 交互卡片开关 / 进度条格数 / 点击冷却。
+- `pet_config.toml`：运行参数，包括记忆压缩阈值、`[reply]` 群 @ 回复节流间隔、`[observer]` 旁听缓冲上限、初始状态、状态衰减、`[gameplay]` 需求事件参数、主动发言间隔 / 静默时段 / 触发阈值、`[card]` 交互卡片开关 / 进度条格数 / 结算上限。
 
 常改的是 `pet_style.toml [style].prompt`：默认是通用电子宠物，可换成毒舌猫、哲学家小狗、傲娇龙、机器人团子等。玩法类规则继续放在 `prompts.toml`，不要写进业务代码。
 
@@ -243,12 +243,14 @@ ssh gcp-vps 'systemctl status tamagotchi --no-pager'
 
 ## 🎮 状态需求事件
 
-玩法层复用 `pets.state_json`，不新增表。当前新增字段：
+玩法运行状态保存在 `pets.state_json`，卡片交互契约另存 `card_instances` / `card_claims`。当前运行字段：
 
 ```json
 {
   "active_need": {},
-  "need_cooldowns": {}
+  "need_cooldowns": {},
+  "last_social_ts": 0,
+  "last_free_card_ts": 0
 }
 ```
 
@@ -256,7 +258,7 @@ ssh gcp-vps 'systemctl status tamagotchi --no-pager'
 - `services/gameplay_service.py` 是编排层：tick 创建需求、GM/卡片结算时复用同一套规则。
 - `active_need` 同时只保留一个需求事件，候选类型为 `hungry / sleepy / sad / bored / lonely`，优先级按生理急迫和严重度排序。
 - 每个需求事件提供 2-3 个选择，例如饿了可以 `feed / snack_hunt / promise_food`，无聊可以 `play / tell_news / send_explore`。
-- 点击选择后，核心五维数值由规则结算；LLM 只负责生成一句人格化反馈，不决定数值变化。
+- 点击选择后，核心五维数值由规则结算；主维达到“触发阈值 + 10”才算解决，弱选择会续出新一轮需求卡；LLM 只负责生成一句人格化反馈，不决定数值变化。
 
 相关配置在 `pet_config.toml [gameplay]`：
 
@@ -279,7 +281,7 @@ lonely = 30
 宠物**不是只被动响应 @**——服务进程里有一个常驻 asyncio 心跳，宠物自己决定什么时候开口。
 
 - **心跳间隔**：当前值 10 min 扫一次所有宠物
-- **固定时刻**：默认本地 `10:00` 发一次"梦境"、`19:00` 发一次"日记"，独立于 state 和普通主动发言冷却；成功发出后用 `state_json` 里的日期字段去重，同一天不重复；周末休息日不会自动发送
+- **固定时刻**：默认本地 `10:00` 发一次"梦境"、`19:00` 发一次"日记"，独立于 state 和普通主动发言冷却；成功发出后用 `state_json` 里的日期字段去重，同一天不重复。错过时只在目标时点后一小时补发，周末休息日不会自动发送
 - **需求事件优先**：梦境 / 日记补发完成后，tick 会先用 `[gameplay.need_thresholds]` 检查状态阈值；命中则生成需求卡片并写入 `active_need`，本轮不再发普通主动闲聊。
 - **代码层廉价过滤**（不调 LLM）：没有需求事件时，先看本地时间（默认 +8 时区）是否在静默时段（19:00-次日10:00）或周末休息日、再看冷却（当前 2h 内不重发），都过了才进普通 state 触发
 - **触发条件**（按优先级，生理急迫优先于软需求）：
@@ -296,7 +298,7 @@ lonely = 30
 
 ## 🎴 交互卡片
 
-**主动发言**（宠物自己冒泡）、**梦境**、**日记**都会以飞书消息卡片呈现；@ 回复仍是纯文本。
+**主动发言**（宠物自己冒泡）、**梦境**、**日记**都会以飞书消息卡片呈现；@ / p2p 回复本身是纯文本，但发现未通知的需求时会附一张首次 CTA。
 
 卡片结构：宠物的话（或梦/日记文本）+ 当前需求（若有）+ 五维状态进度条 + 一排互动按钮。梦境卡额外在文字下方插一张图像模型生成的插图。
 
@@ -305,10 +307,10 @@ lonely = 30
 - **卡片按钮统一结算**：有 `active_need` 时显示该需求的 choice；没有 `active_need` 时显示自由互动按钮；两者都经过 `GameplayDomain` 的统一卡片结算入口。梦境 / 日记卡按钮也是固定的卡片动作（☀️ 早上好 / 🌙 晚安）
 - **梦境插图**：梦境这条 `[[scheduled_events]]` 配了 `gen_image = true`，LLM 输出短梦话同时返回 `image_prompt`；服务用它调 `IMAGE_MODEL`（`/v1/images/generations`）拿 base64 → 上传飞书拿 `image_key` → 嵌入卡片。`IMAGE_MODEL` 留空或生成 / 上传任一步失败都安静回退成纯文字梦境卡；超时在 `pet_config.toml [card].image_timeout_sec`。日记不生成图
 - **点击 = 确定性结算**：所有卡片按钮都走统一的卡片结算入口；Need choice 和自由互动按钮都使用确定性的五维 delta。每个需求都有一条可靠的直接解法，另两条会把代价明显转移到其它维度；LLM 只生成反馈台词，不决定核心数值。
-- **多人可参与，不是首点即焚**：点击后卡片保留按钮，群里其他人可继续照料——动态卡按新状态重挑按钮（喂饱后投喂按钮自然消失），固定卡（梦境 / 日记）保持原按钮
-- **卡片时效**：卡片发出 `[card].button_ttl_sec`（默认 30min）后按钮失效，过期点击只弹 toast 不改状态，避免昨天的梦境卡一直能点；需求卡同样在 30min 后结束，并让该需求进入 `[gameplay].need_cooldown_sec`（默认 2h）冷却，避免反复刷同一张卡。
+- **协作一次**：需求/自由卡全群首次点击才结算数值，后续点击只留下社交反馈；梦境 / 日记卡每位群友一次、全群最多三次贡献。
+- **卡片时效**：卡片发出 `[card].button_ttl_sec`（默认 30min）后按钮失效，过期点击只弹 toast 不改状态；需求过期会升级并在下一活跃窗口重发，而非静默进入冷却。
 - **有人格的反馈逐条累积**：每次点击后台单独用 LLM 生成一句符合宠物风格的反馈台词，**向下追加**进卡片文本日志而不是整段刷新——多人点击时各自的台词逐条堆叠在卡片里（最多保留 `[card].card_log_max_lines` 条）
-- **防刷**：点击冷却是 **per-user** 的（`[card].action_cooldown_sec`）——同一个人点过任意按钮后，冷却内再点任何按钮只弹 toast，不同人各自独立；飞书重试按 `event_id` 去重，不会让状态变化翻倍；多人同时点击用 per-pet 锁串行，不丢状态变化
+- **防重放**：每张卡都有不可变 `card_id` 和持久化 claim；旧 payload 安全失效，重复点击不会再改状态。反馈 PATCH 按消息 ID 串行，避免多人点击覆盖。
 
 展示文案在 `prompts.toml [card]`，自由互动按钮的可见条件和确定性 delta 在 `pet_config.toml [card]`，需求 choice 和统一结算在 `domain/gameplay.py`。`[card].enabled = false` 时主动发言、需求事件、梦境、日记都退回纯文本 / 不发需求卡。需要在飞书开发者后台开启「卡片回传交互」能力（见上文飞书应用配置）。
 

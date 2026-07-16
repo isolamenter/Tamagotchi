@@ -21,13 +21,42 @@ class StateDomain:
             "last_update_ts": time.time(),
             "last_proactive_ts": 0.0,
             "last_reply_ts": 0.0,
+            "last_social_ts": 0.0,
+            "last_free_card_ts": 0.0,
             "last_dream_date": "",
             "last_diary_date": "",
             "recent_vibe": "",
             "recent_vibe_date": "",
             "active_need": {},
             "need_cooldowns": {},
+            "card_action_ts": {},
         }
+
+    def normalize_state(self, stored: dict | None) -> dict:
+        """补齐演进中的运行字段，同时保留未知字段以避免线上 state 丢失。"""
+        raw = dict(stored) if isinstance(stored, dict) else {}
+        base = self.initial_state()
+        base.update(raw)
+        for key in self.config.state_numeric_keys:
+            try:
+                base[key] = max(0.0, min(100.0, float(base.get(key, self.config.initial_state[key]))))
+            except (TypeError, ValueError):
+                base[key] = self.config.initial_state[key]
+        for key in ("active_need", "need_cooldowns", "card_action_ts"):
+            if not isinstance(base.get(key), dict):
+                base[key] = {}
+        for key in (
+            "last_update_ts",
+            "last_proactive_ts",
+            "last_reply_ts",
+            "last_social_ts",
+            "last_free_card_ts",
+        ):
+            try:
+                base[key] = float(base.get(key, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                base[key] = 0.0
+        return base
 
     def local_time(self, now_ts: float) -> time.struct_time:
         return time.gmtime(now_ts + self.config.proactive_tz_offset_hours * 3600)
@@ -164,6 +193,8 @@ class StateDomain:
         out["last_update_ts"] = state.get("last_update_ts")
         out["last_proactive_ts"] = state.get("last_proactive_ts")
         out["last_reply_ts"] = state.get("last_reply_ts")
+        out["last_social_ts"] = state.get("last_social_ts")
+        out["last_free_card_ts"] = state.get("last_free_card_ts")
         out["last_dream_date"] = state.get("last_dream_date", "")
         out["last_diary_date"] = state.get("last_diary_date", "")
         active_need = state.get("active_need") if isinstance(state.get("active_need"), dict) else {}
@@ -176,6 +207,10 @@ class StateDomain:
                 "created_at": active_need.get("created_at"),
                 "expires_at": active_need.get("expires_at"),
                 "severity": active_need.get("severity", 1),
+                "round": active_need.get("round", 0),
+                "status": active_need.get("status", "open"),
+                "paused_at": active_need.get("paused_at"),
+                "announced_card_id": active_need.get("announced_card_id", ""),
                 "source": active_need.get("source", ""),
             }
         else:

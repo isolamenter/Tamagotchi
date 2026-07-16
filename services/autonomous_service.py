@@ -17,6 +17,7 @@ from repositories.message_repo import MessageRepository
 from repositories.pet_repo import PetRepository
 from repositories.system_repo import SystemRepository
 from services.gameplay_service import GameplayService
+from services.card_service import CardService
 from services.memory_service import MemoryService
 from services.observer_service import ObserverService
 
@@ -39,6 +40,7 @@ class AutonomousService:
         observer_service: ObserverService,
         feishu: FeishuClient,
         llm: LLMClient,
+        card_service: CardService | None = None,
     ):
         self.config = config
         self.state_domain = state_domain
@@ -49,6 +51,7 @@ class AutonomousService:
         self.message_repo = message_repo
         self.system_repo = system_repo
         self.gameplay_service = gameplay_service
+        self.card_service = card_service
         self.memory_service = memory_service
         self.observer_service = observer_service
         self.feishu = feishu
@@ -88,9 +91,15 @@ class AutonomousService:
     def scheduled_event_due(self, state: dict, now: float) -> tuple[dict, str] | None:
         if self.state_domain.is_weekend_rest(now):
             return None
-        date_key, hour = self.state_domain.local_date_hour(now)
+        local = self.state_domain.local_time(now)
+        date_key = time.strftime("%Y-%m-%d", local)
+        seconds_today = local.tm_hour * 3600 + local.tm_min * 60 + local.tm_sec
         for event in self.config.scheduled_events:
-            if hour >= event["hour"] and state.get(event["state_key"]) != date_key:
+            since_event = seconds_today - int(event["hour"]) * 3600
+            if (
+                0 <= since_event <= self.config.scheduled_grace_sec
+                and state.get(event["state_key"]) != date_key
+            ):
                 return event, date_key
         return None
 
@@ -172,11 +181,17 @@ class AutonomousService:
                 log.exception("dream image pipeline failed for pet %d", pet_id)
 
         if as_card and self.config.card_enabled:
-            await self.feishu.send_card(
+            mode = "scheduled" if card_actions is not None else "free"
+            if self.card_service is None:
+                raise RuntimeError("card service is required for autonomous cards")
+            await self.card_service.send_persistent_card(
+                pet_id,
                 chat_id,
-                self.card_domain.build_pet_card(
-                    pet_id, reply, display_state, action_keys=card_actions, img_key=img_key
-                ),
+                reply,
+                display_state,
+                mode=mode,
+                action_keys=card_actions,
+                img_key=img_key,
             )
         else:
             await self.feishu.send_text(chat_id, reply)
@@ -213,13 +228,22 @@ class AutonomousService:
         now = time.time() if now is None else now
         if not self.config.card_enabled or not self.config.gameplay_enabled:
             return None
-        state, need = await self.gameplay_service.maybe_create_need(pet_id, now)
-        if not need:
+        state, created = await self.gameplay_service.maybe_create_need(pet_id, now)
+        need = created or self.gameplay_domain.current_need(state, now)
+        if not need or need.get("announced_card_id"):
             return None
         text = f"{need.get('title', '需要照料')}：{need.get('description', '')}"
-        await self.feishu.send_card(
-            chat_id,
-            self.card_domain.build_pet_card(pet_id, text, state, built_at=int(now)),
+        if self.card_service is None:
+            raise RuntimeError("card service is required for need cards")
+        card_id, _ = await self.card_service.send_persistent_card(
+            pet_id, chat_id, text, state, mode="need"
+        )
+        state = await self.pet_repo.mutate_state(
+            pet_id,
+            lambda s: {
+                **s,
+                "active_need": {**s["active_need"], "announced_card_id": card_id},
+            },
         )
         await self.message_repo.append_message(pet_id, "assistant", text)
         log.info(
@@ -256,6 +280,7 @@ class AutonomousService:
             self.config.scheduled_user_stub_template.format(event_name=event["name"]),
             f"SCHEDULED {event['kind']} date={date_key}",
             max_tokens=self.config.scheduled_max_tokens,
+            set_last_proactive=True,
             extra_state={event["state_key"]: date_key} if mark_date else None,
             as_card=True,
             card_actions=[action] if action else [],
@@ -272,6 +297,9 @@ class AutonomousService:
         now = time.time() if now is None else now
         if current is None:
             current = await self.pet_repo.load_pet_state(pet_id)
+        quiet = self.state_domain.in_quiet_hours(now)
+        if self.gameplay_service is not None:
+            current = await self.gameplay_service.sync_need_clock(pet_id, quiet, now)
 
         # 可能同时有多个到期定时事件（如进程停了一整天，梦境+日记都欠着）：
         # 逐个补发，每次用返回的 new_state 刷新 current（含 date_key 标记），
@@ -289,12 +317,14 @@ class AutonomousService:
             _, current = result
         if fired_scheduled:
             return True
+        if quiet:
+            return False
         need_result = await self.need_speak(pet_id, chat_id, current=current, now=now)
         if need_result is not None:
             return True
         last_active_ts = max(
             float(current.get("last_proactive_ts", 0) or 0),
-            float(current.get("last_reply_ts", 0) or 0),
+            float(current.get("last_free_card_ts", 0) or 0),
         )
         trigger = self.should_tick_speak(current, last_active_ts, now)
         if trigger is None:

@@ -89,7 +89,8 @@ low = 40
 # 状态玩法：阈值触发需求事件，卡片按钮按规则确定性结算五维状态。
 enabled = true
 need_ttl_sec = 1800
-# 已处理与已过期的需求都进入这个冷却，防止同一需求反复刷卡。
+need_severe_ttl_sec = 1200
+# 只有真正解决的需求才进入冷却；过期需求会升级并在下一活跃窗口续发。
 need_cooldown_sec = 7200
 
 [gameplay.need_thresholds]
@@ -98,6 +99,14 @@ sleepy = 35
 sad = 40
 bored = 35
 lonely = 30
+
+[gameplay.resolution_thresholds]
+# 达到触发阈值再多 10 点才算真正解决；否则本轮只是缓解，会继续请求照料。
+hungry = 30
+sleepy = 45
+sad = 50
+bored = 45
+lonely = 40
 
 [autonomous]
 # 心跳间隔（测试期 1 min；生产建议 600）。
@@ -114,6 +123,8 @@ quiet_end_hour = 10
 quiet_weekends = true
 # 状态没触发时，每 tick 自发说话的概率。
 spontaneous_prob = 0.20
+# 梦境/日记只允许在目标时点后的这个窗口补发，避免停机后集中补历史内容。
+scheduled_grace_sec = 3600
 
 [autonomous.trigger_thresholds]
 # satiety <= 此值 -> 主动抱怨饿。
@@ -129,14 +140,12 @@ affection = 15.0
 
 [card]
 # 交互卡片总开关。作用于「主动发言」（宠物自己冒泡）和「梦境 / 日记」定时事件；
-# @ 回复始终是纯文本，不受这里影响。
+# @ / p2p 回复本身是纯文本；若已存在尚未通知的需求，会在回复后附一张首次 CTA。
 # false = 主动发言 + 梦境 / 日记都退回纯文本。
 enabled = true
 # 状态进度条的格子数。
 bar_width = 10
-# 同一个人点过任意按钮后，再点（任何按钮）的最小间隔（秒），防单人连点；0 = 不限。
-# 冷却是 per-user 的：A 点过一下后冷却内不能再点，但 B 不受影响，可继续照料。
-action_cooldown_sec = 60
+# 结算资格由持久化 card_claims 控制：need/free 全群一次；scheduled 每人一次、最多三次。
 # 卡片按钮从发出起多久后失效（秒），过期后点击只回 toast、不改 state。
 # 防止昨天的梦境 / 日记卡一直能点。计时从发卡那刻算，不随点击续期。
 button_ttl_sec = 1800
@@ -145,6 +154,8 @@ button_ttl_sec = 1800
 card_log_max_lines = 6
 # 一张卡片最多显示几个按钮。
 max_buttons = 3
+# 固定早晚卡允许不同群友各贡献一次，但全群最多结算三次。
+scheduled_max_settlements = 3
 # 所有状态维度都在中段（宠物没有明显需求）时，兜底随机挑这些按钮里的，保证卡片总有东西可点。
 default_actions = ["play", "pet"]
 # 梦境插图：调图像模型生成一张图的超时（秒）。需在 .env 配 IMAGE_MODEL 才会生成；

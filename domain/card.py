@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import time
+import uuid
 
 from config import AppConfig
 from domain.gameplay import GameplayDomain
@@ -49,7 +50,8 @@ class CardDomain:
         lines: list[str] = []
         need = self.gameplay_domain.current_need(state, now)
         if need:
-            lines.append(f"**{need.get('title', '需要照料')}**")
+            urgency = "**紧急** · " if int(need.get("severity", 1) or 1) >= 2 else ""
+            lines.append(f"{urgency}**{need.get('title', '需要照料')}**")
             desc = (need.get("description") or "").strip()
             if desc:
                 lines.append(desc)
@@ -95,6 +97,10 @@ class CardDomain:
         built_at: int | None = None,
         base_text: str | None = None,
         img_key: str | None = None,
+        card_id: str | None = None,
+        mode: str | None = None,
+        need_round: int = 0,
+        expires_at: float | None = None,
     ) -> dict:
         import time
 
@@ -102,7 +108,13 @@ class CardDomain:
             built_at = int(time.time())
         if base_text is None:
             base_text = text
+        card_id = card_id or f"card-{uuid.uuid4().hex}"
+        expires_at = expires_at if expires_at is not None else built_at + self.config.card_button_ttl_sec
         is_fixed = action_keys is not None
+        active_need_for_mode = (
+            self.gameplay_domain.current_need(state, float(built_at)) if self.gameplay_domain else {}
+        )
+        mode = mode or ("need" if active_need_for_mode and not is_fixed else "scheduled" if is_fixed else "free")
         elements: list[dict] = [{"tag": "markdown", "content": text or "…"}]
         if img_key:
             elements.append(
@@ -123,11 +135,8 @@ class CardDomain:
         if with_actions:
             keys = self.pick_card_actions(state) if action_keys is None else action_keys
             buttons = []
-            active_need = (
-                self.gameplay_domain.current_need(state, float(built_at))
-                if self.gameplay_domain and action_keys is None
-                else {}
-            )
+            active_need = active_need_for_mode if mode == "need" else {}
+            hints: list[str] = []
             for key in keys:
                 gameplay_text = (
                     self.gameplay_domain.action_text(key, active_need.get("kind"))
@@ -137,16 +146,24 @@ class CardDomain:
                 btn_text = gameplay_text.get(
                     "button", self.config.card_action_text.get(key, {}).get("button", key)
                 )
+                hint = gameplay_text.get("effect_hint", "")
+                if hint:
+                    hints.append(f"- {btn_text}：{hint}")
                 buttons.append(
                     {
                         "tag": "button",
                         "text": {"tag": "plain_text", "content": btn_text},
                         "type": "primary",
                         "value": {
+                            "v": 2,
                             "pet_id": pet_id,
+                            "card_id": card_id,
+                            "mode": mode,
                             "action": key,
                             "need_id": active_need.get("id", ""),
                             "need_kind": active_need.get("kind", ""),
+                            "need_round": need_round,
+                            "expires_at": expires_at,
                             "keys": list(keys),
                             "fixed": is_fixed,
                             "built_at": built_at,
@@ -157,6 +174,8 @@ class CardDomain:
                 )
             if buttons:
                 elements.append({"tag": "hr"})
+                if hints:
+                    elements.append({"tag": "markdown", "content": "\n".join(hints)})
                 elements.append({"tag": "action", "actions": buttons})
         return {"config": {"wide_screen_mode": True}, "elements": elements}
 
@@ -192,25 +211,3 @@ class CardDomain:
         if pending:
             parts.append(self.config.card_followup_prefix + pending)
         return "\n".join(part for part in parts if part) or "…"
-
-    def prune_card_followup_buffer(self, buffer: dict[str, dict], now: float) -> None:
-        if self.config.card_button_ttl_sec <= 0:
-            return
-        stale = [
-            message_id
-            for message_id, entry in buffer.items()
-            if isinstance(entry.get("built_at"), (int, float))
-            and now - entry["built_at"] >= self.config.card_button_ttl_sec
-        ]
-        for message_id in stale:
-            buffer.pop(message_id, None)
-
-    def prune_card_click_ts(self, click_ts: dict, now: float) -> dict:
-        if self.config.card_action_cooldown_sec <= 0:
-            return {}
-        return {
-            open_id: ts
-            for open_id, ts in click_ts.items()
-            if isinstance(ts, (int, float))
-            and now - ts < self.config.card_action_cooldown_sec
-        }
