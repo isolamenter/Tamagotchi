@@ -25,8 +25,12 @@ flush_max_count = 50
 
 [llm]
 # 普通回复 / 主动发言的 JSON 输出 token 上限。
-reply_max_tokens = 400
-# 日记 / 梦境要写 150-300 字中文，外加 JSON 外壳，需要更大上限，
+reply_max_tokens = 120
+# 风格模仿优先稳定服从，避免高随机度把多个口头禅拼成一句。
+reply_temperature = 0.35
+autonomous_temperature = 0.5
+card_reply_temperature = 0.35
+# 日记 / 梦境还可能附带 image_prompt，JSON 输出需要更大上限，
 # 否则会被截断导致 JSON 解析失败、整条定时事件被静默丢弃。
 scheduled_max_tokens = 1000
 # 记忆压缩输出（一组卡片 JSON）的 token 上限。

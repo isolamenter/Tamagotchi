@@ -91,7 +91,7 @@ curl http://localhost:8000/healthz
 
 ```bash
 scp -r tamagotchi.py config.py runtime.py domain integrations repositories routes services \
-  prompts.toml pet_style.toml pet_config.toml requirements.txt .env gcp-vps:~/tamagotchi/
+  prompts.toml pet_style.toml style_corpus.toml pet_config.toml requirements.txt .env gcp-vps:~/tamagotchi/
 ssh gcp-vps '~/tamagotchi/.venv/bin/pip install -r ~/tamagotchi/requirements.txt'
 ssh gcp-vps 'sudo systemctl restart tamagotchi'
 ```
@@ -100,7 +100,7 @@ ssh gcp-vps 'sudo systemctl restart tamagotchi'
 
 ```bash
 scp -O -r tamagotchi.py config.py runtime.py domain integrations repositories routes services \
-  prompts.toml pet_style.toml pet_config.toml requirements.txt .env gcp-vps:~/tamagotchi/
+  prompts.toml pet_style.toml style_corpus.toml pet_config.toml requirements.txt .env gcp-vps:~/tamagotchi/
 ```
 
 验证：
@@ -175,13 +175,19 @@ ssh gcp-vps 'systemctl status tamagotchi --no-pager'
 
 ## 🐾 自定义风格与玩法
 
-配置拆成三层，改完重启服务（`systemctl restart tamagotchi`）后生效：
+配置拆成四层，改完重启服务（`systemctl restart tamagotchi`）后生效：
 
 - `pet_style.toml`：电子宠物的风格、人设底色、口吻、默认互动方式。
+- `style_corpus.toml`：从原始聊天离线清洗出的场景化原句；运行时只召回少量风格范例，不作为事实记忆。
 - `prompts.toml`：玩法流程，包括记忆压缩、状态渲染、主动发言、日记 / 梦境、GM 默认触发文案、兜底回复和 JSON 输出契约。
 - `pet_config.toml`：运行参数，包括记忆压缩阈值、`[reply]` 群 @ 回复节流间隔、`[observer]` 旁听缓冲上限、初始状态、状态衰减、`[gameplay]` 需求事件参数、主动发言间隔 / 静默时段 / 触发阈值、`[card]` 交互卡片开关 / 进度条格数 / 结算上限。
 
-常改的是 `pet_style.toml [style].prompt`：默认是通用电子宠物，可换成毒舌猫、哲学家小狗、傲娇龙、机器人团子等。玩法类规则继续放在 `prompts.toml`，不要写进业务代码。
+`style_corpus.toml` 中每条 `[[examples]]` 都包含适用场景 `context`、原句
+`response`、本地检索词 `keywords` 和允许注入的 `scopes`。普通回复最多召回
+`[retrieval].max_examples` 条；没有命中时不硬塞口头禅。原始聊天导出不参与运行，
+也不要加入仓库。
+
+常改的是 `pet_style.toml [style].prompt`：当前是“小狗蛋”的短句群聊风格。身份和稳定规则放这里，场景原句放进 `style_corpus.toml`；玩法类规则继续放在 `prompts.toml`，不要写进业务代码。
 
 `prompts.toml` 核心段落：
 

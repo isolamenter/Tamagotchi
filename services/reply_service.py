@@ -84,6 +84,8 @@ class ReplyService:
             + "\n"
             + self.config.json_output_prompt
             + "\n"
+            + self.pet_domain.render_style_examples(user_text, scope="reply")
+            + "\n"
             + self.config.persona_reinforcement
         )
         messages.append({"role": "system", "content": pre_user_system})
@@ -97,7 +99,7 @@ class ReplyService:
         content = await self.llm.chat_json(
             messages,
             max_tokens=self.config.reply_max_tokens,
-            temperature=0.9,
+            temperature=self.config.reply_temperature,
         )
 
         speaker_name = ""

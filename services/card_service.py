@@ -170,6 +170,8 @@ class CardService:
                     "role": "system",
                     "content": self.state_domain.render_state(state)
                     + "\n"
+                    + self.pet_domain.render_style_examples(did_text, scope="card")
+                    + "\n"
                     + self.config.persona_reinforcement,
                 }
             )
@@ -184,7 +186,7 @@ class CardService:
             reaction = await self.llm.chat_text(
                 messages,
                 max_tokens=self.config.card_reply_max_tokens,
-                temperature=0.9,
+                temperature=self.config.card_reply_temperature,
             )
         except Exception:
             log.exception("card action LLM reply failed")

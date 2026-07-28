@@ -8,6 +8,7 @@ from domain.card import CardDomain
 from domain.gameplay import GameplayDomain
 from domain.memory import MemoryDomain
 from domain.state import StateDomain
+from domain.style import StyleDomain
 from services.autonomous_service import AutonomousService
 
 
@@ -22,6 +23,68 @@ def make_config(db_path: str = "state.db"):
             "STATE_DB": db_path,
         }
     )
+
+
+class StyleDomainTests(unittest.TestCase):
+    def setUp(self):
+        self.style = StyleDomain(make_config())
+
+    def test_selects_contextual_original_lines(self):
+        examples = self.style.select_examples("这个游戏你玩过吗")
+        self.assertEqual(examples[0]["response"], "没玩过")
+
+        work_examples = self.style.select_examples("老板刚说今天又要加班")
+        self.assertIn("全完了", [item["response"] for item in work_examples])
+
+    def test_does_not_fall_back_to_unrelated_catchphrases(self):
+        self.assertEqual(self.style.select_examples("今天天气一般"), [])
+        self.assertEqual(self.style.render_examples_block("今天天气一般"), "")
+
+    def test_scope_keeps_reply_examples_out_of_proactive_prompt(self):
+        self.assertEqual(
+            self.style.select_examples("这个游戏你玩过吗", scope="proactive"),
+            [],
+        )
+        proactive = self.style.select_examples(
+            "有点无聊，觉得群里好安静", scope="proactive"
+        )
+        self.assertEqual(proactive[0]["response"], "群里好安静啊")
+
+    def test_rendered_block_marks_examples_as_style_not_facts(self):
+        block = self.style.render_examples_block("晚上来不来")
+        self.assertIn("不加班就来", block)
+        self.assertIn("不把原句当成事实", block)
+        self.assertIn("不要把多条原句拼在一起", block)
+
+    def test_limit_zero_returns_no_examples(self):
+        self.assertEqual(self.style.select_examples("晚上来不来", limit=0), [])
+
+    def test_curated_corpus_has_unique_complete_entries(self):
+        responses = []
+        for example in self.style.examples:
+            self.assertTrue(example.get("context"))
+            self.assertTrue(example.get("keywords"))
+            self.assertTrue(example.get("scopes"))
+            responses.append(example.get("response"))
+        self.assertGreaterEqual(len(responses), 100)
+        self.assertEqual(len(responses), len(set(responses)))
+
+    def test_aggressive_examples_require_matching_roast_context(self):
+        roast = self.style.select_examples("这个操作也太菜了")
+        roast_responses = [item["response"] for item in roast]
+        self.assertIn("鉴定为纯fw", roast_responses)
+        self.assertNotIn("很帅啊", roast_responses)
+
+        serious = self.style.select_examples("我今天心情很差")
+        aggressive = {"傻逼", "你神经病吧", "鉴定为纯fw", "彩笔罢了"}
+        self.assertTrue(aggressive.isdisjoint(item["response"] for item in serious))
+
+    def test_base_style_has_no_static_corpus_or_character_limit(self):
+        config = make_config()
+        self.assertNotIn("【原句语料】", config.pet_style_prompt)
+        self.assertNotIn("【长度示例】", config.pet_style_prompt)
+        self.assertNotRegex(config.pet_style_prompt, r"\d+\s*个汉字")
+        self.assertNotRegex(config.pet_style_reinforcement, r"\d+\s*个汉字")
 
 
 class StateDomainTests(unittest.TestCase):

@@ -15,6 +15,8 @@ state.db
 *.db-wal
 *.db-shm
 *_memorial.json
+# 原始聊天导出只作为本地离线语料源；仓库仅保存清洗后的 style_corpus.toml。
+chat_ou_*.txt
 
 # OS
 .DS_Store
@@ -27,3 +29,4 @@ CLAUDE.md
 .vscode
 .books
 AGENTS.md
+*.db

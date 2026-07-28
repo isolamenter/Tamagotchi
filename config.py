@@ -30,6 +30,7 @@ class AppConfig:
 
     prompts: dict
     pet_style: dict
+    style_corpus: dict
     pet_config: dict
 
     pet_style_prompt: str
@@ -64,6 +65,9 @@ class AppConfig:
     reply_min_interval_sec: int
     observer_flush_max_count: int
     reply_max_tokens: int
+    reply_temperature: float
+    autonomous_temperature: float
+    card_reply_temperature: float
     scheduled_max_tokens: int
     compress_max_tokens: int
     card_reply_max_tokens: int
@@ -153,6 +157,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
 
     prompts = _load_toml(ROOT_DIR / "prompts.toml")
     pet_style = _load_toml(ROOT_DIR / "pet_style.toml")
+    style_corpus = _load_toml(ROOT_DIR / "style_corpus.toml")
     pet_config = _load_toml(ROOT_DIR / "pet_config.toml")
 
     pet_style_prompt = pet_style["style"]["prompt"]
@@ -213,6 +218,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         feishu_base="https://open.feishu.cn/open-apis",
         prompts=prompts,
         pet_style=pet_style,
+        style_corpus=style_corpus,
         pet_config=pet_config,
         pet_style_prompt=pet_style_prompt,
         pet_style_reinforcement=pet_style_reinforcement,
@@ -245,6 +251,9 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         reply_min_interval_sec=int(reply_config["min_interval_sec"]),
         observer_flush_max_count=int(observer_config["flush_max_count"]),
         reply_max_tokens=int(llm_config["reply_max_tokens"]),
+        reply_temperature=float(llm_config.get("reply_temperature", 0.35)),
+        autonomous_temperature=float(llm_config.get("autonomous_temperature", 0.5)),
+        card_reply_temperature=float(llm_config.get("card_reply_temperature", 0.35)),
         scheduled_max_tokens=int(llm_config["scheduled_max_tokens"]),
         compress_max_tokens=int(llm_config["compress_max_tokens"]),
         card_reply_max_tokens=int(llm_config.get("card_reply_max_tokens", 150)),

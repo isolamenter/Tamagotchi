@@ -117,6 +117,7 @@ class AutonomousService:
         as_card: bool = False,
         card_actions: list[str] | None = None,
         gen_image: bool = False,
+        style_query: str = "",
     ) -> tuple[str, dict] | None:
         history, current_state = await self.pet_repo.load_pet_context(pet_id)
 
@@ -131,6 +132,8 @@ class AutonomousService:
             + "\n"
             + self.config.json_output_prompt
             + "\n"
+            + self.pet_domain.render_style_examples(style_query, scope="proactive")
+            + "\n"
             + self.config.persona_reinforcement
             + "\n"
             + prompt
@@ -141,7 +144,7 @@ class AutonomousService:
         content = await self.llm.chat_json(
             messages,
             max_tokens=max_tokens,
-            temperature=0.95,
+            temperature=self.config.autonomous_temperature,
         )
 
         try:
@@ -220,6 +223,7 @@ class AutonomousService:
             max_tokens=self.config.reply_max_tokens,
             set_last_proactive=True,
             as_card=True,
+            style_query=trigger,
         )
 
     async def need_speak(

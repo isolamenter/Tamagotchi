@@ -3,11 +3,16 @@ from __future__ import annotations
 import re
 
 from config import AppConfig
+from domain.style import StyleDomain
 
 
 class PetDomain:
     def __init__(self, config: AppConfig):
         self.config = config
+        self.style_domain = StyleDomain(config)
+
+    def render_style_examples(self, query: str, *, scope: str = "reply") -> str:
+        return self.style_domain.render_examples_block(query, scope=scope)
 
     def wrap_user(self, text: str, sender_name: str = "", is_observer: bool = False) -> str:
         if is_observer:
@@ -46,4 +51,3 @@ class PetDomain:
             if key:
                 raw = raw.replace(key, "")
         return re.sub(r"\s+", " ", raw).strip()
-
