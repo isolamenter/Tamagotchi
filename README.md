@@ -183,9 +183,10 @@ ssh gcp-vps 'systemctl status tamagotchi --no-pager'
 - `pet_config.toml`：运行参数，包括记忆压缩阈值、`[reply]` 群 @ 回复节流间隔、`[observer]` 旁听缓冲上限、初始状态、状态衰减、`[gameplay]` 需求事件参数、主动发言间隔 / 静默时段 / 触发阈值、`[card]` 交互卡片开关 / 进度条格数 / 结算上限。
 
 `style_corpus.toml` 中每条 `[[examples]]` 都包含适用场景 `context`、原句
-`response`、本地检索词 `keywords` 和允许注入的 `scopes`。普通回复最多召回
-`[retrieval].max_examples` 条；没有命中时不硬塞口头禅。原始聊天导出不参与运行，
-也不要加入仓库。
+`response`、本地检索词 `keywords` 和允许注入的 `scopes`，并由
+`[intent_groups]` / `[risk_groups]` 控制同轮组合和攻击性门槛。启动时语料向量缓存在
+SQLite 的独立 `style_embeddings` 表；回复时用当前消息和最近两条人类消息做语义召回，
+再叠加关键词加分。向量不可用时自动退回关键词召回。原始聊天导出不参与运行，也不要加入仓库。
 
 常改的是 `pet_style.toml [style].prompt`：当前是“小狗蛋”的短句群聊风格。身份和稳定规则放这里，场景原句放进 `style_corpus.toml`；玩法类规则继续放在 `prompts.toml`，不要写进业务代码。
 
@@ -216,13 +217,13 @@ ssh gcp-vps 'systemctl status tamagotchi --no-pager'
 - 每条消息（user / observer / assistant）都写进 `messages` 表
 - 未压缩消息数 > `compress_threshold` 时后台异步压缩：把最早一批喂给 LLM 抽成 JSON 卡片 `{when, who, what, vibe, hooks}`，写进 `memory_cards` 表，每张卡片再 embed 一份存进 `embeddings` 表
 - 回复时：
-  - **verbatim**：所有 `id > summary_until_id` 的原文消息按时序进 prompt
+  - **verbatim**：所有近期 user / observer 原文按时序进 prompt；assistant 只保留最近 4 条原文，完整记录仍留在数据库并参与后续压缩
   - **RAG 召回**：用当前 user_text 做 query embed，从 `embeddings.kind='card'` 里取 top-K 相关卡片；同时取最近 N 张卡片提供时序氛围；合并去重后渲染成 `【你想起的事】` 段拼到 system message
   - 主动发言时没有 query，只走最近卡片那条路径
-- embed 调用走 OpenAI 兼容 `/v1/embeddings`，模型名见 `.env` 的 `EMBED_MODEL`（默认 `text-embedding-3-small`）。embed 失败 / 没批权限会优雅降级（仅注入最近卡片或干脆不注入）
+- embed 调用按 `LLM_PROVIDER` 走 OpenAI 兼容接口或 Gemini 原生 SDK，模型名见 `.env` 的 `EMBED_MODEL`。记忆召回失败时保留最近卡片兜底；风格召回失败时退回关键词路径。
 - 老的"滚动散文摘要"已淘汰，`pets.summary` 字段已从 schema 移除
 
-参数都在 `pet_config.toml [memory]`：`buffer_keep`（窗口大小）、`compress_threshold`（触发阈值）。
+记忆参数在 `pet_config.toml [memory]`；风格阈值、上下文条数、缓存批大小和 assistant 原文保留数在 `[style_retrieval]`。
 
 ## 💗 宠物状态是怎么工作的
 

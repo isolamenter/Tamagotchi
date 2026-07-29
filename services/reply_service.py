@@ -18,6 +18,7 @@ from runtime import RuntimeState
 from services.memory_service import MemoryService
 from services.observer_service import ObserverService
 from services.card_service import CardService
+from services.style_service import StyleService
 
 log = logging.getLogger("tamagotchi")
 
@@ -38,6 +39,7 @@ class ReplyService:
         card_service: CardService,
         feishu: FeishuClient,
         llm: LLMClient,
+        style_service: StyleService | None = None,
     ):
         self.config = config
         self.runtime = runtime
@@ -52,6 +54,7 @@ class ReplyService:
         self.card_service = card_service
         self.feishu = feishu
         self.llm = llm
+        self.style_service = style_service
 
     async def resolve_user_name(self, open_id: str) -> str:
         if not open_id:
@@ -79,12 +82,20 @@ class ReplyService:
         hist = [item for item in history if item.get("id") != current_msg_id]
         messages = self.pet_domain.base_messages(system_content, hist)
 
+        style_block = (
+            await self.style_service.render_examples_block(
+                user_text, scope="reply", history=hist
+            )
+            if self.style_service
+            else self.pet_domain.render_style_examples(user_text, scope="reply")
+        )
+
         pre_user_system = (
             self.state_domain.render_state(current_state)
             + "\n"
             + self.config.json_output_prompt
             + "\n"
-            + self.pet_domain.render_style_examples(user_text, scope="reply")
+            + style_block
             + "\n"
             + self.config.persona_reinforcement
         )

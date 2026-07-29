@@ -20,6 +20,7 @@ from repositories.system_repo import SystemRepository
 from runtime import RuntimeState
 from services.gameplay_service import GameplayService
 from services.memory_service import MemoryService
+from services.style_service import StyleService
 
 log = logging.getLogger("tamagotchi")
 
@@ -41,6 +42,7 @@ class CardService:
         memory_service: MemoryService,
         feishu: FeishuClient,
         llm: LLMClient,
+        style_service: StyleService | None = None,
     ):
         self.config = config
         self.runtime = runtime
@@ -56,6 +58,7 @@ class CardService:
         self.memory_service = memory_service
         self.feishu = feishu
         self.llm = llm
+        self.style_service = style_service
 
     async def resolve_user_name(self, open_id: str) -> str:
         if not open_id:
@@ -165,12 +168,19 @@ class CardService:
         try:
             history, state = await self.pet_repo.load_pet_context(pet_id)
             messages = self.pet_domain.base_messages(self.config.system_prompt, history)
+            style_block = (
+                await self.style_service.render_examples_block(
+                    did_text, scope="card"
+                )
+                if self.style_service
+                else self.pet_domain.render_style_examples(did_text, scope="card")
+            )
             messages.append(
                 {
                     "role": "system",
                     "content": self.state_domain.render_state(state)
                     + "\n"
-                    + self.pet_domain.render_style_examples(did_text, scope="card")
+                    + style_block
                     + "\n"
                     + self.config.persona_reinforcement,
                 }

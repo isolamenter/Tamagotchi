@@ -29,7 +29,14 @@ class PetDomain:
 
     def base_messages(self, system_content: str, history: list[dict]) -> list[dict]:
         messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
-        for item in history:
+        assistant_indices = [
+            index for index, item in enumerate(history) if item["role"] == "assistant"
+        ]
+        keep = self.style_domain.assistant_history_keep
+        kept_assistant_indices = set(assistant_indices[-keep:] if keep else [])
+        for index, item in enumerate(history):
+            if item["role"] == "assistant" and index not in kept_assistant_indices:
+                continue
             if item["role"] == "user":
                 messages.append(
                     {

@@ -21,6 +21,7 @@ from repositories.card_repo import CardRepository
 from repositories.pet_repo import PetRepository
 from repositories.sqlite import Database
 from repositories.system_repo import SystemRepository
+from repositories.style_repo import StyleEmbeddingRepository
 from routes import feishu, gm, health, web
 from runtime import RuntimeState
 from services.autonomous_service import AutonomousService
@@ -29,6 +30,7 @@ from services.gameplay_service import GameplayService
 from services.memory_service import MemoryService
 from services.observer_service import ObserverService
 from services.reply_service import ReplyService
+from services.style_service import StyleService
 
 
 logging.basicConfig(
@@ -46,6 +48,7 @@ class AppServices:
     card: CardService
     gameplay: GameplayService
     memory: MemoryService
+    style: StyleService
 
 
 @dataclass
@@ -62,6 +65,7 @@ class AppContainer:
     pet_repo: PetRepository
     message_repo: MessageRepository
     memory_repo: MemoryRepository
+    style_repo: StyleEmbeddingRepository
     card_repo: CardRepository
     feishu: FeishuClient
     llm: LLMClient
@@ -85,10 +89,17 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
     pet_repo = PetRepository(db, state_domain, runtime)
     message_repo = MessageRepository(db)
     memory_repo = MemoryRepository(db, memory_domain, config)
+    style_repo = StyleEmbeddingRepository(db)
     card_repo = CardRepository(db)
 
     llm = LLMClient(config)
     feishu_client = FeishuClient(config, system_repo, runtime)
+    style_service = StyleService(
+        config,
+        pet_domain.style_domain,
+        style_repo,
+        llm,
+    )
 
     memory_service = MemoryService(
         config,
@@ -125,6 +136,7 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
         memory_service,
         feishu_client,
         llm,
+        style_service=style_service,
     )
     autonomous_service = AutonomousService(
         config,
@@ -141,6 +153,7 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
         feishu_client,
         llm,
         card_service=card_service,
+        style_service=style_service,
     )
     reply_service = ReplyService(
         config,
@@ -156,6 +169,7 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
         card_service,
         feishu_client,
         llm,
+        style_service=style_service,
     )
 
     services = AppServices(
@@ -165,6 +179,7 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
         card=card_service,
         gameplay=gameplay_service,
         memory=memory_service,
+        style=style_service,
     )
 
     return AppContainer(
@@ -180,6 +195,7 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
         pet_repo=pet_repo,
         message_repo=message_repo,
         memory_repo=memory_repo,
+        style_repo=style_repo,
         card_repo=card_repo,
         feishu=feishu_client,
         llm=llm,
@@ -192,15 +208,31 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        async def initialize_style() -> None:
+            try:
+                await asyncio.wait_for(
+                    container.services.style.initialize(),
+                    timeout=float(
+                        container.config.style_retrieval["init_timeout_sec"]
+                    ),
+                )
+            except Exception:
+                log.exception(
+                    "style embedding initialization failed; lexical fallback remains active"
+                )
+
+        style_task = asyncio.create_task(initialize_style())
         task = asyncio.create_task(container.services.autonomous.run_loop())
         try:
             yield
         finally:
+            style_task.cancel()
             task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+            for background_task in (style_task, task):
+                try:
+                    await background_task
+                except asyncio.CancelledError:
+                    pass
             await container.services.observer.flush_all()
             await container.feishu.close()
 

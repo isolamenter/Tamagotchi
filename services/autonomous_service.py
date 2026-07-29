@@ -20,6 +20,7 @@ from services.gameplay_service import GameplayService
 from services.card_service import CardService
 from services.memory_service import MemoryService
 from services.observer_service import ObserverService
+from services.style_service import StyleService
 
 log = logging.getLogger("tamagotchi")
 
@@ -41,6 +42,7 @@ class AutonomousService:
         feishu: FeishuClient,
         llm: LLMClient,
         card_service: CardService | None = None,
+        style_service: StyleService | None = None,
     ):
         self.config = config
         self.state_domain = state_domain
@@ -52,6 +54,7 @@ class AutonomousService:
         self.system_repo = system_repo
         self.gameplay_service = gameplay_service
         self.card_service = card_service
+        self.style_service = style_service
         self.memory_service = memory_service
         self.observer_service = observer_service
         self.feishu = feishu
@@ -127,12 +130,20 @@ class AutonomousService:
         system_content = self.config.system_prompt + recall_block
         messages = self.pet_domain.base_messages(system_content, history)
 
+        style_block = (
+            await self.style_service.render_examples_block(
+                style_query, scope="proactive"
+            )
+            if self.style_service
+            else self.pet_domain.render_style_examples(style_query, scope="proactive")
+        )
+
         pre = (
             self.state_domain.render_state(current_state)
             + "\n"
             + self.config.json_output_prompt
             + "\n"
-            + self.pet_domain.render_style_examples(style_query, scope="proactive")
+            + style_block
             + "\n"
             + self.config.persona_reinforcement
             + "\n"

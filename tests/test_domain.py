@@ -7,6 +7,7 @@ from config import load_config
 from domain.card import CardDomain
 from domain.gameplay import GameplayDomain
 from domain.memory import MemoryDomain
+from domain.pet import PetDomain
 from domain.state import StateDomain
 from domain.style import StyleDomain
 from services.autonomous_service import AutonomousService
@@ -68,6 +69,13 @@ class StyleDomainTests(unittest.TestCase):
             responses.append(example.get("response"))
         self.assertGreaterEqual(len(responses), 100)
         self.assertEqual(len(responses), len(set(responses)))
+        mapped = [
+            response
+            for group in make_config().style_corpus["intent_groups"].values()
+            for response in group
+        ]
+        self.assertCountEqual(mapped, responses)
+        self.assertEqual(len(mapped), len(set(mapped)))
 
     def test_aggressive_examples_require_matching_roast_context(self):
         roast = self.style.select_examples("这个操作也太菜了")
@@ -85,6 +93,78 @@ class StyleDomainTests(unittest.TestCase):
         self.assertNotIn("【长度示例】", config.pet_style_prompt)
         self.assertNotRegex(config.pet_style_prompt, r"\d+\s*个汉字")
         self.assertNotRegex(config.pet_style_reinforcement, r"\d+\s*个汉字")
+
+    def test_semantic_retrieval_matches_paraphrase_without_keyword(self):
+        target = next(
+            item for item in self.style.examples if item["response"] == "想睡觉了"
+        )
+        vectors = {self.style.example_id(target): [1.0, 0.0]}
+        selected = self.style.select_examples(
+            "身体被掏空，只想躺平",
+            query_vector=[1.0, 0.0],
+            vectors=vectors,
+        )
+        self.assertEqual(selected[0]["response"], "想睡觉了")
+
+    def test_aggressive_semantic_match_still_requires_current_keyword(self):
+        target = next(
+            item for item in self.style.examples if item["response"] == "傻逼"
+        )
+        vectors = {self.style.example_id(target): [1.0, 0.0]}
+        selected = self.style.select_examples(
+            "今天心情很差",
+            query_vector=[1.0, 0.0],
+            vectors=vectors,
+        )
+        self.assertNotIn("傻逼", [item["response"] for item in selected])
+
+    def test_second_example_must_share_intent_and_be_high_confidence(self):
+        responses = {"笑死", "笑死我了"}
+        vectors = {
+            self.style.example_id(item): [1.0, 0.0]
+            for item in self.style.examples
+            if item["response"] in responses
+        }
+        selected = self.style.select_examples(
+            "这个画面太逗了",
+            query_vector=[1.0, 0.0],
+            vectors=vectors,
+        )
+        self.assertEqual({item["response"] for item in selected}, responses)
+
+    def test_style_query_uses_two_user_messages_and_excludes_assistant(self):
+        query = self.style.build_query(
+            "啊？",
+            [
+                {"role": "user", "content": "第一条"},
+                {"role": "assistant", "content": "旧文风回复"},
+                {"role": "user", "content": "第二条"},
+                {"role": "user", "content": "第三条"},
+            ],
+        )
+        self.assertNotIn("第一条", query)
+        self.assertNotIn("旧文风回复", query)
+        self.assertIn("第二条", query)
+        self.assertIn("第三条", query)
+        self.assertTrue(query.endswith("当前消息：啊？"))
+
+    def test_base_messages_keeps_all_users_and_latest_four_assistants(self):
+        pet = PetDomain(make_config())
+        history = []
+        for index in range(6):
+            history.extend(
+                [
+                    {"role": "user", "content": f"u{index}"},
+                    {"role": "assistant", "content": f"a{index}"},
+                ]
+            )
+        messages = pet.base_messages("system", history)
+        contents = [item["content"] for item in messages]
+        for index in range(6):
+            self.assertIn(f"u{index}", "\n".join(contents))
+        self.assertNotIn("a0", contents)
+        self.assertNotIn("a1", contents)
+        self.assertEqual(contents[-1], "a5")
 
 
 class StateDomainTests(unittest.TestCase):

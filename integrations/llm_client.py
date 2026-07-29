@@ -65,25 +65,62 @@ class LLMClient:
                 api_key=config.openai_api_key,
             )
 
-    async def embed_text(self, text: str) -> list[float] | None:
-        text = (text or "").strip()
-        if not text:
+    async def embed_texts(
+        self, texts: list[str], *, purpose: str = ""
+    ) -> list[list[float]] | None:
+        normalized = [(text or "").strip() for text in texts]
+        if not normalized:
+            return []
+        if any(not text for text in normalized):
             return None
         try:
             if self.provider == "gemini":
+                config = None
+                if self.config.embed_model.rstrip("/").endswith("gemini-embedding-001"):
+                    task_types = {
+                        "retrieval_document": "RETRIEVAL_DOCUMENT",
+                        "retrieval_query": "RETRIEVAL_QUERY",
+                    }
+                    task_type = task_types.get(purpose)
+                    if task_type:
+                        config = self._types.EmbedContentConfig(task_type=task_type)
                 resp = await self._genai.aio.models.embed_content(
                     model=self.config.embed_model,
-                    contents=text,
+                    contents=normalized,
+                    config=config,
                 )
-                return list(resp.embeddings[0].values)
-            resp = await self.client.embeddings.create(
-                model=self.config.embed_model,
-                input=text,
-            )
-            return list(resp.data[0].embedding)
+                vectors = [list(item.values) for item in (resp.embeddings or [])]
+            else:
+                resp = await self.client.embeddings.create(
+                    model=self.config.embed_model,
+                    input=normalized,
+                )
+                vectors = [list(item.embedding) for item in resp.data]
+            if len(vectors) != len(normalized):
+                log.error(
+                    "embedding response count mismatch: requested=%d returned=%d",
+                    len(normalized),
+                    len(vectors),
+                )
+                return None
+            return vectors
         except Exception:
-            log.exception("embed failed for text len=%d", len(text))
+            log.exception(
+                "batch embed failed count=%d total_len=%d purpose=%s",
+                len(normalized),
+                sum(len(text) for text in normalized),
+                purpose or "default",
+            )
             return None
+
+    async def embed_text(
+        self, text: str, *, purpose: str = ""
+    ) -> list[float] | None:
+        text = (text or "").strip()
+        if not text:
+            return None
+        vectors = await self.embed_texts([text], purpose=purpose)
+        return vectors[0] if vectors else None
 
     async def chat_json(
         self,

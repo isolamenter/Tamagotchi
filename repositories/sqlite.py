@@ -78,6 +78,20 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_embed_pet ON embeddings(pet_id, kind);
                 CREATE INDEX IF NOT EXISTS idx_embed_source ON embeddings(kind, source_id);
 
+                CREATE TABLE IF NOT EXISTS style_embeddings (
+                    example_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    dimension INTEGER NOT NULL,
+                    vec BLOB NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (example_id, provider, model)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_style_embed_model
+                ON style_embeddings(provider, model);
+
                 CREATE TABLE IF NOT EXISTS event_dedup (
                     event_id TEXT PRIMARY KEY,
                     created_at REAL NOT NULL

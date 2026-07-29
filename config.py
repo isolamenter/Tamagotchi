@@ -32,6 +32,7 @@ class AppConfig:
     pet_style: dict
     style_corpus: dict
     pet_config: dict
+    style_retrieval: dict
 
     pet_style_prompt: str
     pet_style_reinforcement: str
@@ -171,6 +172,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
     reply_config = pet_config["reply"]
     observer_config = pet_config["observer"]
     llm_config = pet_config["llm"]
+    style_retrieval = pet_config.get("style_retrieval", {})
     state_config = pet_config["state"]
 
     initial_state = {k: float(v) for k, v in state_config["initial"].items()}
@@ -220,6 +222,30 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         pet_style=pet_style,
         style_corpus=style_corpus,
         pet_config=pet_config,
+        style_retrieval={
+            "semantic_threshold": float(
+                style_retrieval.get("semantic_threshold", 0.62)
+            ),
+            "second_semantic_threshold": float(
+                style_retrieval.get("second_semantic_threshold", 0.68)
+            ),
+            "second_max_gap": float(style_retrieval.get("second_max_gap", 0.05)),
+            "keyword_bonus": float(style_retrieval.get("keyword_bonus", 0.04)),
+            "keyword_bonus_cap": float(
+                style_retrieval.get("keyword_bonus_cap", 0.12)
+            ),
+            "context_messages": int(style_retrieval.get("context_messages", 2)),
+            "query_max_chars": int(style_retrieval.get("query_max_chars", 1500)),
+            "assistant_history_keep": int(
+                style_retrieval.get("assistant_history_keep", 4)
+            ),
+            "embedding_batch_size": int(
+                style_retrieval.get("embedding_batch_size", 50)
+            ),
+            "init_timeout_sec": float(
+                style_retrieval.get("init_timeout_sec", 30.0)
+            ),
+        },
         pet_style_prompt=pet_style_prompt,
         pet_style_reinforcement=pet_style_reinforcement,
         system_prompt=system_prompt,
