@@ -108,7 +108,10 @@ class StateDomain:
         if not self.config.recent_vibe_pool:
             return state
         date_key, _ = self.local_date_hour(now)
-        if state.get("recent_vibe_date") == date_key and state.get("recent_vibe"):
+        if (
+            state.get("recent_vibe_date") == date_key
+            and state.get("recent_vibe") in self.config.recent_vibe_pool
+        ):
             return state
         out = dict(state)
         if pet_id is not None:
@@ -166,7 +169,7 @@ class StateDomain:
             return f"{dim}_low"
         return None
 
-    def render_state(self, state: dict) -> str:
+    def render_state(self, state: dict, *, include_vibe: bool = True) -> str:
         lines: list[str] = []
         for dim in self.config.state_numeric_keys:
             band_key = self.state_band(dim, float(state.get(dim, 50.0)))
@@ -176,7 +179,10 @@ class StateDomain:
             if sentence:
                 lines.append(sentence)
         vibe = (state.get("recent_vibe") or "").strip()
-        if vibe:
+        # A concrete gameplay state already gives the model enough color.  Do
+        # not stack the daily vibe on top, which otherwise turns one phrase
+        # into a repeated answer theme across unrelated messages.
+        if include_vibe and vibe and not lines:
             lines.append(self.config.state_render_vibe_template.format(vibe=vibe))
         if not lines:
             return ""

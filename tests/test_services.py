@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from services.card_service import CardService
@@ -24,6 +25,29 @@ class ReplyRoutingTests(unittest.IsolatedAsyncioTestCase):
         service = ReplyService.__new__(ReplyService)
         service.feishu = Feishu()
         self.assertFalse(await service.is_direct_to_bot("group", []))
+
+
+class ReplyParsingTests(unittest.TestCase):
+    def test_parses_normal_and_double_encoded_json(self):
+        normal = '{"reply":"难绷","speaker_name":"小明"}'
+        self.assertEqual(
+            ReplyService.parse_llm_content(normal), ("难绷", "小明", True)
+        )
+        double_encoded = json.dumps(normal, ensure_ascii=False)
+        self.assertEqual(
+            ReplyService.parse_llm_content(double_encoded),
+            ("难绷", "小明", True),
+        )
+
+    def test_recovers_reply_when_later_json_field_is_malformed(self):
+        malformed = (
+            '{"reply": "发就发呗，反正你们开心就行。", '
+            '"speaker_name": " : ""}'
+        )
+        reply, speaker_name, structured = ReplyService.parse_llm_content(malformed)
+        self.assertEqual(reply, "发就发呗，反正你们开心就行。")
+        self.assertEqual(speaker_name, "")
+        self.assertFalse(structured)
 
 
 class CardPayloadTests(unittest.IsolatedAsyncioTestCase):

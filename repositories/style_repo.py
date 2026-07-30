@@ -24,12 +24,13 @@ class StyleEmbeddingRepository:
     def _load(self, provider: str, model: str) -> dict[str, dict]:
         with self.db.connect() as conn:
             rows = conn.execute(
-                "SELECT example_id, content_hash, dimension, vec "
+                "SELECT example_id, embedding_type, content_hash, dimension, vec "
                 "FROM style_embeddings WHERE provider = ? AND model = ?",
                 (provider, model),
             ).fetchall()
         return {
             row["example_id"]: {
+                "embedding_type": row["embedding_type"],
                 "content_hash": row["content_hash"],
                 "dimension": int(row["dimension"]),
                 "vector": _unpack_vector(row["vec"]),
@@ -48,11 +49,13 @@ class StyleEmbeddingRepository:
             conn.execute("DELETE FROM style_embeddings")
             conn.executemany(
                 "INSERT INTO style_embeddings "
-                "(example_id, provider, model, content_hash, dimension, vec, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(example_id, embedding_type, provider, model, content_hash, "
+                "dimension, vec, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         record["example_id"],
+                        record["embedding_type"],
                         provider,
                         model,
                         record["content_hash"],

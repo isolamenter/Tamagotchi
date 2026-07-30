@@ -226,6 +226,9 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
             "semantic_threshold": float(
                 style_retrieval.get("semantic_threshold", 0.62)
             ),
+            "example_card_semantic_threshold": float(
+                style_retrieval.get("example_card_semantic_threshold", 0.62)
+            ),
             "second_semantic_threshold": float(
                 style_retrieval.get("second_semantic_threshold", 0.68)
             ),

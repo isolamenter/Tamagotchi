@@ -32,6 +32,7 @@ class StyleService:
         self._semantic_hits = 0
         self._fallback_hits = 0
         self._multi_hits = 0
+        self._card_hits = 0
         self._score_sum = 0.0
 
     @property
@@ -73,6 +74,7 @@ class StyleService:
                 )
                 if (
                     row
+                    and row.get("embedding_type") == record["embedding_type"]
                     and row.get("content_hash") == record["content_hash"]
                     and int(row.get("dimension", 0)) == len(normalized)
                     and normalized
@@ -117,16 +119,27 @@ class StyleService:
                 record["example_id"]: record["vector"] for record in prepared
             }
             self._ready = True
+            type_counts: dict[str, int] = {}
+            for record in prepared:
+                kind = str(record["embedding_type"])
+                type_counts[kind] = type_counts.get(kind, 0) + 1
             log.info(
-                "style embeddings ready entries=%d generated=%d dimension=%d provider=%s model=%s",
+                "style embeddings ready entries=%d generated=%d dimension=%d "
+                "types=%s provider=%s model=%s",
                 len(prepared),
                 len(missing),
                 next(iter(dimensions)),
+                type_counts,
                 self.config.llm_provider,
                 self.config.embed_model,
             )
 
-    def _record_metrics(self, selected: list[dict], semantic_used: bool) -> None:
+    def _record_metrics(
+        self,
+        selected: list[dict],
+        cards: list[dict],
+        semantic_used: bool,
+    ) -> None:
         self._queries += 1
         if selected:
             if semantic_used:
@@ -136,14 +149,17 @@ class StyleService:
             self._score_sum += float(selected[0].get("_semantic_score", 0.0))
         if len(selected) > 1:
             self._multi_hits += 1
+        if cards:
+            self._card_hits += 1
         if self._queries % 100 == 0:
             log.info(
                 "style retrieval metrics queries=%d semantic_hits=%d fallback_hits=%d "
-                "multi_hits=%d avg_top_semantic=%.3f",
+                "multi_hits=%d card_hits=%d avg_top_semantic=%.3f",
                 self._queries,
                 self._semantic_hits,
                 self._fallback_hits,
                 self._multi_hits,
+                self._card_hits,
                 self._score_sum / max(1, self._semantic_hits),
             )
 
@@ -184,14 +200,29 @@ class StyleService:
             query_vector=query_vector,
             vectors=self._vectors if semantic_used else None,
         )
-        self._record_metrics(selected, semantic_used)
-        if selected:
+        cards = self.domain.select_example_cards(
+            current_text,
+            scope=scope,
+            query_vector=query_vector,
+            vectors=self._vectors if semantic_used else None,
+        )
+        self._record_metrics(selected, cards, semantic_used)
+        if selected or cards:
             log.debug(
-                "style retrieval scope=%s semantic=%s candidates=%d selected=%s top_score=%.3f",
+                "style retrieval scope=%s semantic=%s catchphrases=%s cards=%s "
+                "top_score=%.3f",
                 scope,
                 semantic_used,
-                len(selected),
                 [item["_example_id"][:12] for item in selected],
-                float(selected[0].get("_combined_score", 0.0)),
+                [item["_example_id"] for item in cards],
+                (
+                    float(selected[0].get("_combined_score", 0.0))
+                    if selected
+                    else float(cards[0].get("_semantic_score", 0.0))
+                ),
             )
-        return self.domain.render_selected(selected)
+        return self.domain.render_selected(
+            selected,
+            example_cards=cards,
+            scope=scope,
+        )

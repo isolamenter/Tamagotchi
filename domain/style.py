@@ -1,20 +1,52 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+import random
 import re
 
 from config import AppConfig
 
 
 class StyleDomain:
-    """Pure query construction, scoring and rendering for style examples."""
+    """Pure retrieval and rendering for structure cards and catchphrases."""
 
-    def __init__(self, config: AppConfig):
+    CATCHPHRASE_EMBEDDING_TYPE = "catchphrase"
+    EXAMPLE_CARD_EMBEDDING_TYPE = "example_card"
+
+    def __init__(self, config: AppConfig, *, rng: random.Random | None = None):
         corpus = config.style_corpus
         retrieval = corpus.get("retrieval", {})
+        cards = corpus.get("example_cards", {})
         runtime = config.style_retrieval
-        self.examples = tuple(corpus.get("examples", []))
+        self._rng = rng or random.SystemRandom()
+        self.corpus_version = str(retrieval.get("corpus_version", "1"))
+        self.examples = tuple(
+            {
+                **example,
+                # Keep a primary response for callers that only need a stable
+                # label. Rendering chooses from the full variant group below.
+                "response": self.response_texts(example)[0],
+            }
+            for example in corpus.get("examples", [])
+            if self.response_texts(example)
+        )
+        self.example_cards = tuple(
+            card
+            for card in cards.get("cards", [])
+            if str(card.get("response") or "").strip()
+        )
+        self.example_card_max_examples = min(
+            2, max(0, int(cards.get("max_examples", 2)))
+        )
+        self.example_card_header = str(cards.get("header") or "")
+        self.example_card_footer = str(cards.get("footer") or "")
+        self.example_card_aggressive_keywords = tuple(
+            self._normalize_text(str(keyword))
+            for keyword in cards.get("aggressive_keywords", [])
+            if self._normalize_text(str(keyword))
+        )
         self.intent_by_response = {
             response: intent
             for intent, responses in corpus.get("intent_groups", {}).items()
@@ -32,6 +64,9 @@ class StyleDomain:
         )
         self.footer = retrieval.get("footer", "")
         self.semantic_threshold = float(runtime["semantic_threshold"])
+        self.example_card_semantic_threshold = float(
+            runtime["example_card_semantic_threshold"]
+        )
         self.second_semantic_threshold = float(
             runtime["second_semantic_threshold"]
         )
@@ -65,14 +100,90 @@ class StyleDomain:
     def _sha256(text: str) -> str:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def response_variants(example: dict) -> tuple[tuple[str, int], ...]:
+        variants = example.get("variants") or []
+        prepared = tuple(
+            (
+                str(item.get("text") if isinstance(item, dict) else item).strip(),
+                max(1, int(item.get("source_count", 1)))
+                if isinstance(item, dict)
+                else 1,
+            )
+            for item in variants
+            if str(item.get("text") if isinstance(item, dict) else item).strip()
+        )
+        if prepared:
+            return prepared
+        response = str(example.get("response") or "").strip()
+        return ((response, max(1, int(example.get("source_count", 1)))),) if response else ()
+
+    @classmethod
+    def response_texts(cls, example: dict) -> tuple[str, ...]:
+        return tuple(text for text, _weight in cls.response_variants(example))
+
+    def _choose_response(self, example: dict) -> str:
+        variants = self.response_variants(example)
+        return self._rng.choices(
+            [text for text, _weight in variants],
+            weights=[weight for _text, weight in variants],
+            k=1,
+        )[0]
+
     def example_id(self, example: dict) -> str:
-        return self._sha256(str(example.get("response", "")).strip())
+        variant_key = json.dumps(
+            self.response_texts(example), ensure_ascii=False, separators=(",", ":")
+        )
+        return self._sha256(variant_key)
+
+    @staticmethod
+    def _card_context(card: dict) -> tuple[tuple[str, str], ...]:
+        prepared = []
+        for turn in card.get("context", []):
+            if not isinstance(turn, (list, tuple)) or len(turn) != 2:
+                continue
+            speaker, content = (str(turn[0]).strip(), str(turn[1]).strip())
+            if speaker and content:
+                prepared.append((speaker, content))
+        return tuple(prepared)
+
+    @staticmethod
+    def _speaker_label(speaker: str) -> str:
+        return {
+            "self": "我前面",
+            "peer": "群友",
+            "assistant": "当时的机器人",
+        }.get(speaker, "群友")
+
+    def example_card_id(self, card: dict) -> str:
+        source_id = int(card.get("source_message_id", 0) or 0)
+        if source_id:
+            return f"card:{source_id}"
+        payload = json.dumps(
+            [self._card_context(card), str(card.get("response") or "")],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return f"card:{self._sha256(payload)}"
 
     def format_embedding_document(self, example: dict) -> str:
         return (
-            f"适用场景：{str(example.get('context', '')).strip()}\n"
+            f"口头禅适用场景：{str(example.get('context', '')).strip()}\n"
             f"关键词：{'、'.join(str(item) for item in example.get('keywords', []))}\n"
-            f"回复示例：{str(example.get('response', '')).strip()}"
+            f"口头禅候选：{'、'.join(self.response_texts(example))}"
+        )
+
+    def format_example_card_document(self, card: dict) -> str:
+        context = "\n".join(
+            f"{self._speaker_label(speaker)}：{content}"
+            for speaker, content in self._card_context(card)
+        )
+        if not context:
+            context = "（没有直接上文，是自然发起的话）"
+        return (
+            f"句子结构模式：{str(card.get('mode') or 'conversation')}\n"
+            f"真实聊天上文：\n{context}\n"
+            f"我的回复：{str(card.get('response') or '').strip()}"
         )
 
     def corpus_records(self) -> list[dict]:
@@ -82,9 +193,25 @@ class StyleDomain:
             records.append(
                 {
                     "example_id": self.example_id(example),
-                    "content_hash": self._sha256(document),
+                    "embedding_type": self.CATCHPHRASE_EMBEDDING_TYPE,
+                    "content_hash": self._sha256(
+                        f"corpus-version:{self.corpus_version}\n{document}"
+                    ),
                     "document": document,
                     "example": example,
+                }
+            )
+        for card in self.example_cards:
+            document = self.format_example_card_document(card)
+            records.append(
+                {
+                    "example_id": self.example_card_id(card),
+                    "embedding_type": self.EXAMPLE_CARD_EMBEDDING_TYPE,
+                    "content_hash": self._sha256(
+                        f"corpus-version:{self.corpus_version}\n{document}"
+                    ),
+                    "document": document,
+                    "example": card,
                 }
             )
         return records
@@ -121,15 +248,23 @@ class StyleDomain:
     def _intent(self, example: dict) -> str:
         # Corpus entries should declare intent. Response remains a conservative
         # fallback so an untagged entry can never unlock an unrelated second cue.
-        response = str(example.get("response") or "").strip()
+        response = self.response_texts(example)[0]
         return str(
             example.get("intent") or self.intent_by_response.get(response) or response
         ).strip()
 
     def _risk(self, example: dict) -> str:
-        response = str(example.get("response") or "").strip()
+        responses = self.response_texts(example)
         return str(
-            example.get("risk") or self.risk_by_response.get(response) or "normal"
+            example.get("risk")
+            or next(
+                (
+                    self.risk_by_response[response]
+                    for response in responses
+                    if response in self.risk_by_response
+                ),
+                "normal",
+            )
         ).strip()
 
     def select_examples(
@@ -145,7 +280,7 @@ class StyleDomain:
             return []
 
         normalized_query_vector = self.normalize_vector(query_vector or [])
-        scored: list[tuple[float, float, int, str, dict]] = []
+        scored: list[tuple[float, float, int, int, str, dict]] = []
         for example in self.examples:
             scopes = example.get("scopes") or ["reply"]
             if scope not in scopes:
@@ -168,18 +303,22 @@ class StyleDomain:
                 self.keyword_bonus_cap, self.keyword_bonus * len(matches)
             )
             lexical_specificity = sum(10 + min(len(match), 8) for match in matches)
+            source_count = max(1, int(example.get("source_count", 1)))
             combined = semantic + lexical_bonus
             scored.append(
                 (
                     combined,
                     semantic,
                     lexical_specificity,
+                    source_count,
                     example_id,
                     example,
                 )
             )
 
-        scored.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3]))
+        scored.sort(
+            key=lambda item: (-item[0], -item[1], -item[2], -item[3], item[4])
+        )
         cap = self.max_examples if limit is None else min(2, max(0, int(limit)))
         if cap <= 0 or not scored:
             return []
@@ -187,8 +326,8 @@ class StyleDomain:
         first = scored[0]
         selected = [
             {
-                **first[4],
-                "_example_id": first[3],
+                **first[5],
+                "_example_id": first[4],
                 "_semantic_score": first[1],
                 "_combined_score": first[0],
             }
@@ -196,9 +335,9 @@ class StyleDomain:
         if cap < 2:
             return selected
 
-        first_intent = self._intent(first[4])
+        first_intent = self._intent(first[5])
         for candidate in scored[1:]:
-            if self._intent(candidate[4]) != first_intent:
+            if self._intent(candidate[5]) != first_intent:
                 continue
             if candidate[1] < self.second_semantic_threshold:
                 continue
@@ -206,8 +345,8 @@ class StyleDomain:
                 continue
             selected.append(
                 {
-                    **candidate[4],
-                    "_example_id": candidate[3],
+                    **candidate[5],
+                    "_example_id": candidate[4],
                     "_semantic_score": candidate[1],
                     "_combined_score": candidate[0],
                 }
@@ -215,18 +354,104 @@ class StyleDomain:
             break
         return selected
 
-    def render_selected(self, examples: list[dict]) -> str:
-        if not examples:
-            return ""
-        lines = [
-            self.example_template.format(
-                context=example["context"], response=example["response"]
+    def select_example_cards(
+        self,
+        current_text: str,
+        *,
+        scope: str = "reply",
+        query_vector: list[float] | None = None,
+        vectors: dict[str, list[float]] | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        normalized_query_vector = self.normalize_vector(query_vector or [])
+        if not normalized_query_vector or not vectors:
+            return []
+        cap = (
+            self.example_card_max_examples
+            if limit is None
+            else min(2, max(0, int(limit)))
+        )
+        if cap <= 0:
+            return []
+
+        scored: list[tuple[float, str, dict]] = []
+        normalized_current = self._normalize_text(current_text)
+        aggressive_context = any(
+            keyword in normalized_current
+            for keyword in self.example_card_aggressive_keywords
+        )
+        for card in self.example_cards:
+            if scope not in (card.get("scopes") or ["reply", "proactive", "card"]):
+                continue
+            if card.get("risk") == "aggressive" and not aggressive_context:
+                continue
+            card_id = self.example_card_id(card)
+            semantic = self.cosine(
+                normalized_query_vector, vectors.get(card_id, [])
             )
-            for example in examples
+            if semantic < self.example_card_semantic_threshold:
+                continue
+            scored.append((semantic, card_id, card))
+
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [
+            {
+                **card,
+                "_example_id": card_id,
+                "_semantic_score": semantic,
+            }
+            for semantic, card_id, card in scored[:cap]
         ]
-        body = "\n".join(lines)
-        footer = f"\n{self.footer}" if self.footer else ""
-        return f"{self.header}{body}{footer}"
+
+    def render_example_cards(self, cards: list[dict]) -> str:
+        if not cards:
+            return ""
+        blocks = []
+        for card in cards:
+            turns = [
+                f"  {self._speaker_label(speaker)}：{content}"
+                for speaker, content in self._card_context(card)
+            ]
+            if not turns:
+                turns.append("  上文：（没有直接上文，是自然发起的话）")
+            turns.append(f"  我的回复：{str(card.get('response') or '').strip()}")
+            blocks.append(
+                f"- 结构模式：{str(card.get('mode') or 'conversation')}\n"
+                + "\n".join(turns)
+            )
+        body = "\n".join(blocks)
+        footer = (
+            f"\n{self.example_card_footer}"
+            if self.example_card_footer
+            else ""
+        )
+        return f"{self.example_card_header}{body}{footer}"
+
+    def render_selected(
+        self,
+        examples: list[dict],
+        *,
+        example_cards: list[dict] | None = None,
+        scope: str = "reply",
+    ) -> str:
+        blocks = []
+        card_block = self.render_example_cards(example_cards or [])
+        if card_block:
+            blocks.append(card_block)
+        if examples:
+            lines = [
+                self.example_template.format(
+                    context=example["context"],
+                    response=self._choose_response(example),
+                )
+                for example in examples
+            ]
+            body = "\n".join(lines)
+            footer = f"\n{self.footer}" if self.footer else ""
+            blocks.append(f"{self.header}{body}{footer}")
+        return "\n".join(blocks)
 
     def render_examples_block(self, query: str, *, scope: str = "reply") -> str:
-        return self.render_selected(self.select_examples(query, scope=scope))
+        return self.render_selected(
+            self.select_examples(query, scope=scope), scope=scope
+        )

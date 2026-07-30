@@ -41,6 +41,8 @@ card_reply_max_tokens = 150
 [style_retrieval]
 # 语义分达到这个门槛，或当前消息直接命中关键词时，才允许注入风格语料。
 semantic_threshold = 0.62
+# 结构卡只靠语义匹配，不接受关键词兜底，避免把不相关的真实对话塞进提示。
+example_card_semantic_threshold = 0.62
 # 第二条必须同 intent，且分数更高、更接近第一条，避免拼接矛盾口头禅。
 second_semantic_threshold = 0.68
 second_max_gap = 0.05
@@ -50,7 +52,7 @@ keyword_bonus_cap = 0.12
 context_messages = 2
 query_max_chars = 1500
 # 生成提示中只保留最近这么多条 assistant 原文；数据库和压缩输入仍完整保留。
-assistant_history_keep = 4
+assistant_history_keep = 2
 embedding_batch_size = 50
 init_timeout_sec = 30
 

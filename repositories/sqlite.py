@@ -80,6 +80,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS style_embeddings (
                     example_id TEXT NOT NULL,
+                    embedding_type TEXT NOT NULL DEFAULT 'catchphrase',
                     provider TEXT NOT NULL,
                     model TEXT NOT NULL,
                     content_hash TEXT NOT NULL,
@@ -139,6 +140,21 @@ class Database:
                     PRIMARY KEY (card_id, actor_open_id)
                 );
                 """
+            )
+            style_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(style_embeddings)")
+            }
+            if "embedding_type" not in style_columns:
+                # Existing deployments only stored the short-form corpus. Keep
+                # those vectors reusable while adding a separate card index.
+                conn.execute(
+                    "ALTER TABLE style_embeddings ADD COLUMN embedding_type "
+                    "TEXT NOT NULL DEFAULT 'catchphrase'"
+                )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_style_embed_type "
+                "ON style_embeddings(provider, model, embedding_type)"
             )
             try:
                 conn.execute("ALTER TABLE pets ADD COLUMN compress_fail_count INTEGER DEFAULT 0")

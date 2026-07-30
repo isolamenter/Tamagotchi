@@ -51,7 +51,9 @@ class StyleCacheTests(unittest.IsolatedAsyncioTestCase):
         )
         await service.initialize()
         self.assertTrue(service.ready)
-        self.assertEqual([size for _purpose, size in llm.calls], [50, 50, 15])
+        self.assertEqual(
+            [size for _purpose, size in llm.calls], [50, 50, 50, 50]
+        )
         with self.db.connect() as conn:
             count = conn.execute(
                 "SELECT COUNT(*) FROM style_embeddings"
@@ -62,8 +64,22 @@ class StyleCacheTests(unittest.IsolatedAsyncioTestCase):
                     "SELECT DISTINCT dimension FROM style_embeddings"
                 ).fetchall()
             }
-        self.assertEqual(count, 115)
+        self.assertEqual(count, 200)
         self.assertEqual(dimensions, {3})
+        with self.db.connect() as conn:
+            type_counts = dict(
+                conn.execute(
+                    "SELECT embedding_type, COUNT(*) FROM style_embeddings "
+                    "GROUP BY embedding_type"
+                ).fetchall()
+            )
+        self.assertEqual(
+            type_counts, {"catchphrase": 100, "example_card": 100}
+        )
+        block = await service.render_examples_block("这个游戏你玩过吗")
+        self.assertIn("第一环节", block)
+        self.assertIn("第二环节", block)
+        self.assertLess(block.index("第一环节"), block.index("第二环节"))
 
         cached_llm = BatchLLM(fail=True)
         cached_service = StyleService(
@@ -128,7 +144,39 @@ class StyleCacheTests(unittest.IsolatedAsyncioTestCase):
             BatchLLM(fail=True),
         )
         block = await service.render_examples_block("这个游戏你玩过吗")
-        self.assertIn("没玩过", block)
+        self.assertTrue(
+            any(
+                response in block
+                for response in ("不知道诶", "不知道", "不知道啊")
+            )
+        )
+
+
+class StyleSchemaMigrationTests(unittest.TestCase):
+    def test_adds_embedding_type_to_legacy_style_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.db"
+            with sqlite3.connect(path) as conn:
+                conn.execute(
+                    "CREATE TABLE style_embeddings ("
+                    "example_id TEXT NOT NULL, provider TEXT NOT NULL, "
+                    "model TEXT NOT NULL, content_hash TEXT NOT NULL, "
+                    "dimension INTEGER NOT NULL, vec BLOB NOT NULL, "
+                    "updated_at REAL NOT NULL, "
+                    "PRIMARY KEY (example_id, provider, model))"
+                )
+                conn.execute(
+                    "INSERT INTO style_embeddings VALUES "
+                    "('legacy', 'gemini', 'embed', 'hash', 1, X'00000000', 1)"
+                )
+            db = Database(make_config(str(path)))
+            db.init_db()
+            with db.connect() as conn:
+                row = conn.execute(
+                    "SELECT embedding_type FROM style_embeddings "
+                    "WHERE example_id = 'legacy'"
+                ).fetchone()
+            self.assertEqual(row[0], "catchphrase")
 
 
 if __name__ == "__main__":

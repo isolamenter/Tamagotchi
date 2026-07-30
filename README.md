@@ -178,15 +178,17 @@ ssh gcp-vps 'systemctl status tamagotchi --no-pager'
 配置拆成四层，改完重启服务（`systemctl restart tamagotchi`）后生效：
 
 - `pet_style.toml`：电子宠物的风格、人设底色、口吻、默认互动方式。
-- `style_corpus.toml`：从原始聊天离线清洗出的场景化原句；运行时只召回少量风格范例，不作为事实记忆。
+- `style_corpus.toml`：从原始聊天离线清洗出的 100 张结构例句卡 + 100 组口头禅语料；运行时分两环节召回，不作为事实记忆。
 - `prompts.toml`：玩法流程，包括记忆压缩、状态渲染、主动发言、日记 / 梦境、GM 默认触发文案、兜底回复和 JSON 输出契约。
 - `pet_config.toml`：运行参数，包括记忆压缩阈值、`[reply]` 群 @ 回复节流间隔、`[observer]` 旁听缓冲上限、初始状态、状态衰减、`[gameplay]` 需求事件参数、主动发言间隔 / 静默时段 / 触发阈值、`[card]` 交互卡片开关 / 进度条格数 / 结算上限。
 
-`style_corpus.toml` 中每条 `[[examples]]` 都包含适用场景 `context`、原句
-`response`、本地检索词 `keywords` 和允许注入的 `scopes`，并由
-`[intent_groups]` / `[risk_groups]` 控制同轮组合和攻击性门槛。启动时语料向量缓存在
-SQLite 的独立 `style_embeddings` 表；回复时用当前消息和最近两条人类消息做语义召回，
-再叠加关键词加分。向量不可用时自动退回关键词召回。原始聊天导出不参与运行，也不要加入仓库。
+`style_corpus.toml` 的第一环节是 `[[example_cards.cards]]`：每张卡保留匿名化的真实
+`context -> response` 和只用于离线溯源的 `source_message_id`，通过语义召回学习句子结构、
+判断推进和转折。第二环节是 100 组 `[[examples]]`：每组用 `variants/source_count` 保存同场景
+口头禅，通过语义分、关键词加分、intent 和风险门槛选出短反应。两类向量以
+`example_card` / `catchphrase` 类型缓存在独立的 `style_embeddings` 表，并按“结构卡在前、
+口头禅在后”分段注入。向量不可用时只让口头禅环节退回关键词召回，不会随机塞结构卡。
+原始聊天导出和数据库快照不参与运行，也不要加入仓库。
 
 常改的是 `pet_style.toml [style].prompt`：当前是“小狗蛋”的短句群聊风格。身份和稳定规则放这里，场景原句放进 `style_corpus.toml`；玩法类规则继续放在 `prompts.toml`，不要写进业务代码。
 

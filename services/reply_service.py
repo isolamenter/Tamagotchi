@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 
 from config import AppConfig
@@ -56,6 +57,41 @@ class ReplyService:
         self.llm = llm
         self.style_service = style_service
 
+    @staticmethod
+    def parse_llm_content(content: str) -> tuple[str, str, bool]:
+        """Parse normal, double-encoded, or partially malformed JSON safely."""
+        candidate = (content or "").strip()
+        for _ in range(2):
+            try:
+                data = json.loads(candidate)
+            except (json.JSONDecodeError, TypeError):
+                break
+            if isinstance(data, dict):
+                return (
+                    str(data.get("reply") or "").strip(),
+                    str(data.get("speaker_name") or "").strip(),
+                    True,
+                )
+            if isinstance(data, str):
+                candidate = data.strip()
+                continue
+            break
+
+        # Providers occasionally return a valid reply field followed by a
+        # malformed optional field.  Recover only the quoted reply value so
+        # the raw JSON object is never sent to Feishu.
+        match = re.search(
+            r'"reply"\s*:\s*"((?:\\.|[^"\\])*)"', candidate, re.DOTALL
+        )
+        if match:
+            encoded_reply = match.group(1)
+            try:
+                reply = json.loads(f'"{encoded_reply}"')
+            except json.JSONDecodeError:
+                reply = encoded_reply.replace(r'\"', '"').replace(r"\n", "\n")
+            return str(reply).strip(), "", False
+        return candidate, "", False
+
     async def resolve_user_name(self, open_id: str) -> str:
         if not open_id:
             return "群友"
@@ -91,7 +127,7 @@ class ReplyService:
         )
 
         pre_user_system = (
-            self.state_domain.render_state(current_state)
+            self.state_domain.render_state(current_state, include_vibe=False)
             + "\n"
             + self.config.json_output_prompt
             + "\n"
@@ -113,14 +149,12 @@ class ReplyService:
             temperature=self.config.reply_temperature,
         )
 
-        speaker_name = ""
-        try:
-            data = json.loads(content)
-            reply = (data.get("reply") or "").strip()
-            speaker_name = (data.get("speaker_name") or "").strip()
-        except json.JSONDecodeError:
-            log.warning("LLM returned non-JSON: %r", content[:200])
-            reply = content
+        reply, speaker_name, structured = self.parse_llm_content(content)
+        if not structured:
+            if reply and reply != content.strip():
+                log.warning("recovered reply from malformed JSON: %r", content[:200])
+            else:
+                log.warning("LLM returned non-JSON: %r", content[:200])
 
         if not reply:
             reply = self.config.fallback_replies["empty_llm"]
