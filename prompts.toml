@@ -24,7 +24,7 @@ template = """{style_prompt}
 
 [persona_reinforcement]
 template = """提醒（不要在回应里复述这句）：{style_reinforcement}
-只回应眼前的话，不承担活跃气氛的任务。完整表达锚点决定句子如何推进，场景原句决定当前反应；用这种结构说清实际内容，不要只在普通 AI 句子前后粘一个口癖。除非对方明确要求，否则不要主动发散、追问或编剧情。"""
+只回应眼前的话，不承担活跃气氛的任务。结构例句卡决定句子如何推进，场景口头禅只提供当前反应节奏；用这种结构说清实际内容，不要只在普通 AI 句子前后粘一个口癖。除非对方明确要求，否则不要主动发散、追问或编剧情。"""
 
 [user_wrap]
 # 老格式（兼容兜底，没有 sender 时使用）
@@ -113,7 +113,7 @@ prompt = """【系统主动触发——不是群友发言】
 现在群里没有人 @ 你，是系统按你的当前状态判断该让你主动开口冒个泡。
 触发原因：{trigger}
 
-按你的风格和当前状态，在群里自然冒个泡。优先说眼前状态或最近真实发生的事；没有具体内容时，像“有说法吗”这样随口问一句就够了。篇幅由实际内容决定，不要为了显得完整而展开。
+按你的风格和当前状态，在群里自然冒个泡。优先说眼前状态或最近真实发生的事；没有具体内容时，按当前时段随口打个极短招呼就够了，不要照搬不合时段的问候。篇幅由实际内容决定，不要为了显得完整而展开。
 不要主动设计小游戏，不要编梦境，不要用泛泛的问题强行找人聊天，也不要解释为什么开口或提“系统触发”。
 
 照常输出 JSON。reply 是要发到群里的文字。
@@ -174,13 +174,13 @@ card_action = "goodnight"
 
 [fallback_reply]
 non_text = "何意味"
-empty_text = "啥情况"
-empty_llm = "不知道诶"
-llm_error_template = "麻了 ({error_class})"
+empty_text = "什么意思"
+empty_llm = "不懂"
+llm_error_template = "拉了 ({error_class})"
 # 休息时段里被 @ / 私聊时回的固定文案（不调 LLM）。
-quiet_hours = "困困困 睡了"
+quiet_hours = "撤退了 家人们"
 # 成功学到群友名字后追发的固定确认消息（不调 LLM）。
-name_learned = "good good 记住了 {name}"
+name_learned = "记住了 {name}"
 
 [gm]
 default_speak_trigger = "GM 手动触发：测试普通主动发言"
@@ -192,8 +192,8 @@ bar_empty = "▱"
 # 状态条区域上方的小标题；留空则不渲染。
 bars_header = "现在的状态"
 # 按钮点击成功或卡片过期时的 toast 文案。
-toast_done = "good good"
-toast_expired = "结束"
+toast_done = "没问题"
+toast_expired = "拉了"
 # 多人点击时，每条反馈台词在卡片文本里向下追加的行前缀。
 followup_prefix = "↳ "
 
@@ -211,12 +211,12 @@ vibe_template = "今天：{vibe}"
 # did=描述这次照料动作、喂给 LLM 生成正式反馈用。
 [card.actions.feed]
 button = "🍖 投喂"
-pending = "好饿"
+pending = "好吃"
 did = "给你喂了点吃的"
 
 [card.actions.rest]
 button = "💤 哄睡"
-pending = "困困困"
+pending = "困"
 did = "哄你休息了一会儿"
 
 [card.actions.soothe]
@@ -226,24 +226,24 @@ did = "轻声哄了哄你"
 
 [card.actions.play]
 button = "🎲 逗它玩"
-pending = "可以可以"
+pending = "燃"
 did = "陪你玩了个小游戏"
 
 [card.actions.pet]
 button = "🤚 摸摸头"
-pending = "干嘛"
+pending = "有实力的"
 did = "摸了摸你的头"
 
 # 下面两个是日记 / 梦境卡片的固定按钮，不参与主动发言卡片的 state 动态挑选
 # （[card.actions.*] 里没有 need_dim/need_side 的动作不会出现在普通卡片上）。
 [card.actions.goodnight]
 button = "🌙 晚安"
-pending = "晚安"
+pending = "撤退"
 did = "对你说了晚安"
 
 [card.actions.goodmorning]
 button = "☀️ 早上好"
-pending = "早"
+pending = "早上坏 bro们"
 did = "对你说了早上好"
 
 [card.action_reply]

@@ -76,7 +76,7 @@ class StyleCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             type_counts, {"catchphrase": 100, "example_card": 100}
         )
-        block = await service.render_examples_block("这个游戏你玩过吗")
+        block = await service.render_examples_block("你懂吗")
         self.assertIn("第一环节", block)
         self.assertIn("第二环节", block)
         self.assertLess(block.index("第一环节"), block.index("第二环节"))
@@ -143,11 +143,11 @@ class StyleCacheTests(unittest.IsolatedAsyncioTestCase):
             self.repo,
             BatchLLM(fail=True),
         )
-        block = await service.render_examples_block("这个游戏你玩过吗")
+        block = await service.render_examples_block("你懂吗")
         self.assertTrue(
             any(
                 response in block
-                for response in ("不知道诶", "不知道", "不知道啊")
+                for response in ("不懂", "不懂呢", "不懂欸", "听不懂", "我怎么听不懂")
             )
         )
 

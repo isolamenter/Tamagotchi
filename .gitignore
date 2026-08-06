@@ -17,6 +17,7 @@ state.db
 *_memorial.json
 # 原始聊天导出只作为本地离线语料源；仓库仅保存清洗后的 style_corpus.toml。
 chat_ou_*.txt
+chat_merged_*.txt
 
 # OS
 .DS_Store

@@ -190,7 +190,7 @@ ssh gcp-vps 'systemctl status tamagotchi --no-pager'
 口头禅在后”分段注入。向量不可用时只让口头禅环节退回关键词召回，不会随机塞结构卡。
 原始聊天导出和数据库快照不参与运行，也不要加入仓库。
 
-常改的是 `pet_style.toml [style].prompt`：当前是“小狗蛋”的短句群聊风格。身份和稳定规则放这里，场景原句放进 `style_corpus.toml`；玩法类规则继续放在 `prompts.toml`，不要写进业务代码。
+常改的是 `pet_style.toml [style].prompt`：当前是“小苍蝇”的群聊风格。身份和稳定规则放这里，场景原句放进 `style_corpus.toml`；玩法类规则继续放在 `prompts.toml`，不要写进业务代码。
 
 `prompts.toml` 核心段落：
 
