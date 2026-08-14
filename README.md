@@ -243,7 +243,7 @@ ssh gcp-vps 'systemctl status tamagotchi --no-pager'
 - **存在 `pets.state_json` 一个字段里**，浮点 + `last_update_ts` + 各种 last_* 时间戳
 - **lazy compute**：没后台 cron，读时按"距上次更新过了多久"算到当前；每次互动后写回新值
 - **衰减 = 向 baseline 指数收敛**：每维不再线性单调走到 0/100，而是 `v = baseline + (v-baseline)·exp(-rate·h)` 漂向各自 baseline（多在中段）。好处：长期没人理的宠物状态回落到中段（→ 不渲染 → LLM 自由发挥），不会五维全贴极端档把回复钉死。清醒 / 睡觉两段各有一组 baseline（如 energy 睡觉段 baseline=100 = 回血）
-- **LLM 走 JSON 结构化输出**：普通回复只返回 `{"reply": "...", "speaker_name": "..."}`。state 作为只读上下文影响回复语气、长度和话题倾向，不由 LLM 返回或修改五维数值。`speaker_name` 可选，当前说话人报了名字才填，用来从对话里学群友名字（写进 `user_names` 表）
+- **LLM 走 JSON 结构化输出**：普通回复返回 `{"reply_mode": "reaction | normal | substantive", "reply": "...", "speaker_name": "..."}`。模型在同一次调用里先按当前交流任务判断内容密度：简单反应可以只有几个字，需要分析解释时则自然说成一段；`reply_mode` 只用于内部约束和日志，不会发给用户。state 作为只读上下文影响回复语气、长度和话题倾向，不由 LLM 返回或修改五维数值。`speaker_name` 可选，当前说话人报了名字才填，用来从对话里学群友名字（写进 `user_names` 表）
 - LLM 输出不是合法 JSON 时，把整段当 reply 兜底，state 不变（不会让宠物挂掉）
 - **状态渲染只在极端档触发**：每维都看 `pet_config.toml [state.bands.<dim>]` 的 extreme_high / high / low / extreme_low；落在中段就完全不渲染该维度，避免把回复钉死成同质化语气
 - 全维度都中段、且 vibe 为空时，整个状态感受块都不注入——LLM 自由发挥

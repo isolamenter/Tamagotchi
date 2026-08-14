@@ -260,14 +260,21 @@ class StyleDomainTests(unittest.TestCase):
         selected = self.style.select_examples("这个也太搞笑了")
         self.assertEqual(selected[0]["response"], "笑死")
 
-    def test_base_style_has_no_static_corpus_or_character_limit(self):
+    def test_base_style_has_adaptive_modes_without_character_limits(self):
         config = make_config()
         self.assertIn("你叫小苍蝇", config.pet_style_prompt)
         self.assertIn("苍蝇电子宠物", config.pet_style_prompt)
+        self.assertIn("几个字已经说清就直接停", config.pet_style_prompt)
+        self.assertIn("自然说成一段也没问题", config.pet_style_prompt)
+        self.assertIn('"reply_mode": "normal"', config.json_output_prompt)
+        self.assertIn("reaction", config.json_output_prompt)
+        self.assertIn("substantive", config.json_output_prompt)
         self.assertNotIn("【原句语料】", config.pet_style_prompt)
         self.assertNotIn("【长度示例】", config.pet_style_prompt)
         self.assertNotRegex(config.pet_style_prompt, r"\d+\s*个汉字")
         self.assertNotRegex(config.pet_style_reinforcement, r"\d+\s*个汉字")
+        self.assertEqual(config.reply_max_tokens, 350)
+        self.assertEqual(config.reply_temperature, 0.5)
 
     def test_semantic_retrieval_matches_paraphrase_without_keyword(self):
         target = next(

@@ -29,24 +29,44 @@ class ReplyRoutingTests(unittest.IsolatedAsyncioTestCase):
 
 class ReplyParsingTests(unittest.TestCase):
     def test_parses_normal_and_double_encoded_json(self):
-        normal = '{"reply":"难绷","speaker_name":"小明"}'
+        normal = (
+            '{"reply_mode":"reaction","reply":"难绷",'
+            '"speaker_name":"小明"}'
+        )
         self.assertEqual(
-            ReplyService.parse_llm_content(normal), ("难绷", "小明", True)
+            ReplyService.parse_llm_content(normal),
+            ("难绷", "小明", "reaction", True),
         )
         double_encoded = json.dumps(normal, ensure_ascii=False)
         self.assertEqual(
             ReplyService.parse_llm_content(double_encoded),
-            ("难绷", "小明", True),
+            ("难绷", "小明", "reaction", True),
+        )
+
+    def test_legacy_or_invalid_mode_is_kept_compatible_as_unknown(self):
+        legacy = '{"reply":"难绷","speaker_name":"小明"}'
+        self.assertEqual(
+            ReplyService.parse_llm_content(legacy),
+            ("难绷", "小明", "unknown", True),
+        )
+        invalid = '{"reply_mode":"long","reply":"展开说说"}'
+        self.assertEqual(
+            ReplyService.parse_llm_content(invalid),
+            ("展开说说", "", "unknown", True),
         )
 
     def test_recovers_reply_when_later_json_field_is_malformed(self):
         malformed = (
-            '{"reply": "发就发呗，反正你们开心就行。", '
+            '{"reply_mode": "substantive", '
+            '"reply": "发就发呗，反正你们开心就行。", '
             '"speaker_name": " : ""}'
         )
-        reply, speaker_name, structured = ReplyService.parse_llm_content(malformed)
+        reply, speaker_name, reply_mode, structured = (
+            ReplyService.parse_llm_content(malformed)
+        )
         self.assertEqual(reply, "发就发呗，反正你们开心就行。")
         self.assertEqual(speaker_name, "")
+        self.assertEqual(reply_mode, "substantive")
         self.assertFalse(structured)
 
 

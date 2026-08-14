@@ -24,10 +24,11 @@ min_interval_sec = 10
 flush_max_count = 50
 
 [llm]
-# 普通回复 / 主动发言的 JSON 输出 token 上限。
-reply_max_tokens = 120
-# 风格模仿优先稳定服从，避免高随机度把多个口头禅拼成一句。
-reply_temperature = 0.35
+# 普通回复 / 主动发言的 JSON 输出 token 上限。上限留足一段实质回答的空间，
+# 实际篇幅由 reply_mode 和当前内容决定，并不要求用满。
+reply_max_tokens = 350
+# 保持人格稳定的同时，减少措辞和句式长期固定。
+reply_temperature = 0.5
 autonomous_temperature = 0.5
 card_reply_temperature = 0.35
 # 日记 / 梦境还可能附带 image_prompt，JSON 输出需要更大上限，

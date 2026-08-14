@@ -25,6 +25,8 @@ log = logging.getLogger("tamagotchi")
 
 
 class ReplyService:
+    REPLY_MODES = frozenset({"reaction", "normal", "substantive"})
+
     def __init__(
         self,
         config: AppConfig,
@@ -57,8 +59,8 @@ class ReplyService:
         self.llm = llm
         self.style_service = style_service
 
-    @staticmethod
-    def parse_llm_content(content: str) -> tuple[str, str, bool]:
+    @classmethod
+    def parse_llm_content(cls, content: str) -> tuple[str, str, str, bool]:
         """Parse normal, double-encoded, or partially malformed JSON safely."""
         candidate = (content or "").strip()
         for _ in range(2):
@@ -67,9 +69,13 @@ class ReplyService:
             except (json.JSONDecodeError, TypeError):
                 break
             if isinstance(data, dict):
+                reply_mode = str(data.get("reply_mode") or "").strip().lower()
+                if reply_mode not in cls.REPLY_MODES:
+                    reply_mode = "unknown"
                 return (
                     str(data.get("reply") or "").strip(),
                     str(data.get("speaker_name") or "").strip(),
+                    reply_mode,
                     True,
                 )
             if isinstance(data, str):
@@ -78,7 +84,7 @@ class ReplyService:
             break
 
         # Providers occasionally return a valid reply field followed by a
-        # malformed optional field.  Recover only the quoted reply value so
+        # malformed optional field. Recover only safe quoted scalar values so
         # the raw JSON object is never sent to Feishu.
         match = re.search(
             r'"reply"\s*:\s*"((?:\\.|[^"\\])*)"', candidate, re.DOTALL
@@ -89,8 +95,16 @@ class ReplyService:
                 reply = json.loads(f'"{encoded_reply}"')
             except json.JSONDecodeError:
                 reply = encoded_reply.replace(r'\"', '"').replace(r"\n", "\n")
-            return str(reply).strip(), "", False
-        return candidate, "", False
+            mode_match = re.search(
+                r'"reply_mode"\s*:\s*"([^"\\]*)"', candidate
+            )
+            reply_mode = (
+                mode_match.group(1).strip().lower() if mode_match else "unknown"
+            )
+            if reply_mode not in cls.REPLY_MODES:
+                reply_mode = "unknown"
+            return str(reply).strip(), "", reply_mode, False
+        return candidate, "", "unknown", False
 
     async def resolve_user_name(self, open_id: str) -> str:
         if not open_id:
@@ -149,15 +163,24 @@ class ReplyService:
             temperature=self.config.reply_temperature,
         )
 
-        reply, speaker_name, structured = self.parse_llm_content(content)
+        reply, speaker_name, reply_mode, structured = self.parse_llm_content(content)
         if not structured:
             if reply and reply != content.strip():
                 log.warning("recovered reply from malformed JSON: %r", content[:200])
             else:
                 log.warning("LLM returned non-JSON: %r", content[:200])
+        if reply_mode == "unknown":
+            log.warning("LLM returned missing or invalid reply_mode: %r", content[:200])
 
         if not reply:
             reply = self.config.fallback_replies["empty_llm"]
+
+        log.info(
+            "pet %d reply shape: mode=%s chars=%d",
+            pet_id,
+            reply_mode,
+            len(reply),
+        )
 
         learned_name = ""
         if (
