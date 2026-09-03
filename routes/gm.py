@@ -104,7 +104,8 @@ async def gm_help(req: Request):
             "POST /gm/resolve_need": "resolve active need; json: {chat_id|pet_id, action, actor?}",
             "GET /gm/cards": "list memory cards; query: chat_id or pet_id, limit?",
             "GET /gm/messages": "list recent messages; query: chat_id or pet_id, limit?",
-            "GET /web": "html dashboard; open /web?token=...",
+            "POST /gm/image": "send image (memory-only, no save); multipart form: file=<image> + chat_id|pet_id; query ?token=...",
+            "GET /web": "html dashboard; open /web?token=... (supports paste/file image send)",
         },
     }
 
@@ -460,6 +461,58 @@ async def gm_dream(req: Request):
 @router.post("/gm/diary")
 async def gm_diary(req: Request):
     return await _gm_scheduled(req, "diary")
+
+
+@router.post("/gm/image")
+async def gm_image(req: Request):
+    auth = _gm_auth(req)
+    if auth:
+        return auth
+    try:
+        form = await req.form()
+    except Exception:
+        return JSONResponse({"error": "invalid_form", "hint": "use multipart/form-data with field 'file'"}, status_code=400)
+    file = form.get("file") or form.get("image")
+    if file is None:
+        return JSONResponse({"error": "missing_file", "hint": "multipart field 'file' is required"}, status_code=400)
+    # starlette UploadFile duck-typing
+    filename = getattr(file, "filename", None) or "image"
+    content_type = (getattr(file, "content_type", None) or "").lower()
+    # Allow image/* ; fallback sniff by filename extension if content_type missing
+    is_image_ct = content_type.startswith("image/")
+    is_image_ext = filename.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".heif"))
+    if not is_image_ct and not is_image_ext:
+        return JSONResponse({"error": "not_an_image", "content_type": content_type, "filename": filename}, status_code=400)
+    try:
+        image_bytes: bytes = await file.read()  # type: ignore[union-attr]
+    except Exception:
+        return JSONResponse({"error": "read_failed"}, status_code=400)
+    if not image_bytes:
+        return JSONResponse({"error": "empty_file"}, status_code=400)
+    # Feishu image upload limit is 10 MB
+    if len(image_bytes) > 10 * 1024 * 1024:
+        return JSONResponse({"error": "file_too_large", "size": len(image_bytes), "limit": 10 * 1024 * 1024}, status_code=400)
+    pet_id_param = form.get("pet_id") or req.query_params.get("pet_id")
+    chat_id_param = form.get("chat_id") or req.query_params.get("chat_id")
+    # Form values may be UploadFile-adjacent strings; normalize to str
+    if pet_id_param is not None and not isinstance(pet_id_param, str):
+        pet_id_param = str(pet_id_param)
+    if chat_id_param is not None and not isinstance(chat_id_param, str):
+        chat_id_param = str(chat_id_param)
+    resolved = await _gm_resolve_pet(req, chat_id=chat_id_param or None, pet_id=pet_id_param or None)
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    pet_id, chat_id = resolved
+    container = _container(req)
+    image_key = await container.feishu.upload_image(image_bytes)
+    # image_bytes goes out of scope here — no disk write, no DB write
+    if not image_key:
+        return JSONResponse({"error": "feishu_upload_failed", "hint": "check im:resource:upload permission and re-publish app"}, status_code=502)
+    try:
+        message_id = await container.feishu.send_image(chat_id, image_key)
+    except RuntimeError as exc:
+        return JSONResponse({"error": "feishu_send_failed", "detail": str(exc)[:500]}, status_code=502)
+    return {"ok": True, "pet_id": pet_id, "chat_id": chat_id, "image_key": image_key, "message_id": message_id}
 
 
 @router.post("/gm/tick")

@@ -96,6 +96,15 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .msg .time { color: var(--muted); font-size: 12px; margin-left: 8px; }
   .scroll { max-height: 420px; overflow-y: auto; }
   .scroll.small { max-height: 220px; }
+  .image-drop {
+    border: 1.5px dashed var(--line); border-radius: 8px;
+    padding: 18px; text-align: center; color: var(--muted);
+    cursor: pointer; transition: border-color .2s, background .2s;
+  }
+  .image-drop.dragover { border-color: var(--accent); background: #7aa2f722; }
+  .image-preview { margin-top: 12px; text-align: center; }
+  .image-preview img { max-width: 100%; max-height: 260px; border-radius: 8px; border: 1px solid var(--line); }
+  .image-meta { margin-top: 6px; font-size: 12px; color: var(--muted); }
   .empty { color: var(--muted); padding: 12px 0; }
   #err { color: var(--bad); padding: 24px; }
   @media (max-width: 720px) { main { grid-template-columns: 1fr; } }
@@ -136,6 +145,24 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <button class="gm-btn secondary" data-act="tick">⏱ 跑一轮 tick</button>
     </div>
     <div class="gm-result" id="gmResult"></div>
+  </div>
+  <div class="panel span2">
+    <h2>🖼️ 发送图片 <span class="muted" style="font-weight:normal">— 粘贴或选择，不在服务器留存</span></h2>
+    <div class="image-drop" id="imageDrop" tabindex="0">
+      <div>点击此处按 <b>Ctrl+V</b> 粘贴截图，或拖拽/选择图片</div>
+      <div style="margin-top:6px;font-size:12px">支持 png / jpg / gif / webp，≤10MB</div>
+      <input type="file" id="imageFile" accept="image/*" style="display:none">
+    </div>
+    <div class="image-preview" id="imagePreview" style="display:none">
+      <img id="previewImg" alt="preview">
+      <div class="image-meta" id="previewMeta"></div>
+    </div>
+    <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button id="sendImageBtn" disabled>📤 发送到当前群</button>
+      <button class="secondary" id="clearImageBtn" style="display:none">清除</button>
+      <span class="muted" id="imageHint">目标：上方下拉选中的宠物所在群</span>
+    </div>
+    <div class="gm-result" id="imageResult"></div>
   </div>
   <div class="panel span2">
     <h2>当前需求</h2>
@@ -374,6 +401,79 @@ document.getElementById("vibeRandom").addEventListener("click", () => {
   if (currentPet == null) return;
   gmAction("/gm/state", { pet_id: Number(currentPet), recent_vibe: "random" }, "已重抽 vibe");
 });
+let pendingImageFile = null;
+function setImageFile(file) {
+  if (!file || !file.type || !file.type.startsWith("image/")) return;
+  if (file.size > 10 * 1024 * 1024) {
+    const r = document.getElementById("imageResult");
+    r.className = "gm-result bad"; r.textContent = "图片超过 10MB，请压缩后重试";
+    return;
+  }
+  pendingImageFile = file;
+  const url = URL.createObjectURL(file);
+  document.getElementById("previewImg").src = url;
+  document.getElementById("previewMeta").textContent = file.name + " · " + (file.size/1024).toFixed(1) + " KB · " + file.type;
+  document.getElementById("imagePreview").style.display = "block";
+  document.getElementById("clearImageBtn").style.display = "inline-block";
+  document.getElementById("sendImageBtn").disabled = !currentPet;
+  const r = document.getElementById("imageResult"); r.className = "gm-result"; r.textContent = "";
+}
+function clearImage() {
+  pendingImageFile = null;
+  document.getElementById("imageFile").value = "";
+  document.getElementById("imagePreview").style.display = "none";
+  document.getElementById("previewImg").removeAttribute("src");
+  document.getElementById("previewMeta").textContent = "";
+  document.getElementById("clearImageBtn").style.display = "none";
+  document.getElementById("sendImageBtn").disabled = true;
+  const r = document.getElementById("imageResult"); r.className = "gm-result"; r.textContent = "";
+}
+async function sendImage() {
+  if (!pendingImageFile || currentPet == null) return;
+  const btn = document.getElementById("sendImageBtn");
+  const res = document.getElementById("imageResult");
+  res.className = "gm-result"; res.textContent = "上传发送中…";
+  btn.disabled = true; setBusy(true);
+  try {
+    const fd = new FormData();
+    fd.append("file", pendingImageFile, pendingImageFile.name || "image.png");
+    fd.append("pet_id", String(currentPet));
+    const resp = await fetch(withToken("/gm/image"), { method: "POST", body: fd });
+    const j = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(j.error || ("HTTP " + resp.status));
+    res.className = "gm-result ok";
+    res.textContent = "已发送到群 ✓  image_key=" + (j.image_key||"") + " message_id=" + (j.message_id||"");
+    clearImage();
+  } catch (e) {
+    res.className = "gm-result bad";
+    res.textContent = "发送失败: " + e.message;
+    btn.disabled = false;
+  } finally {
+    setBusy(false);
+    if (pendingImageFile) document.getElementById("sendImageBtn").disabled = false;
+  }
+}
+document.getElementById("imageDrop").addEventListener("click", () => document.getElementById("imageFile").click());
+document.getElementById("imageDrop").addEventListener("dragover", e => { e.preventDefault(); e.currentTarget.classList.add("dragover"); });
+document.getElementById("imageDrop").addEventListener("dragleave", e => e.currentTarget.classList.remove("dragover"));
+document.getElementById("imageDrop").addEventListener("drop", e => {
+  e.preventDefault(); e.currentTarget.classList.remove("dragover");
+  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) setImageFile(f);
+});
+document.getElementById("imageDrop").addEventListener("paste", e => {
+  const items = (e.clipboardData && e.clipboardData.files) || [];
+  if (items.length) { const f = items[0]; if (f.type.startsWith("image/")) { e.preventDefault(); setImageFile(f); } }
+});
+document.addEventListener("paste", e => {
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
+  const files = e.clipboardData && e.clipboardData.files;
+  if (files && files.length) { const f = files[0]; if (f.type.startsWith("image/")) setImageFile(f); }
+});
+document.getElementById("imageFile").addEventListener("change", e => { const f = e.target.files && e.target.files[0]; if (f) setImageFile(f); });
+document.getElementById("sendImageBtn").addEventListener("click", sendImage);
+document.getElementById("clearImageBtn").addEventListener("click", clearImage);
 document.querySelectorAll(".gm-btn").forEach(btn => {
   btn.addEventListener("click", () => gmButton(btn.dataset.act));
 });

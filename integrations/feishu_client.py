@@ -64,7 +64,10 @@ class FeishuClient:
             if data.get("code") != 0:
                 raise RuntimeError(f"get tenant_access_token failed: {data}")
             token = data["tenant_access_token"]
-            expires_in = float(data.get("expire", 7000))
+            try:
+                expires_in = float(data.get("expire", 7000))
+            except (TypeError, ValueError):
+                expires_in = 7000.0
             await self.system_repo.set_sys_cache(
                 "tenant_access_token", token, expires_in - 60
             )
@@ -104,11 +107,11 @@ class FeishuClient:
             except Exception:
                 log.error("%s: non-JSON response (status=%s)", label, resp.status_code)
                 return None
-            if data.get("code") in self._TOKEN_EXPIRED_CODES and attempt == 0:
+            if isinstance(data, dict) and data.get("code") in self._TOKEN_EXPIRED_CODES and attempt == 0:
                 log.warning(
                     "%s: tenant token rejected (code=%s), refreshing and retrying",
                     label,
-                    data.get("code"),
+                    data.get("code") if isinstance(data, dict) else None,
                 )
                 await self.system_repo.delete_sys_cache("tenant_access_token")
                 continue
@@ -159,6 +162,28 @@ class FeishuClient:
             log.error("upload image failed: %s", data)
             return None
         return (data.get("data") or {}).get("image_key")
+
+    async def send_image(self, chat_id: str, image_key: str) -> str:
+        """发送独立图片消息（msg_type=image），内存直传不落盘。"""
+        data = await self._authed_request(
+            "POST",
+            f"{self.config.feishu_base}/im/v1/messages",
+            label="send image",
+            params={"receive_id_type": "chat_id"},
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            json={
+                "receive_id": chat_id,
+                "msg_type": "image",
+                "content": json.dumps({"image_key": image_key}, ensure_ascii=False),
+            },
+        )
+        if not data or data.get("code") != 0:
+            log.error("send image failed: %s", data)
+            raise RuntimeError(f"feishu send image failed: {data}")
+        message_id = str((data.get("data") or {}).get("message_id") or "")
+        if not message_id:
+            raise RuntimeError(f"feishu send image returned no message_id: {data}")
+        return message_id
 
     async def send_card(self, chat_id: str, card: dict) -> str:
         data = await self._authed_request(
