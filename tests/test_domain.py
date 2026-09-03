@@ -672,3 +672,46 @@ class ConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class MentionRenderTests(unittest.TestCase):
+    def test_clean_text_replaces_key_with_name(self):
+        from domain.pet import PetDomain
+        from services.reply_service import ReplyService
+        pet = PetDomain.__new__(PetDomain)
+        svc = ReplyService.__new__(ReplyService)
+        # key 在文本里 → 内联替换成 @名字
+        self.assertEqual(
+            pet.clean_text("@_user_1 你是谁", [{"key": "@_user_1", "name": "二极管"}]),
+            "@二极管 你是谁",
+        )
+        # 文本已是 @名字 → 不动
+        self.assertEqual(
+            pet.clean_text("@小苍蝇 回答我", [{"key": "@_user_1", "name": "小苍蝇"}]),
+            "@小苍蝇 回答我",
+        )
+        # 无名/无 key → 原样保留，不删信息
+        self.assertEqual(
+            pet.clean_text("@_user_1 hi", [{"key": "@_user_1"}]),
+            "@_user_1 hi",
+        )
+        # key 不在文本里 → clean_text 不动，由后缀补全
+        text = pet.clean_text("我是罕见", [{"key": "@_user_2", "name": "两面派"}])
+        self.assertEqual(
+            svc._append_missing_mentions(
+                text,
+                [{"key": "@_user_2", "name": "两面派", "id": {"open_id": "ou_other"}}],
+                "ou_me",
+            ),
+            "我是罕见 @两面派",
+        )
+        # 文本已含 @名 → 不重复补；发送者自己 → 跳过
+        self.assertEqual(
+            svc._append_missing_mentions("@二极管 你是谁", [{"name": "二极管"}], "ou_me"),
+            "@二极管 你是谁",
+        )
+        self.assertEqual(
+            svc._append_missing_mentions(
+                "hello", [{"name": "我", "id": {"open_id": "ou_me"}}], "ou_me"
+            ),
+            "hello",
+        )

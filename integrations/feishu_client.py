@@ -150,6 +150,53 @@ class FeishuClient:
             log.error("send failed: %s", data)
             raise RuntimeError(f"feishu send failed: {data}")
 
+    # token 失效/缺 scope 的业务码：命中则清缓存换新 token 重试一次。
+    # 99991672 = 应用缺 scope（发版后旧 token 无新权限，换新即好）。
+    _TOKEN_REFRESH_CODES = frozenset({99991661, 99991663, 99991668, 99991672})
+
+    async def download_image(self, message_id: str, image_key: str) -> bytes | None:
+        """把图片消息的二进制下到内存（不落盘）。
+
+        拿不到 / 超限 / 非图片流都安静返回 None，调用方按「读图失败」继续走文本链路。
+        """
+        if not message_id or not image_key:
+            return None
+        for attempt in range(2):
+            token = await self.get_tenant_access_token()
+            resp = await self.http.get(
+                f"{self.config.feishu_base}/im/v1/messages/{message_id}/resources/{image_key}",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"type": "image"},
+            )
+            if resp.status_code in (401, 403):
+                await self.system_repo.delete_sys_cache("tenant_access_token")
+                if attempt == 0:
+                    continue
+            if resp.status_code != 200:
+                if (
+                    resp.headers.get("content-type", "").startswith("application/json")
+                    and attempt == 0
+                ):
+                    try:
+                        body_code = resp.json().get("code")
+                    except Exception:
+                        body_code = None
+                    if body_code in self._TOKEN_REFRESH_CODES:
+                        await self.system_repo.delete_sys_cache("tenant_access_token")
+                        continue
+                log.warning(
+                    "download image failed: status=%s body=%r",
+                    resp.status_code,
+                    resp.text[:200],
+                )
+                return None
+            data = resp.content
+            if not data or len(data) > 20 * 1024 * 1024:
+                log.warning("download image rejected: empty or oversize (%d bytes)", len(data or b""))
+                return None
+            return data
+        return None
+
     async def upload_image(self, image_bytes: bytes) -> str | None:
         data = await self._authed_request(
             "POST",

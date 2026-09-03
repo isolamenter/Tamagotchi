@@ -105,6 +105,8 @@ async def gm_help(req: Request):
             "GET /gm/cards": "list memory cards; query: chat_id or pet_id, limit?",
             "GET /gm/messages": "list recent messages; query: chat_id or pet_id, limit?",
             "POST /gm/image": "send image (memory-only, no save); multipart form: file=<image> + chat_id|pet_id; query ?token=...",
+            "POST /gm/text": "send text; json: {chat_id|pet_id, text}",
+
             "GET /web": "html dashboard; open /web?token=... (supports paste/file image send)",
         },
     }
@@ -252,6 +254,13 @@ async def gm_need(req: Request):
     kind = (body.get("kind") or req.query_params.get("kind") or "").strip()
     if kind and kind not in NEED_SPECS:
         return JSONResponse({"error": "unknown_need_kind", "kind": kind}, status_code=400)
+    severity = 1
+    if kind:
+        raw_sev = body.get("severity", 1) or 1
+        try:
+            severity = int(raw_sev)
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "invalid_severity", "severity": raw_sev}, status_code=400)
 
     created = None
 
@@ -261,9 +270,7 @@ async def gm_need(req: Request):
             state["active_need"] = {}
             return state
         if kind:
-            created = container.gameplay_domain.build_need(
-                kind, int(body.get("severity", 1) or 1), now
-            )
+            created = container.gameplay_domain.build_need(kind, severity, now)
             state["active_need"] = created
             return state
         state, created = container.gameplay_domain.maybe_create_need(state, now, pet_id)
@@ -342,24 +349,41 @@ async def gm_set_state(req: Request):
         return resolved
     pet_id, chat_id = resolved
 
-    set_values = body.get("set") if isinstance(body.get("set"), dict) else {}
-    delta_values = body.get("delta") if isinstance(body.get("delta"), dict) else {}
+    set_values = body.get("set")
+    set_values = set_values if isinstance(set_values, dict) else {}
+    delta_values = body.get("delta")
+    delta_values = delta_values if isinstance(delta_values, dict) else {}
     for key in container.config.state_numeric_keys:
-        if key in req.query_params:
-            set_values[key] = req.query_params[key]
+        qv = req.query_params.get(key)
+        if qv is not None:
+            set_values[key] = qv
     rv_payload = set_values.get("recent_vibe")
     if rv_payload is None:
         rv_payload = body.get("recent_vibe")
 
     changed: dict = {}
 
+    set_floats: dict[str, float] = {}
+    delta_floats: dict[str, float] = {}
+    for key in container.config.state_numeric_keys:
+        if key in set_values:
+            try:
+                set_floats[key] = float(set_values[key])
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "invalid_numeric", "key": key, "value": set_values[key]}, status_code=400)
+        if key in delta_values:
+            try:
+                delta_floats[key] = float(delta_values[key])
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "invalid_numeric", "key": key, "value": delta_values[key]}, status_code=400)
+
     def _mutator(state: dict) -> dict:
         for key in container.config.state_numeric_keys:
-            if key in set_values:
-                state[key] = max(0.0, min(100.0, float(set_values[key])))
+            if key in set_floats:
+                state[key] = max(0.0, min(100.0, set_floats[key]))
                 changed[key] = state[key]
-            if key in delta_values:
-                state[key] = max(0.0, min(100.0, float(state[key]) + float(delta_values[key])))
+            if key in delta_floats:
+                state[key] = max(0.0, min(100.0, state[key] + delta_floats[key]))
                 changed[key] = state[key]
         if rv_payload is not None:
             rv = str(rv_payload).strip()
@@ -513,6 +537,29 @@ async def gm_image(req: Request):
     except RuntimeError as exc:
         return JSONResponse({"error": "feishu_send_failed", "detail": str(exc)[:500]}, status_code=502)
     return {"ok": True, "pet_id": pet_id, "chat_id": chat_id, "image_key": image_key, "message_id": message_id}
+
+
+@router.post("/gm/text")
+async def gm_text(req: Request):
+    auth = _gm_auth(req)
+    if auth:
+        return auth
+    data = await _gm_body(req)
+    text = (data.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"error": "empty_text"}, status_code=400)
+    resolved = await _gm_resolve_pet(
+        req, chat_id=data.get("chat_id") or None, pet_id=data.get("pet_id") or None
+    )
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    pet_id, chat_id = resolved
+    container = _container(req)
+    try:
+        await container.feishu.send_text(chat_id, text)
+    except RuntimeError as exc:
+        return JSONResponse({"error": "feishu_send_failed", "detail": str(exc)[:500]}, status_code=502)
+    return {"ok": True, "pet_id": pet_id, "chat_id": chat_id}
 
 
 @router.post("/gm/tick")

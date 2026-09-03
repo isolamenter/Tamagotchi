@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import typing
 import unittest
 from types import SimpleNamespace
 
@@ -53,8 +54,8 @@ class EmbeddingBatchTests(unittest.IsolatedAsyncioTestCase):
 
         llm = LLMClient.__new__(LLMClient)
         llm.provider = "openai"
-        llm.config = SimpleNamespace(embed_model="embed-test")
-        llm.client = SimpleNamespace(embeddings=Embeddings())
+        llm.config = typing.cast(typing.Any, SimpleNamespace(embed_model="embed-test"))
+        llm.client = typing.cast(typing.Any, SimpleNamespace(embeddings=Embeddings()))
         vectors = await llm.embed_texts(["first", "second"])
         self.assertEqual(vectors, [[1.0, 0.0], [0.0, 1.0]])
         self.assertEqual(calls[0]["input"], ["first", "second"])
@@ -85,7 +86,7 @@ class EmbeddingBatchTests(unittest.IsolatedAsyncioTestCase):
 
         llm = LLMClient.__new__(LLMClient)
         llm.provider = "gemini"
-        llm.config = SimpleNamespace(embed_model="gemini-embedding-001")
+        llm.config = typing.cast(typing.Any, SimpleNamespace(embed_model="gemini-embedding-001"))
         llm._types = SimpleNamespace(EmbedContentConfig=EmbedContentConfig)
         llm._genai = SimpleNamespace(aio=SimpleNamespace(models=Models()))
         vectors = await llm.embed_texts(
@@ -98,16 +99,56 @@ class EmbeddingBatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_and_count_mismatch_fail_closed(self):
         llm = LLMClient.__new__(LLMClient)
         llm.provider = "openai"
-        llm.config = SimpleNamespace(embed_model="embed-test")
+        llm.config = typing.cast(typing.Any, SimpleNamespace(embed_model="embed-test"))
 
         class Embeddings:
             async def create(self, **_kwargs):
                 return SimpleNamespace(data=[])
 
-        llm.client = SimpleNamespace(embeddings=Embeddings())
+        llm.client = typing.cast(typing.Any, SimpleNamespace(embeddings=Embeddings()))
         self.assertEqual(await llm.embed_texts([]), [])
         self.assertIsNone(await llm.embed_texts(["valid", ""]))
         self.assertIsNone(await llm.embed_texts(["valid"]))
+
+
+class DescribeImageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_openai_sends_data_url_and_returns_caption(self):
+        seen = {}
+
+        class Completions:
+            async def create(self, **kwargs):
+                seen.update(kwargs)
+                from types import SimpleNamespace
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content=" 一只猫 "))])
+
+        class Chat:
+            completions = Completions()
+
+        llm = LLMClient.__new__(LLMClient)
+        llm.provider = "openai"
+        llm.config = typing.cast(typing.Any, SimpleNamespace(model_name="m"))
+        llm.client = typing.cast(typing.Any, SimpleNamespace(chat=Chat()))
+        caption = await llm.describe_image(b"\x89PNG\r\n\x1a\nxxx")
+        self.assertEqual(caption, "一只猫")
+        parts = seen["messages"][0]["content"]
+        img = next(p for p in parts if p["type"] == "image_url")
+        self.assertTrue(img["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    async def test_openai_failure_returns_none(self):
+        class Completions:
+            async def create(self, **kwargs):
+                raise RuntimeError("boom")
+
+        class Chat:
+            completions = Completions()
+
+        llm = LLMClient.__new__(LLMClient)
+        llm.provider = "openai"
+        llm.config = typing.cast(typing.Any, SimpleNamespace(model_name="m"))
+        llm.client = typing.cast(typing.Any, SimpleNamespace(chat=Chat()))
+        self.assertIsNone(await llm.describe_image(b"\xff\xd8fake"))
+        self.assertIsNone(await llm.describe_image(b""))
 
 
 if __name__ == "__main__":

@@ -147,6 +147,14 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="gm-result" id="gmResult"></div>
   </div>
   <div class="panel span2">
+    <h2>📝 发送文字</h2>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <input type="text" id="sendTextInput" placeholder="要发到当前群的内容" style="flex:1;min-width:200px">
+      <button id="sendTextBtn">📤 发送到当前群</button>
+    </div>
+    <div class="gm-result" id="textResult"></div>
+  </div>
+  <div class="panel span2">
     <h2>🖼️ 发送图片 <span class="muted" style="font-weight:normal">— 粘贴或选择，不在服务器留存</span></h2>
     <div class="image-drop" id="imageDrop" tabindex="0">
       <div>点击此处按 <b>Ctrl+V</b> 粘贴截图，或拖拽/选择图片</div>
@@ -402,6 +410,22 @@ document.getElementById("vibeRandom").addEventListener("click", () => {
   gmAction("/gm/state", { pet_id: Number(currentPet), recent_vibe: "random" }, "已重抽 vibe");
 });
 let pendingImageFile = null;
+document.getElementById("sendTextBtn").addEventListener("click", async () => {
+  const inp = document.getElementById("sendTextInput");
+  const t = inp.value.trim();
+  if (!t || currentPet == null) return;
+  const res = document.getElementById("textResult");
+  res.className = "gm-result"; res.textContent = "发送中…"; setBusy(true);
+  try {
+    const j = await apiPost("/gm/text", { pet_id: Number(currentPet), text: t });
+    res.className = "gm-result ok"; res.textContent = "已发送到群 ✓";
+    inp.value = ""; await refresh();
+  } catch (e) {
+    res.className = "gm-result bad"; res.textContent = "发送失败: " + e.message;
+  } finally {
+    setBusy(false);
+  }
+});
 function setImageFile(file) {
   if (!file || !file.type || !file.type.startsWith("image/")) return;
   if (file.size > 10 * 1024 * 1024) {

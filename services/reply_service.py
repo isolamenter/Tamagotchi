@@ -272,6 +272,128 @@ class ReplyService:
             current["active_need"] = {**need, "announced_card_id": card_id}
             await self.pet_repo.update_pet_state(pet_id, current)
 
+    async def _caption_image_key(self, message_id: str, image_key: str) -> str | None:
+        """下载图片 → vision 一句话描述 → 字节即弃。任一步失败返回 None。"""
+        image_key = (image_key or "").strip()
+        if not message_id or not image_key:
+            return None
+        try:
+            image_bytes = await self.feishu.download_image(message_id, image_key)
+        except Exception:
+            log.exception("download image failed")
+            return None
+        if not image_bytes:
+            return None
+        return await self.llm.describe_image(image_bytes)
+
+    async def _caption_image(self, message_id: str, msg: dict) -> str | None:
+        """单图消息的 caption：从 content 取 image_key。任一步失败返回 None。"""
+        try:
+            content = json.loads(msg.get("content") or "{}")
+        except json.JSONDecodeError:
+            return None
+        return await self._caption_image_key(message_id, content.get("image_key") or "")
+
+    async def _parse_post(self, message_id: str, msg: dict) -> str | None:
+        """富文本抽文本 + 内嵌图走同一套 caption。空返回 None。"""
+        try:
+            content = json.loads(msg.get("content") or "{}")
+        except json.JSONDecodeError:
+            return None
+        paragraphs = content.get("content") or []
+        if not isinstance(paragraphs, list):
+            return None
+        parts: list[str] = []
+        title = (content.get("title") or "").strip()
+        if title:
+            parts.append(title)
+        for para in paragraphs:
+            if not isinstance(para, list):
+                continue
+            for el in para:
+                if not isinstance(el, dict):
+                    continue
+                tag = el.get("tag")
+                if tag in ("text", "a"):
+                    parts.append(el.get("text") or "")
+                elif tag == "at":
+                    name = (el.get("user_name") or el.get("text") or "").strip()
+                    if name:
+                        parts.append("@" + name)
+                elif tag == "img":
+                    caption = await self._caption_image_key(
+                        message_id, el.get("image_key") or ""
+                    )
+                    parts.append(
+                        f"【发了一张图：{caption}】" if caption
+                        else "【发了一张图，但没看清】"
+                    )
+        text = re.sub(r"\s+", " ", " ".join(parts)).strip()
+        return text or None
+
+    async def _mentions_with_names(self, mentions: list[dict]) -> list[dict]:
+        """mentions 缺 name 时用 open_id 回填缓存名，保证 @目标不丢。"""
+        enriched: list[dict] = []
+        for mention in mentions or []:
+            if not isinstance(mention, dict):
+                continue
+            mention = dict(mention)
+            if not (mention.get("name") or "").strip():
+                open_id = ((mention.get("id") or {}).get("open_id") or "").strip()
+                if open_id:
+                    try:
+                        name = await self.resolve_user_name(open_id)
+                    except Exception:
+                        name = ""
+                    if name:
+                        mention["name"] = name
+            enriched.append(mention)
+        return enriched
+
+    def _append_missing_mentions(
+        self, user_text: str, mentions: list[dict], sender_open_id: str
+    ) -> str:
+        """mentions 里出现、文本里没有的名字，补成后缀 @X @Y。
+
+        飞书只回传 name 不保证文本带占位符时用；跳过发送者自己。
+        """
+        missing = []
+        for mention in mentions or []:
+            if not isinstance(mention, dict):
+                continue
+            name = (mention.get("name") or "").strip()
+            if not name or f"@{name}" in user_text:
+                continue
+            open_id = ((mention.get("id") or {}).get("open_id") or "").strip()
+            if open_id and open_id == sender_open_id:
+                continue
+            missing.append("@" + name)
+        if missing:
+            user_text = (user_text + " " + " ".join(missing)).strip()
+        return user_text
+
+    async def _buffer_observer_text(
+        self, pet_id: int, text: str, sender_name: str, sender_open_id: str
+    ) -> None:
+        buf = self.runtime.observer_buffer.setdefault(pet_id, [])
+        buf.append(
+            {
+                "content": text,
+                "sender_name": sender_name,
+                "open_id": sender_open_id,
+                "ts": time.time(),
+            }
+        )
+        log.info(
+            "pet %d buffered observer [%s]: %r (buffer=%d)",
+            pet_id,
+            sender_name,
+            text[:80],
+            len(buf),
+        )
+        if len(buf) >= self.config.observer_flush_max_count:
+            await self.observer_service.flush_observer_buffer(pet_id)
+
     async def handle_message_event(self, event: dict) -> None:
         msg = event.get("message") or {}
         message_id = msg.get("message_id")
@@ -291,52 +413,58 @@ class ReplyService:
         is_direct = await self.is_direct_to_bot(chat_type, mentions)
         msg_type = msg.get("message_type")
 
-        if not is_direct:
-            if msg_type != "text":
+        if msg_type == "image":
+            caption = await self._caption_image(message_id, msg)
+            # 看完即弃：字节已在 _caption_image 内释放，这里只留一句话。
+            user_text = (
+                f"【发了一张图：{caption}】" if caption
+                else "【发了一张图，但没看清】"
+            )
+        elif msg_type == "post":
+            text = await self._parse_post(message_id, msg)
+            if not text:
+                if is_direct:
+                    log.info("ignoring empty post message (direct, sent non_text fallback)")
+                    await self._send_response(chat_type, chat_id, message_id, self.config.fallback_replies["non_text"])
+                else:
+                    log.info("ignoring empty post message (observer-only, no @)")
                 return
+            mentions = await self._mentions_with_names(mentions)
+            user_text = self.pet_domain.clean_text(text, mentions)
+            user_text = self._append_missing_mentions(user_text, mentions, sender_open_id)
+            if not user_text:
+                if is_direct:
+                    await self._send_response(chat_type, chat_id, message_id, self.config.fallback_replies["empty_text"])
+                return
+        elif msg_type == "text":
             try:
                 content = json.loads(msg.get("content") or "{}")
             except json.JSONDecodeError:
+                if is_direct:
+                    log.warning("bad content json: %r", msg.get("content"))
                 return
-            text = self.pet_domain.clean_text(content.get("text", ""), mentions)
-            if not text:
+            mentions = await self._mentions_with_names(mentions)
+            user_text = self.pet_domain.clean_text(content.get("text", ""), mentions)
+            user_text = self._append_missing_mentions(user_text, mentions, sender_open_id)
+            if not user_text:
+                if is_direct:
+                    await self._send_response(chat_type, chat_id, message_id, self.config.fallback_replies["empty_text"])
                 return
+        elif is_direct:
+            log.info("ignoring msg_type=%r (direct, sent non_text fallback)", msg_type)
+            await self._send_response(chat_type, chat_id, message_id, self.config.fallback_replies["non_text"])
+            return
+        else:
+            log.info("ignoring msg_type=%r (observer-only, no @)", msg_type)
+            return
+
+        if not is_direct:
             pet_id = await self.pet_repo.find_pet(chat_id)
             if pet_id is None:
                 return
-            buf = self.runtime.observer_buffer.setdefault(pet_id, [])
-            buf.append(
-                {
-                    "content": text,
-                    "sender_name": sender_name,
-                    "open_id": sender_open_id,
-                    "ts": time.time(),
-                }
+            await self._buffer_observer_text(
+                pet_id, user_text, sender_name, sender_open_id
             )
-            log.info(
-                "pet %d buffered observer [%s]: %r (buffer=%d)",
-                pet_id,
-                sender_name,
-                text[:80],
-                len(buf),
-            )
-            if len(buf) >= self.config.observer_flush_max_count:
-                await self.observer_service.flush_observer_buffer(pet_id)
-            return
-
-        if msg_type != "text":
-            await self._send_response(chat_type, chat_id, message_id, self.config.fallback_replies["non_text"])
-            return
-
-        try:
-            content = json.loads(msg.get("content") or "{}")
-        except json.JSONDecodeError:
-            log.warning("bad content json: %r", msg.get("content"))
-            return
-
-        user_text = self.pet_domain.clean_text(content.get("text", ""), mentions)
-        if not user_text:
-            await self._send_response(chat_type, chat_id, message_id, self.config.fallback_replies["empty_text"])
             return
 
         pet_id = await self.pet_repo.get_or_create_pet(chat_id)
@@ -366,7 +494,10 @@ class ReplyService:
 
         if self.config.reply_min_interval_sec > 0:
             now = time.time()
-            db_ts = float((await self.pet_repo.load_pet_state(pet_id)).get("last_reply_ts", 0.0))
+            try:
+                db_ts = float((await self.pet_repo.load_pet_state(pet_id)).get("last_reply_ts", 0.0))
+            except (TypeError, ValueError):
+                db_ts = 0.0
             last_reply_ts = max(db_ts, self.runtime.reply_gate.get(pet_id, 0.0))
             elapsed = now - last_reply_ts
             if elapsed < self.config.reply_min_interval_sec:

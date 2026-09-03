@@ -53,8 +53,14 @@ class PetDomain:
         return messages
 
     def clean_text(self, raw: str, mentions: list[dict]) -> str:
+        # 只做 key→@name 的内联替换，不删任何东西；key 不在文本里（某些客户端
+        # 只发 mentions 不插占位符）时不动手，由 reply_service 统一补 @后缀。
+        # ponytail: mentions 为空/无名/新类型时原样保留，削除信息比保留更糟。
         for mention in mentions or []:
-            key = mention.get("key")
-            if key:
-                raw = raw.replace(key, "")
+            if not isinstance(mention, dict):
+                continue
+            key = mention.get("key") or ""
+            name = (mention.get("name") or "").strip()
+            if key and name and key in raw:
+                raw = raw.replace(key, f"@{name} ")
         return re.sub(r"\s+", " ", raw).strip()

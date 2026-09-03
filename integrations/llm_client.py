@@ -191,6 +191,69 @@ class LLMClient:
         )
         return (resp.text or "").strip()
 
+    # 图片描述（读图）上限：caption 是给主对话看的摘要，不是正文，短而够用。
+    caption_max_tokens = 150
+    caption_temperature = 0.3
+
+    async def describe_image(
+        self, image_bytes: bytes, *, mime_type: str = "image/jpeg"
+    ) -> str | None:
+        """看图并用一句话描述内容（中文，≤100字）。
+
+        复用 CHAT_MODEL（两边后端的主力 chat 模型都有 vision），失败安静返回 None。
+        字节只在内存里过一遍，不落盘。
+        """
+        if not image_bytes:
+            return None
+        if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+            mime_type = "image/png"
+        elif image_bytes[:6] in (b"GIF87a", b"GIF89a"):
+            mime_type = "image/gif"
+        prompt = "用中文一句话描述这张图片的内容（≤100字），只说看到了什么，不发挥。"
+        try:
+            if self.provider == "gemini":
+                assert self._genai is not None
+                assert self._types is not None
+                resp = await self._genai.aio.models.generate_content(
+                    model=self.config.model_name,
+                    contents=[
+                        self._types.Part.from_bytes(
+                            data=image_bytes, mime_type=mime_type
+                        ),
+                        prompt,
+                    ],
+                    config=self._types.GenerateContentConfig(
+                        temperature=self.caption_temperature,
+                        max_output_tokens=self.caption_max_tokens,
+                    ),
+                )
+                return (resp.text or "").strip() or None
+            assert self.client is not None
+            b64 = base64.b64encode(image_bytes).decode("ascii")
+            resp = await self.client.chat.completions.create(
+                model=self.config.model_name,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{b64}"
+                                },
+                            },
+                        ],
+                    }
+                ],
+                max_tokens=self.caption_max_tokens,
+                temperature=self.caption_temperature,
+            )
+            return (resp.choices[0].message.content or "").strip() or None
+        except Exception:
+            log.exception("image caption failed")
+            return None
+
     async def generate_image(self, prompt: str) -> bytes | None:
         """生成梦境插图字节。
 
@@ -206,6 +269,7 @@ class LLMClient:
             return None
         if self.provider == "gemini":
             return await self._gemini_image(prompt)
+        assert self.client is not None
         try:
             resp = await self.client.images.generate(
                 model=self.config.image_model,
@@ -229,6 +293,8 @@ class LLMClient:
 
     async def _gemini_image(self, prompt: str) -> bytes | None:
         try:
+            assert self._genai is not None
+            assert self._types is not None
             resp = await self._genai.aio.models.generate_content(
                 model=self.config.image_model,
                 contents=prompt,
