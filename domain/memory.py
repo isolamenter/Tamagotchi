@@ -24,22 +24,28 @@ class MemoryDomain:
         if not cards:
             return ""
         sorted_cards = sorted(cards, key=lambda card: card.get("id", 0))
-        lines = [
-            self.config.recall_card_template.format(
-                when=(card.get("when") or "某时"),
-                who=(card.get("who") or "群里"),
-                what=(card.get("what") or "").strip(),
-                vibe=(card.get("vibe") or "").strip(),
-            )
-            for card in sorted_cards
-        ]
+        lines = []
+        for card in sorted_cards:
+            kind_str = card.get("kind") or "事实"
+            # Format according to recall_card_template: "- [{kind}] {when}｜{who}｜{what}（{vibe}）"
+            # If kind isn't in template, safely fall back
+            try:
+                line = self.config.recall_card_template.format(
+                    kind=kind_str,
+                    when=(card.get("when") or "某时"),
+                    who=(card.get("who") or "群里"),
+                    what=(card.get("what") or "").strip(),
+                    vibe=(card.get("vibe") or "").strip(),
+                )
+            except KeyError:
+                line = f"- [{kind_str}] {card.get('when', '某时')}｜{card.get('who', '群里')}｜{(card.get('what') or '').strip()}（{(card.get('vibe') or '').strip()}）"
+            lines.append(line)
         return self.config.recall_header + "\n".join(lines)
 
     def format_card_for_embed(self, card: dict) -> str:
         parts = []
-        for key in ("when", "who", "what", "vibe", "hooks"):
+        for key in ("kind", "when", "who", "what", "vibe", "hooks"):
             value = (card.get(key) or "").strip()
             if value:
                 parts.append(value)
         return " | ".join(parts)
-

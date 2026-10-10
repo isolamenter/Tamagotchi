@@ -311,5 +311,75 @@ class ImageRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, ["看到啦"])
 
 
+class ProactiveEvaluationTests(unittest.IsolatedAsyncioTestCase):
+    def _ret(self, value):
+        async def _inner(*a, **k):
+            return value
+        return _inner()
+
+    async def test_skips_when_not_enough_human_messages(self):
+        from services.autonomous_service import AutonomousService
+        from types import SimpleNamespace
+        service = AutonomousService.__new__(AutonomousService)
+        service.config = SimpleNamespace(proactive_min_new_msgs=3)
+        service.message_repo = SimpleNamespace(
+            recent_messages=lambda pet, limit: self._ret([
+                {"role": "assistant", "content": "bot reply"},
+                {"role": "user", "content": "hello 1"},
+            ])
+        )
+        res = await service.evaluate_proactive_speaking(1, {})
+        self.assertIsNone(res)
+
+    async def test_returns_reason_and_topic_when_worth_speaking(self):
+        from services.autonomous_service import AutonomousService
+        from types import SimpleNamespace
+        service = AutonomousService.__new__(AutonomousService)
+        service.config = SimpleNamespace(
+            proactive_min_new_msgs=2,
+            proactive_eval_prompt="eval_prompt",
+        )
+        service.message_repo = SimpleNamespace(
+            recent_messages=lambda pet, limit: self._ret([
+                {"role": "user", "content": "大家觉得这个架构怎么样", "ts": 100},
+                {"role": "user", "content": "感觉有点过度设计", "ts": 101},
+            ])
+        )
+        service.llm = SimpleNamespace(
+            chat_json=lambda msgs, **k: self._ret(
+                json.dumps({"should_speak": True, "reason": "架构讨论值得吐槽", "topic": "架构设计"})
+            )
+        )
+        res = await service.evaluate_proactive_speaking(1, {})
+        self.assertEqual(res, ("架构讨论值得吐槽", "架构设计"))
+
+    async def test_suppresses_same_unanswered_topic(self):
+        from services.autonomous_service import AutonomousService
+        from types import SimpleNamespace
+        service = AutonomousService.__new__(AutonomousService)
+        service.config = SimpleNamespace(
+            proactive_min_new_msgs=2,
+            proactive_eval_prompt="eval_prompt",
+        )
+        service.message_repo = SimpleNamespace(
+            recent_messages=lambda pet, limit: self._ret([
+                {"role": "user", "content": "msg 1", "ts": 100},
+                {"role": "user", "content": "msg 2", "ts": 101},
+            ])
+        )
+        service.llm = SimpleNamespace(
+            chat_json=lambda msgs, **k: self._ret(
+                json.dumps({"should_speak": True, "reason": "继续问", "topic": "旧话题"})
+            )
+        )
+        state = {
+            "last_proactive_ts": 50,
+            "last_proactive_answered": False,
+            "last_proactive_topic": "旧话题",
+        }
+        res = await service.evaluate_proactive_speaking(1, state)
+        self.assertIsNone(res)
+
+
 if __name__ == "__main__":
     unittest.main()

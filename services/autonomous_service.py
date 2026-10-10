@@ -3,12 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import random
 import time
 
 from config import AppConfig
 from domain.card import CardDomain
-from domain.gameplay import GameplayDomain
 from domain.pet import PetDomain
 from domain.state import StateDomain
 from integrations.feishu_client import FeishuClient
@@ -16,7 +14,6 @@ from integrations.llm_client import LLMClient
 from repositories.message_repo import MessageRepository
 from repositories.pet_repo import PetRepository
 from repositories.system_repo import SystemRepository
-from services.gameplay_service import GameplayService
 from services.card_service import CardService
 from services.memory_service import MemoryService
 from services.observer_service import ObserverService
@@ -30,13 +27,11 @@ class AutonomousService:
         self,
         config: AppConfig,
         state_domain: StateDomain,
-        gameplay_domain: GameplayDomain,
         card_domain: CardDomain,
         pet_domain: PetDomain,
         pet_repo: PetRepository,
         message_repo: MessageRepository,
         system_repo: SystemRepository,
-        gameplay_service: GameplayService,
         memory_service: MemoryService,
         observer_service: ObserverService,
         feishu: FeishuClient,
@@ -46,50 +41,17 @@ class AutonomousService:
     ):
         self.config = config
         self.state_domain = state_domain
-        self.gameplay_domain = gameplay_domain
         self.card_domain = card_domain
         self.pet_domain = pet_domain
         self.pet_repo = pet_repo
         self.message_repo = message_repo
         self.system_repo = system_repo
-        self.gameplay_service = gameplay_service
         self.card_service = card_service
         self.style_service = style_service
         self.memory_service = memory_service
         self.observer_service = observer_service
         self.feishu = feishu
         self.llm = llm
-
-    def should_tick_speak(
-        self, state: dict, last_active_ts: float, now: float
-    ) -> str | None:
-        if self.state_domain.in_quiet_hours(now):
-            return None
-        if now - last_active_ts < self.config.proactive_cooldown_sec:
-            return None
-        if state["satiety"] <= self.config.satiety_trigger:
-            return self.config.proactive_trigger_templates["satiety"].format(
-                satiety=round(state["satiety"])
-            )
-        if state["mood"] <= self.config.mood_trigger:
-            return self.config.proactive_trigger_templates["mood"].format(
-                mood=round(state["mood"])
-            )
-        if state["energy"] <= self.config.energy_trigger:
-            return self.config.proactive_trigger_templates["energy"].format(
-                energy=round(state["energy"])
-            )
-        if state["curiosity"] <= self.config.curiosity_trigger:
-            return self.config.proactive_trigger_templates["curiosity"].format(
-                curiosity=round(state["curiosity"])
-            )
-        if state["affection"] <= self.config.affection_trigger:
-            return self.config.proactive_trigger_templates["affection"].format(
-                affection=round(state["affection"])
-            )
-        if random.random() < self.config.spontaneous_prob:
-            return self.config.proactive_trigger_templates["spontaneous"]
-        return None
 
     def scheduled_event_due(self, state: dict, now: float) -> tuple[dict, str] | None:
         if self.state_domain.is_weekend_rest(now):
@@ -118,11 +80,10 @@ class AutonomousService:
         set_last_proactive: bool = False,
         extra_state: dict | None = None,
         as_card: bool = False,
-        card_actions: list[str] | None = None,
         gen_image: bool = False,
         style_query: str = "",
     ) -> tuple[str, dict] | None:
-        history, current_state = await self.pet_repo.load_pet_context(pet_id)
+        history, _current_state = await self.pet_repo.load_pet_context(pet_id)
 
         recall_block = await self.memory_service.build_recall_block(
             pet_id, query="", k_recent=5
@@ -139,9 +100,7 @@ class AutonomousService:
         )
 
         pre = (
-            self.state_domain.render_state(current_state)
-            + "\n"
-            + self.config.json_output_prompt
+            self.config.json_output_prompt
             + "\n"
             + style_block
             + "\n"
@@ -173,7 +132,6 @@ class AutonomousService:
         now = time.time()
 
         def _mutator(state: dict) -> dict:
-            # 主动文本只读 state；卡片按钮才允许修改五维玩法状态。
             out = dict(state)
             out["last_update_ts"] = now
             if set_last_proactive:
@@ -182,9 +140,6 @@ class AutonomousService:
                 out.update(extra_state)
             return out
 
-        # 卡片用展示快照渲染；权威值在发送成功后经 mutate_state 落库（保持「先发后写」）。
-        display_state = _mutator(dict(current_state))
-
         img_key: str | None = None
         if gen_image and self.config.image_model:
             try:
@@ -192,19 +147,13 @@ class AutonomousService:
                 if image_bytes:
                     img_key = await self.feishu.upload_image(image_bytes)
             except Exception:
-                log.exception("dream image pipeline failed for pet %d", pet_id)
+                log.exception("image generation failed for pet %d", pet_id)
 
-        if as_card and self.config.card_enabled:
-            mode = "scheduled" if card_actions is not None else "free"
-            if self.card_service is None:
-                raise RuntimeError("card service is required for autonomous cards")
+        if as_card and self.config.card_enabled and self.card_service is not None:
             await self.card_service.send_persistent_card(
                 pet_id,
                 chat_id,
                 reply,
-                display_state,
-                mode=mode,
-                action_keys=card_actions,
                 img_key=img_key,
             )
         else:
@@ -214,61 +163,82 @@ class AutonomousService:
         new_state = await self.pet_repo.mutate_state(pet_id, _mutator)
 
         log.info(
-            "pet %d %s: reply=%r state=%s",
+            "pet %d %s: reply=%r",
             pet_id,
             log_label,
             reply[:100],
-            {key: round(new_state.get(key, 0)) for key in self.config.state_numeric_keys},
         )
         return reply, new_state
 
+    async def evaluate_proactive_speaking(
+        self, pet_id: int, state: dict
+    ) -> tuple[str, str] | None:
+        """评估最近新的人类消息是否值得主动开口。返回 (trigger_reason, topic) 或 None。"""
+        # 获取最近 15 条消息
+        recent_rows = await self.message_repo.recent_messages(pet_id, limit=15)
+        # 严格过滤出人类消息，小苍蝇自身消息、梦境、日记绝不计入
+        human_msgs = [r for r in recent_rows if r.get("role") == "user"]
+        if len(human_msgs) < self.config.proactive_min_new_msgs:
+            return None
+
+        last_proactive_ts = float(state.get("last_proactive_ts", 0) or 0)
+        # 检查上次主动发言后是否有人类响应
+        msgs_after_proactive = [
+            m for m in human_msgs if float(m.get("ts", 0)) > last_proactive_ts
+        ]
+
+        if not state.get("last_proactive_answered", True):
+            # 若上次发言无人响应，必须有新的不同对话进展才允许继续
+            if len(msgs_after_proactive) < self.config.proactive_min_new_msgs:
+                return None
+
+        recent_dialogue = "\n".join(
+            f"[{m.get('sender_name') or '群友'}]: {m.get('content')}"
+            for m in human_msgs[-8:]
+        )
+
+        eval_messages = [
+            {"role": "system", "content": self.config.proactive_eval_prompt},
+            {
+                "role": "user",
+                "content": f"最近群聊对话片段：\n{recent_dialogue}\n\n上次主动话题：{state.get('last_proactive_topic', '无')}",
+            },
+        ]
+        try:
+            content = await self.llm.chat_json(eval_messages, max_tokens=250, temperature=0.3)
+            data = json.loads(content)
+            if not data.get("should_speak"):
+                return None
+            reason = str(data.get("reason") or "").strip()
+            topic = str(data.get("topic") or "").strip()
+            # 同一话题如果前次无人理，且当前提取的核心话题仍旧相同，禁止追问
+            last_topic = state.get("last_proactive_topic", "")
+            if not state.get("last_proactive_answered", True) and topic and topic == last_topic:
+                return None
+            return (reason, topic)
+        except Exception:
+            log.exception("evaluate proactive speak failed for pet %d", pet_id)
+            return None
+
     async def proactive_speak(
-        self, pet_id: int, chat_id: str, trigger: str
+        self, pet_id: int, chat_id: str, trigger: str, topic: str = ""
     ) -> tuple[str, dict] | None:
+        extra = {
+            "last_proactive_topic": topic,
+            "last_proactive_answered": False,
+        }
         return await self.autonomous_speak(
             pet_id,
             chat_id,
             self.config.proactive_prompt.format(trigger=trigger),
-            self.config.proactive_user_stub_template,
+            f"[系统主动触发] 触发理由：{trigger}",
             f"PROACTIVE trigger={trigger[:60]!r}",
             max_tokens=self.config.reply_max_tokens,
             set_last_proactive=True,
-            as_card=True,
+            extra_state=extra,
+            as_card=False,
             style_query=trigger,
         )
-
-    async def need_speak(
-        self, pet_id: int, chat_id: str, current: dict | None = None, now: float | None = None
-    ) -> tuple[dict, dict] | None:
-        now = time.time() if now is None else now
-        if not self.config.card_enabled or not self.config.gameplay_enabled:
-            return None
-        state, created = await self.gameplay_service.maybe_create_need(pet_id, now)
-        need = created or self.gameplay_domain.current_need(state, now)
-        if not need or need.get("announced_card_id"):
-            return None
-        text = f"{need.get('title', '需要照料')}：{need.get('description', '')}"
-        if self.card_service is None:
-            raise RuntimeError("card service is required for need cards")
-        card_id, _ = await self.card_service.send_persistent_card(
-            pet_id, chat_id, text, state, mode="need"
-        )
-        state = await self.pet_repo.mutate_state(
-            pet_id,
-            lambda s: {
-                **s,
-                "active_need": {**s["active_need"], "announced_card_id": card_id},
-            },
-        )
-        await self.message_repo.append_message(pet_id, "assistant", text)
-        log.info(
-            "pet %d NEED %s severity=%s state=%s",
-            pet_id,
-            need.get("kind"),
-            need.get("severity"),
-            {key: round(state.get(key, 0)) for key in self.config.state_numeric_keys},
-        )
-        return need, state
 
     async def scheduled_speak(
         self,
@@ -279,7 +249,6 @@ class AutonomousService:
         *,
         mark_date: bool = True,
     ) -> tuple[str, dict] | None:
-        action = event.get("card_action")
         prompt = self.config.scheduled_event_prompt.format(
             event_name=event["name"],
             scheduled_hour=event["hour"],
@@ -292,15 +261,33 @@ class AutonomousService:
             pet_id,
             chat_id,
             prompt,
-            self.config.scheduled_user_stub_template.format(event_name=event["name"]),
+            f"[系统定时触发] 到了今天的{event['name']}窗口",
             f"SCHEDULED {event['kind']} date={date_key}",
             max_tokens=self.config.scheduled_max_tokens,
             set_last_proactive=True,
             extra_state={event["state_key"]: date_key} if mark_date else None,
             as_card=True,
-            card_actions=[action] if action else [],
             gen_image=bool(event.get("gen_image")),
         )
+
+    async def deliver_pending(
+        self, pet_id: int, chat_id: str, deliverable: dict
+    ) -> bool:
+        """处理群友明确约定的单次后续交付，交付一次后即刻清空。"""
+        task_desc = deliverable.get("task", "约定内容")
+        prompt = f"群友之前与你明确约定了后续交付：{task_desc}。现在请按你的风格向群里完成本次交付，直接交付结果，交付完成后结束。"
+        result = await self.autonomous_speak(
+            pet_id,
+            chat_id,
+            prompt,
+            f"[完成约定交付] {task_desc}",
+            f"DELIVER task={task_desc[:60]!r}",
+            max_tokens=self.config.reply_max_tokens,
+            set_last_proactive=True,
+            extra_state={"pending_deliverable": None},
+            as_card=False,
+        )
+        return result is not None
 
     async def tick_pet(
         self,
@@ -312,19 +299,28 @@ class AutonomousService:
         now = time.time() if now is None else now
         if current is None:
             current = await self.pet_repo.load_pet_state(pet_id)
-        quiet = self.state_domain.in_quiet_hours(now)
-        if self.gameplay_service is not None:
-            current = await self.gameplay_service.sync_need_clock(pet_id, quiet, now)
 
-        # 可能同时有多个到期定时事件（如进程停了一整天，梦境+日记都欠着）：
-        # 逐个补发，每次用返回的 new_state 刷新 current（含 date_key 标记），
-        # 迭代上限 = 事件总数，防死循环。任一触发则本 tick 不再走主动发言。
+        # 1. 检查定时事件发送窗口 (梦境 / 日记)
         fired_scheduled = False
         for _ in range(len(self.config.scheduled_events)):
             scheduled = self.scheduled_event_due(current, now)
             if scheduled is None:
                 break
             event, date_key = scheduled
+            # 检查是否有真实人类素材：如果群里连 1 条真实人类发言都没有，跳过本窗口
+            recent_rows = await self.message_repo.recent_messages(pet_id, limit=20)
+            human_msgs = [r for r in recent_rows if r.get("role") == "user"]
+            if not human_msgs:
+                log.info(
+                    "pet %d scheduled event %s skipped: insufficient human material",
+                    pet_id,
+                    event["kind"],
+                )
+                current = await self.pet_repo.mutate_state(
+                    pet_id, lambda s: {**s, event["state_key"]: date_key}
+                )
+                continue
+
             result = await self.scheduled_speak(pet_id, chat_id, event, date_key)
             fired_scheduled = True
             if result is None:
@@ -332,19 +328,28 @@ class AutonomousService:
             _, current = result
         if fired_scheduled:
             return True
-        if quiet:
+
+        # 2. 检查单次约定交付
+        pending = current.get("pending_deliverable")
+        if isinstance(pending, dict) and pending.get("task"):
+            delivered = await self.deliver_pending(pet_id, chat_id, pending)
+            if delivered:
+                return True
+
+        # 3. 检查静默时段与冷却
+        if self.state_domain.in_quiet_hours(now):
             return False
-        need_result = await self.need_speak(pet_id, chat_id, current=current, now=now)
-        if need_result is not None:
-            return True
-        last_active_ts = max(
-            float(current.get("last_proactive_ts", 0) or 0),
-            float(current.get("last_free_card_ts", 0) or 0),
-        )
-        trigger = self.should_tick_speak(current, last_active_ts, now)
-        if trigger is None:
+        last_proactive_ts = float(current.get("last_proactive_ts", 0) or 0)
+        if now - last_proactive_ts < self.config.proactive_cooldown_sec:
             return False
-        await self.proactive_speak(pet_id, chat_id, trigger)
+
+        # 4. 基于新人类素材的主动发言价值评估
+        eval_result = await self.evaluate_proactive_speaking(pet_id, current)
+        if eval_result is None:
+            return False
+
+        reason, topic = eval_result
+        await self.proactive_speak(pet_id, chat_id, reason, topic)
         return True
 
     async def tick_all_pets(self) -> None:
@@ -361,9 +366,8 @@ class AutonomousService:
             pet_id = row["id"]
             chat_id = row["chat_id"]
             stored = self.pet_repo.decode_state(row["state_json"])
-            current = self.state_domain.decay_state(stored, now, pet_id)
             try:
-                await self.tick_pet(pet_id, chat_id, current=current, now=now)
+                await self.tick_pet(pet_id, chat_id, current=stored, now=now)
             except Exception:
                 log.exception("tick failed for pet %d", pet_id)
 

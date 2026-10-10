@@ -54,6 +54,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS memory_cards (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     pet_id INTEGER NOT NULL REFERENCES pets(id),
+                    kind TEXT NOT NULL DEFAULT 'reality',
                     when_text TEXT NOT NULL DEFAULT '',
                     who TEXT NOT NULL DEFAULT '',
                     what TEXT NOT NULL,
@@ -167,6 +168,12 @@ class Database:
             try:
                 conn.execute(
                     "ALTER TABLE messages ADD COLUMN sender_open_id TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute(
+                    "ALTER TABLE memory_cards ADD COLUMN kind TEXT NOT NULL DEFAULT 'reality'"
                 )
             except sqlite3.OperationalError:
                 pass

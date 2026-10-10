@@ -62,7 +62,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         history, state = await self.pets.load_pet_context(pet_id)
         self.assertEqual(history[0]["id"], msg_id)
         self.assertEqual(history[0]["content"], "hello")
-        self.assertIn("satiety", state)
+        self.assertIn("last_update_ts", state)
         self.assertEqual(await self.messages.count_unsummarized(pet_id), 1)
 
         self.assertFalse(await self.system.check_and_register_event("evt-1"))
@@ -153,12 +153,11 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_old_state_is_normalized_without_losing_values(self):
         pet_id = await self.pets.get_or_create_pet("oc_old_state")
-        await self.pets.update_pet_state(pet_id, {"satiety": 17, "custom": "keep"})
+        await self.pets.update_pet_state(pet_id, {"custom": "keep", "active_need": {"kind": "hungry"}})
         state = await self.pets.load_pet_state(pet_id)
-        self.assertAlmostEqual(state["satiety"], 17.0, places=4)
         self.assertEqual(state["custom"], "keep")
-        self.assertIn("last_social_ts", state)
-        self.assertIn("last_free_card_ts", state)
+        self.assertNotIn("active_need", state)
+        self.assertIn("last_update_ts", state)
 
     async def test_five_compression_failures_create_deterministic_cards(self):
         pet_id = await self.pets.get_or_create_pet("oc_memory_fallback")

@@ -44,7 +44,7 @@ class MemoryRepository:
     def _score_cards(self, pet_id: int, q_vec: list[float], k: int) -> list[dict]:
         with self.db.connect() as conn:
             rows = conn.execute(
-                "SELECT e.source_id, e.vec, c.when_text, c.who, c.what, c.vibe "
+                "SELECT e.source_id, e.vec, c.kind, c.when_text, c.who, c.what, c.vibe "
                 "FROM embeddings e JOIN memory_cards c ON c.id = e.source_id "
                 "WHERE e.pet_id = ? AND e.kind = 'card' "
                 "ORDER BY e.id DESC LIMIT ?",
@@ -78,6 +78,7 @@ class MemoryRepository:
                 {
                     "id": row["source_id"],
                     "score": sim,
+                    "kind": row["kind"] if "kind" in row.keys() else "reality",
                     "when": row["when_text"],
                     "who": row["who"],
                     "what": row["what"],
@@ -94,13 +95,14 @@ class MemoryRepository:
             return []
         with self.db.connect() as conn:
             rows = conn.execute(
-                "SELECT id, when_text, who, what, vibe FROM memory_cards "
+                "SELECT id, kind, when_text, who, what, vibe FROM memory_cards "
                 "WHERE pet_id = ? ORDER BY id DESC LIMIT ?",
                 (pet_id, n),
             ).fetchall()
         return [
             {
                 "id": row["id"],
+                "kind": row["kind"] if "kind" in row.keys() else "reality",
                 "when": row["when_text"],
                 "who": row["who"],
                 "what": row["what"],
@@ -115,13 +117,14 @@ class MemoryRepository:
     def _list_cards(self, pet_id: int, limit: int) -> list[dict]:
         with self.db.connect() as conn:
             rows = conn.execute(
-                "SELECT id, when_text, who, what, vibe, hooks, created_at "
+                "SELECT id, kind, when_text, who, what, vibe, hooks, created_at "
                 "FROM memory_cards WHERE pet_id = ? ORDER BY id DESC LIMIT ?",
                 (pet_id, limit),
             ).fetchall()
         return [
             {
                 "id": row["id"],
+                "kind": row["kind"] if "kind" in row.keys() else "reality",
                 "when": row["when_text"],
                 "who": row["who"],
                 "what": row["what"],
@@ -183,12 +186,14 @@ class MemoryRepository:
                 what = (card.get("what") or "").strip()
                 if not what:
                     continue
+                kind = (card.get("kind") or "reality").strip()
                 row = conn.execute(
                     "INSERT INTO memory_cards "
-                    "(pet_id, when_text, who, what, vibe, hooks, created_at, source_until_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                    "(pet_id, kind, when_text, who, what, vibe, hooks, created_at, source_until_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
                     (
                         pet_id,
+                        kind,
                         (card.get("when") or "").strip(),
                         (card.get("who") or "").strip(),
                         what,

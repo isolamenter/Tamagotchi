@@ -8,7 +8,6 @@ import time
 
 from config import AppConfig
 from domain.pet import PetDomain
-from domain.gameplay import GameplayDomain
 from domain.state import StateDomain
 from integrations.feishu_client import FeishuClient
 from integrations.llm_client import LLMClient
@@ -18,7 +17,6 @@ from repositories.system_repo import SystemRepository
 from runtime import RuntimeState
 from services.memory_service import MemoryService
 from services.observer_service import ObserverService
-from services.card_service import CardService
 from services.style_service import StyleService
 
 log = logging.getLogger("tamagotchi")
@@ -32,29 +30,26 @@ class ReplyService:
         config: AppConfig,
         runtime: RuntimeState,
         state_domain: StateDomain,
-        gameplay_domain: GameplayDomain,
         pet_domain: PetDomain,
         pet_repo: PetRepository,
         message_repo: MessageRepository,
         system_repo: SystemRepository,
         memory_service: MemoryService,
         observer_service: ObserverService,
-        card_service: CardService,
         feishu: FeishuClient,
         llm: LLMClient,
         style_service: StyleService | None = None,
+        card_service: Any | None = None,
     ):
         self.config = config
         self.runtime = runtime
         self.state_domain = state_domain
-        self.gameplay_domain = gameplay_domain
         self.pet_domain = pet_domain
         self.pet_repo = pet_repo
         self.message_repo = message_repo
         self.system_repo = system_repo
         self.memory_service = memory_service
         self.observer_service = observer_service
-        self.card_service = card_service
         self.feishu = feishu
         self.llm = llm
         self.style_service = style_service
@@ -83,9 +78,6 @@ class ReplyService:
                 continue
             break
 
-        # Providers occasionally return a valid reply field followed by a
-        # malformed optional field. Recover only safe quoted scalar values so
-        # the raw JSON object is never sent to Feishu.
         match = re.search(
             r'"reply"\s*:\s*"((?:\\.|[^"\\])*)"', candidate, re.DOTALL
         )
@@ -122,7 +114,7 @@ class ReplyService:
         current_msg_id: int | None = None,
         sender_open_id: str = "",
     ) -> tuple[str, dict, str]:
-        history, current_state = await self.pet_repo.load_pet_context(pet_id)
+        history, _current_state = await self.pet_repo.load_pet_context(pet_id)
 
         recall_block = await self.memory_service.build_recall_block(
             pet_id, query=user_text
@@ -141,9 +133,7 @@ class ReplyService:
         )
 
         pre_user_system = (
-            self.state_domain.render_state(current_state, include_vibe=False)
-            + "\n"
-            + self.config.json_output_prompt
+            self.config.json_output_prompt
             + "\n"
             + style_block
             + "\n"
@@ -199,32 +189,24 @@ class ReplyService:
                     speaker_name,
                 )
 
+        now = time.time()
+
         def _mutator(state: dict) -> dict:
-            # 普通对话只读取 state；五维玩法状态只能由卡片动作修改。
             out = dict(state)
-            out["last_update_ts"] = time.time()
-            out["last_social_ts"] = time.time()
+            out["last_update_ts"] = now
+            out["last_reply_ts"] = now
+            out["last_proactive_answered"] = True
             return out
 
         new_state = await self.pet_repo.mutate_state(pet_id, _mutator)
-        log.info(
-            "pet %d state read-only: %s -> %s",
-            pet_id,
-            {key: round(current_state.get(key, 0)) for key in self.config.state_numeric_keys},
-            {key: round(new_state.get(key, 0)) for key in self.config.state_numeric_keys},
-        )
-
         return reply, new_state, learned_name
 
     async def mark_replied(self, pet_id: int) -> None:
         await self.pet_repo.mutate_state(
-            pet_id, lambda s: {**s, "last_reply_ts": time.time()}
+            pet_id, lambda s: {**s, "last_reply_ts": time.time(), "last_proactive_answered": True}
         )
 
     async def is_direct_to_bot(self, chat_type: str, mentions: list[dict]) -> bool:
-        # A p2p message is intrinsically addressed to the bot.  In groups we
-        # require a real @mention; when bot identity cannot be fetched, fail
-        # closed and keep observing instead of unexpectedly interrupting chat.
         if chat_type == "p2p":
             return True
         try:
@@ -246,34 +228,7 @@ class ReplyService:
         if await self.message_repo.count_unsummarized(pet_id) > self.config.compress_threshold:
             asyncio.create_task(self.memory_service.compress_pet_memory(pet_id))
 
-    async def _attach_first_need_cta(
-        self, pet_id: int, chat_id: str, state: dict
-    ) -> None:
-        """Send an unannounced need card once; ordinary dialogue never settles it."""
-        if not self.config.card_enabled or not self.config.gameplay_enabled:
-            return
-        now = time.time()
-        async with self.runtime.state_lock(pet_id):
-            current = await self.pet_repo.load_pet_state(pet_id)
-            current = self.gameplay_domain.expired_need_cleared(current, now)
-            need = self.gameplay_domain.current_need(current, now)
-            if not need or need.get("announced_card_id"):
-                return
-            text = f"{need.get('title', '需要照料')}：{need.get('description', '')}"
-            try:
-                card_id, _ = await self.card_service.send_persistent_card(
-                    pet_id, chat_id, text, current, mode="need"
-                )
-            except Exception:
-                # Keep active_need unannounced.  A later direct message or tick
-                # can retry without manufacturing a new need.
-                log.exception("failed to attach need CTA for pet %d", pet_id)
-                return
-            current["active_need"] = {**need, "announced_card_id": card_id}
-            await self.pet_repo.update_pet_state(pet_id, current)
-
     async def _caption_image_key(self, message_id: str, image_key: str) -> str | None:
-        """下载图片 → vision 一句话描述 → 字节即弃。任一步失败返回 None。"""
         image_key = (image_key or "").strip()
         if not message_id or not image_key:
             return None
@@ -287,7 +242,6 @@ class ReplyService:
         return await self.llm.describe_image(image_bytes)
 
     async def _caption_image(self, message_id: str, msg: dict) -> str | None:
-        """单图消息的 caption：从 content 取 image_key。任一步失败返回 None。"""
         try:
             content = json.loads(msg.get("content") or "{}")
         except json.JSONDecodeError:
@@ -295,7 +249,6 @@ class ReplyService:
         return await self._caption_image_key(message_id, content.get("image_key") or "")
 
     async def _parse_post(self, message_id: str, msg: dict) -> str | None:
-        """富文本抽文本 + 内嵌图走同一套 caption。空返回 None。"""
         try:
             content = json.loads(msg.get("content") or "{}")
         except json.JSONDecodeError:
@@ -332,7 +285,6 @@ class ReplyService:
         return text or None
 
     async def _mentions_with_names(self, mentions: list[dict]) -> list[dict]:
-        """mentions 缺 name 时用 open_id 回填缓存名，保证 @目标不丢。"""
         enriched: list[dict] = []
         for mention in mentions or []:
             if not isinstance(mention, dict):
@@ -353,10 +305,6 @@ class ReplyService:
     def _append_missing_mentions(
         self, user_text: str, mentions: list[dict], sender_open_id: str
     ) -> str:
-        """mentions 里出现、文本里没有的名字，补成后缀 @X @Y。
-
-        飞书只回传 name 不保证文本带占位符时用；跳过发送者自己。
-        """
         missing = []
         for mention in mentions or []:
             if not isinstance(mention, dict):
@@ -415,7 +363,6 @@ class ReplyService:
 
         if msg_type == "image":
             caption = await self._caption_image(message_id, msg)
-            # 看完即弃：字节已在 _caption_image 内释放，这里只留一句话。
             user_text = (
                 f"【发了一张图：{caption}】" if caption
                 else "【发了一张图，但没看清】"
@@ -426,8 +373,6 @@ class ReplyService:
                 if is_direct:
                     log.info("ignoring empty post message (direct, sent non_text fallback)")
                     await self._send_response(chat_type, chat_id, message_id, self.config.fallback_replies["non_text"])
-                else:
-                    log.info("ignoring empty post message (observer-only, no @)")
                 return
             mentions = await self._mentions_with_names(mentions)
             user_text = self.pet_domain.clean_text(text, mentions)
@@ -455,7 +400,6 @@ class ReplyService:
             await self._send_response(chat_type, chat_id, message_id, self.config.fallback_replies["non_text"])
             return
         else:
-            log.info("ignoring msg_type=%r (observer-only, no @)", msg_type)
             return
 
         if not is_direct:
@@ -478,88 +422,83 @@ class ReplyService:
 
         await self.observer_service.flush_observer_buffer(pet_id)
 
-        if self.state_domain.in_quiet_hours(time.time()):
-            await self.message_repo.append_message(
-                pet_id,
-                "user",
-                user_text,
-                sender_name=sender_name,
-                is_observer=False,
-                sender_open_id=sender_open_id,
-            )
-            await self._send_response(chat_type, chat_id, message_id, self.config.fallback_replies["quiet_hours"])
-            log.info("pet %d @ during quiet hours, sent sleeping reply", pet_id)
-            await self._maybe_compress(pet_id)
-            return
+        # 连续消息排队与合并处理，防止无声漏答
+        pending_list = self.runtime.chat_pending_messages.setdefault(pet_id, [])
+        pending_list.append(
+            {
+                "message_id": message_id,
+                "chat_type": chat_type,
+                "chat_id": chat_id,
+                "user_text": user_text,
+                "sender_name": sender_name,
+                "sender_open_id": sender_open_id,
+                "ts": time.time(),
+            }
+        )
 
-        if self.config.reply_min_interval_sec > 0:
-            now = time.time()
-            try:
-                db_ts = float((await self.pet_repo.load_pet_state(pet_id)).get("last_reply_ts", 0.0))
-            except (TypeError, ValueError):
-                db_ts = 0.0
-            last_reply_ts = max(db_ts, self.runtime.reply_gate.get(pet_id, 0.0))
-            elapsed = now - last_reply_ts
-            if elapsed < self.config.reply_min_interval_sec:
-                await self.message_repo.append_message(
+        async with self.runtime.chat_lock(pet_id):
+            if not self.runtime.chat_pending_messages.get(pet_id):
+                return
+            debounce_sec = float(getattr(self.config, "reply_debounce_sec", 0.0) or 0.0)
+            if debounce_sec > 0:
+                await asyncio.sleep(debounce_sec)
+
+            items = self.runtime.chat_pending_messages.pop(pet_id, [])
+            if not items:
+                return
+
+            last_item = items[-1]
+            last_message_id = last_item["message_id"]
+            last_chat_type = last_item["chat_type"]
+            last_chat_id = last_item["chat_id"]
+            last_sender_open_id = last_item["sender_open_id"]
+            last_sender_name = last_item["sender_name"]
+
+            # 将合并窗口内所有真实用户消息写入数据库历史
+            last_msg_id = None
+            for item in items:
+                last_msg_id = await self.message_repo.append_message(
                     pet_id,
                     "user",
-                    user_text,
-                    sender_name=sender_name,
+                    item["user_text"],
+                    sender_name=item["sender_name"],
                     is_observer=False,
-                    sender_open_id=sender_open_id,
+                    sender_open_id=item["sender_open_id"],
                 )
-                log.info(
-                    "pet %d @ within reply cooldown (%.0fs left), recorded without reply",
+
+            combined_text = "\n".join(item["user_text"] for item in items)
+
+            learned_name = ""
+            try:
+                reply, _reply_state, learned_name = await self.call_llm_with_memory(
                     pet_id,
-                    self.config.reply_min_interval_sec - elapsed,
+                    combined_text,
+                    sender_name=last_sender_name,
+                    current_msg_id=last_msg_id,
+                    sender_open_id=last_sender_open_id,
                 )
-                await self._maybe_compress(pet_id)
+            except Exception as exc:
+                log.exception("llm error")
+                reply = self.config.fallback_replies["llm_error_template"].format(
+                    error_class=exc.__class__.__name__
+                )
+            log.info("reply=%r", reply)
+
+            try:
+                await self._send_response(last_chat_type, last_chat_id, last_message_id, reply)
+            except Exception:
+                log.exception("reply delivery failed for pet %d", pet_id)
                 return
-            self.runtime.reply_gate[pet_id] = now
 
-        current_msg_id = await self.message_repo.append_message(
-            pet_id,
-            "user",
-            user_text,
-            sender_name=sender_name,
-            is_observer=False,
-            sender_open_id=sender_open_id,
-        )
-        learned_name = ""
-        reply_state = await self.pet_repo.load_pet_state(pet_id)
-        try:
-            reply, reply_state, learned_name = await self.call_llm_with_memory(
-                pet_id,
-                user_text,
-                sender_name=sender_name,
-                current_msg_id=current_msg_id,
-                sender_open_id=sender_open_id,
-            )
-        except Exception as exc:
-            log.exception("llm error")
-            reply = self.config.fallback_replies["llm_error_template"].format(
-                error_class=exc.__class__.__name__
-            )
-        log.info("reply=%r", reply)
+            await self.message_repo.append_message(pet_id, "assistant", reply)
+            await self.mark_replied(pet_id)
 
-        try:
-            await self._send_response(chat_type, chat_id, message_id, reply)
-        except Exception:
-            # The conversation history must reflect what users actually saw.
-            # Release the in-memory gate so a transport outage does not turn
-            # into a phantom reply cooldown.
-            self.runtime.reply_gate.pop(pet_id, None)
-            log.exception("reply delivery failed for pet %d", pet_id)
-            return
-        await self.message_repo.append_message(pet_id, "assistant", reply)
-        await self.mark_replied(pet_id)
-        await self._attach_first_need_cta(pet_id, chat_id, reply_state)
+            if learned_name:
+                await self._send_response(
+                    last_chat_type,
+                    last_chat_id,
+                    last_message_id,
+                    self.config.fallback_replies["name_learned"].format(name=learned_name),
+                )
 
-        if learned_name:
-            await self._send_response(
-                chat_type, chat_id, message_id,
-                self.config.fallback_replies["name_learned"].format(name=learned_name),
-            )
-
-        await self._maybe_compress(pet_id)
+            await self._maybe_compress(pet_id)

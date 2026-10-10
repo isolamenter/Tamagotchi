@@ -1,224 +1,66 @@
-# 电子宠物运行参数配置。
+# 运行参数配置。
 # 放数值和开关类配置；不要放密钥、部署路径或大段 prompt。
 
 [memory]
 # 最近这么多条消息永远不压缩。
-# 接入全群消息 + RAG 卡片后，verbatim 窗口可以再放大，让最近上下文更厚。
 buffer_keep = 80
 # 未压缩消息数超过这个值后触发后台压缩。
 compress_threshold = 200
-# RAG 召回时按相关性打分最多扫描这么多张最近卡片（防 CPU 开销过大）。
-# 超过这个数的更老卡片只能落到 recency 兜底路径，进不了相关性打分。
+# RAG 召回时按相关性打分最多扫描这么多张最近卡片。
 recall_scan_max = 2000
 
 [reply]
-# 群里被 @ 后，两次正式 LLM 回复之间的最小间隔（秒）。
-# 间隔内的 @ 消息照常记进记忆（is_observer=0），下次正式回复时宠物能看到，
-# 但不会逐条触发 LLM 回复。设 0 = 关闭节流（每次 @ 都回）。
-min_interval_sec = 10
+# 连续 @ 消息合并窗口（秒）。在该窗口内到达的同一群连续 @ 消息会合并处理，不漏答。
+debounce_sec = 1.5
 
 [observer]
-# 旁听（observer）消息不再逐条落库：先缓冲在进程内，每个 autonomous tick
-# （见 [autonomous].tick_interval_sec）批量写入，下一条 direct 消息到来时也会先 flush。
-# 这里是单只宠物缓冲条数的安全上限，超过则立刻 flush，避免进程内存无界增长。
+# 旁听（observer）消息缓冲，批量写入。
 flush_max_count = 50
 
 [llm]
-# 普通回复 / 主动发言的 JSON 输出 token 上限。上限留足一段实质回答的空间，
-# 实际篇幅由 reply_mode 和当前内容决定，并不要求用满。
+# 普通回复 / 主动发言的 JSON 输出 token 上限。
 reply_max_tokens = 350
-# 保持人格稳定的同时，减少措辞和句式长期固定。
+# 采样温度
 reply_temperature = 0.5
 autonomous_temperature = 0.5
-card_reply_temperature = 0.35
-# 日记 / 梦境还可能附带 image_prompt，JSON 输出需要更大上限，
-# 否则会被截断导致 JSON 解析失败、整条定时事件被静默丢弃。
+# 日记 / 梦境还可能附带 image_prompt，JSON 输出需要更大上限。
 scheduled_max_tokens = 1000
 # 记忆压缩输出（一组卡片 JSON）的 token 上限。
 compress_max_tokens = 2000
-# 交互卡片按钮被点击后，后台生成那句反馈台词的 token 上限（纯文本一句话，不需要大）。
-card_reply_max_tokens = 150
 
 [style_retrieval]
 # 语义分达到这个门槛，或当前消息直接命中关键词时，才允许注入风格语料。
 semantic_threshold = 0.62
-# 结构卡只靠语义匹配，不接受关键词兜底，避免把不相关的真实对话塞进提示。
 example_card_semantic_threshold = 0.62
-# 第二条必须同 intent，且分数更高、更接近第一条，避免拼接矛盾口头禅。
 second_semantic_threshold = 0.68
 second_max_gap = 0.05
 keyword_bonus = 0.04
 keyword_bonus_cap = 0.12
-# 普通回复的检索 query 只带最近的人类消息，不带 assistant 旧文风。
 context_messages = 2
 query_max_chars = 1500
-# 生成提示中只保留最近这么多条 assistant 原文；数据库和压缩输入仍完整保留。
 assistant_history_keep = 2
 embedding_batch_size = 50
 init_timeout_sec = 30
 
-[state]
-
-[state.initial]
-# 0-100 浮点：satiety 0=极饿 100=饱；其余四项 0=糟 100=满。
-satiety = 75.0
-mood = 70.0
-energy = 85.0
-curiosity = 65.0
-affection = 50.0
-
-# 衰减模型：每个维度向 baseline 指数收敛（v = baseline + (v-baseline)*exp(-rate*h)），
-# 没人互动时漂回中段而不是钉死在极端档。rate = 每小时收敛速率常数（半衰期 ≈ 0.693/rate 小时）。
-[state.decay_active]
-# 清醒时段的收敛目标 / 速率。
-satiety   = { baseline = 5.0,  rate = 0.18 }  # 白天逐步变饿；通常每天需要照料一次
-mood      = { baseline = 25.0, rate = 0.11 }  # 长时间冷落会积累成低落
-energy    = { baseline = 15.0, rate = 0.18 }  # 白天会明显疲惫，夜间再恢复
-curiosity = { baseline = 20.0, rate = 0.12 }  # 没新鲜事会逐步无聊
-affection = { baseline = 15.0, rate = 0.05 }  # 很慢地疏远，约数个活跃日才需要关注
-
-[state.decay_quiet]
-# 静默时段（睡觉时间）的收敛目标 / 速率。
-satiety   = { baseline = 20.0, rate = 0.06 }   # 睡觉代谢慢，饿得慢
-mood      = { baseline = 70.0, rate = 0.10 }   # 睡眠会缓和低落
-energy    = { baseline = 95.0, rate = 0.30 }   # 睡眠显著回血
-curiosity = { baseline = 70.0, rate = 0.10 }   # 休息后恢复一点新鲜感
-affection = { baseline = 50.0, rate = 0.035 }  # 休息时缓慢回暖
-
-# 极端档 / 高档 / 低档判定（不在范围内 = 中段，state_render 直接不渲染该维度）。
-[state.bands.satiety]
-extreme_low = 10
-low = 30
-
-[state.bands.mood]
-extreme_low = 25
-low = 50
-high = 80
-
-[state.bands.energy]
-extreme_low = 20
-low = 50
-high = 80
-
-[state.bands.curiosity]
-high = 80
-low = 45
-
-[state.bands.affection]
-high = 75
-low = 40
-
-[gameplay]
-# 状态玩法：阈值触发需求事件，卡片按钮按规则确定性结算五维状态。
-enabled = true
-need_ttl_sec = 1800
-need_severe_ttl_sec = 1200
-# 只有真正解决的需求才进入冷却；过期需求会升级并在下一活跃窗口续发。
-need_cooldown_sec = 7200
-
-[gameplay.need_thresholds]
-hungry = 20
-sleepy = 35
-sad = 40
-bored = 35
-lonely = 30
-
-[gameplay.resolution_thresholds]
-# 达到触发阈值再多 10 点才算真正解决；否则本轮只是缓解，会继续请求照料。
-hungry = 30
-sleepy = 45
-sad = 50
-bored = 45
-lonely = 40
-
 [autonomous]
-# 心跳间隔（测试期 1 min；生产建议 600）。
+# 心跳间隔（秒）
 tick_interval_sec = 600
-# 普通主动发言冷却（测试期 0；生产建议 14400，即 4h）。
+# 主动发言最小冷却（秒）
 cooldown_sec = 7200
-# 静默时段用的本地时区偏移（默认上海 +8）。
+# 本地时区偏移（默认上海 +8）
 timezone_offset_hours = 8.0
-# 休息时段：本地时间落在此区间内不普通主动发言。支持跨午夜（start > end）。
-# 当前 19:00 休息 → 次日 10:00 起床。日记锁定在 quiet_start、梦境锁定在 quiet_end。
+# 定时事件发送窗口锁定时间：日记 19:00，梦境 10:00
 quiet_start_hour = 19
 quiet_end_hour = 10
-# 周末整天也算休息时间；自动冒泡、梦境、日记都会停掉，@ 时只回睡眠文案。
-quiet_weekends = true
-# 状态没触发时，每 tick 自发说话的概率。
-spontaneous_prob = 0.20
-# 梦境/日记只允许在目标时点后的这个窗口补发，避免停机后集中补历史内容。
+# 周末静默（用于控制主动事件是否在周末发送）
+quiet_weekends = false
+# 梦境/日记窗口补发宽限（秒）
 scheduled_grace_sec = 3600
-
-[autonomous.trigger_thresholds]
-# satiety <= 此值 -> 主动抱怨饿。
-satiety = 10.0
-# mood <= 此值 -> 主动发情绪。
-mood = 25.0
-# energy <= 此值 -> 主动说要睡。
-energy = 20.0
-# curiosity <= 此值 -> 主动想找人玩。
-curiosity = 20.0
-# affection <= 此值 -> 主动想求关注。
-affection = 15.0
+# 触发主动发言评估所需的最少新人类旁听消息数
+proactive_min_new_msgs = 3
 
 [card]
-# 交互卡片总开关。作用于「主动发言」（宠物自己冒泡）和「梦境 / 日记」定时事件；
-# @ / p2p 回复本身是纯文本；若已存在尚未通知的需求，会在回复后附一张首次 CTA。
-# false = 主动发言 + 梦境 / 日记都退回纯文本。
+# 卡片展示总开关（用于梦境配图与日记等富文本展示）
 enabled = true
-# 状态进度条的格子数。
-bar_width = 10
-# 结算资格由持久化 card_claims 控制：need/free 全群一次；scheduled 每人一次、最多三次。
-# 卡片按钮从发出起多久后失效（秒），过期后点击只回 toast、不改 state。
-# 防止昨天的梦境 / 日记卡一直能点。计时从发卡那刻算，不随点击续期。
-button_ttl_sec = 1800
-# 卡片文本日志最多累积多少条反馈台词：多人点击时台词逐条向下追加（不整段刷新），
-# 超出这个条数就丢掉最旧的，避免卡片无限变高。
-card_log_max_lines = 6
-# 一张卡片最多显示几个按钮。
-max_buttons = 3
-# 固定早晚卡允许不同群友各贡献一次，但全群最多结算三次。
-scheduled_max_settlements = 3
-# 所有状态维度都在中段（宠物没有明显需求）时，兜底随机挑这些按钮里的，保证卡片总有东西可点。
-default_actions = ["play", "pet"]
-# 梦境插图：调图像模型生成一张图的超时（秒）。需在 .env 配 IMAGE_MODEL 才会生成；
-# 生成 / 上传任一步失败都会安静回退成纯文字梦境卡。
+# 梦境插图生成超时（秒）
 image_timeout_sec = 120
-
-# 每个互动按钮的运行数值。展示文案（按钮名 / 反馈语）在 prompts.toml [card]。
-# need_dim + need_side 决定按钮何时浮现：该维度进入对应方向的非中段档位才显示。
-#   need_side = "high" -> 维度进入 high / extreme_high 档时浮现（如饿了才出现投喂）
-#   need_side = "low"  -> 维度进入 low / extreme_low 档时浮现
-# delta 是点击后套用的「确定性」状态变化，不经过 LLM。
-[card.actions.feed]
-need_dim = "satiety"
-need_side = "low"
-delta = { satiety = 45, mood = 4, affection = 2 }
-
-[card.actions.rest]
-need_dim = "energy"
-need_side = "low"
-delta = { energy = 40, satiety = -10, mood = 3 }
-
-[card.actions.soothe]
-need_dim = "mood"
-need_side = "low"
-delta = { mood = 35, affection = 4 }
-
-[card.actions.play]
-need_dim = "curiosity"
-need_side = "low"
-delta = { curiosity = 35, mood = 10, energy = -15, satiety = -10 }
-
-[card.actions.pet]
-need_dim = "affection"
-need_side = "low"
-delta = { affection = 30, mood = 5 }
-
-# 日记 / 梦境卡片的固定按钮。没有 need_dim/need_side，不会出现在主动发言卡片上，
-# 只在 prompts.toml [[scheduled_events]] 的 card_action 指定时随对应卡片出现。
-[card.actions.goodnight]
-delta = { mood = 4, affection = 3 }
-
-[card.actions.goodmorning]
-delta = { mood = 4, curiosity = 5, affection = 2 }

@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import hmac
-import random
 import time
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-
-from domain.gameplay import NEED_SPECS
 
 router = APIRouter()
 
@@ -94,20 +91,15 @@ async def gm_help(req: Request):
         "endpoints": {
             "GET /gm/pets": "list pets",
             "GET /gm/state": "read state; query: chat_id or pet_id",
-            "POST /gm/state": "set/delta state; json: {chat_id|pet_id, set:{satiety,mood,energy,curiosity,affection}, delta:{...}, recent_vibe?: '...' | 'random'}",
-            "POST /gm/speak": "force proactive speech; json: {chat_id|pet_id,trigger?}",
-            "POST /gm/dream": "force dream; json: {chat_id|pet_id,mark?}",
-            "POST /gm/diary": "force diary; json: {chat_id|pet_id,mark?}",
+            "POST /gm/speak": "force proactive speech; json: {chat_id|pet_id, trigger?}",
+            "POST /gm/dream": "force dream; json: {chat_id|pet_id, mark?}",
+            "POST /gm/diary": "force diary; json: {chat_id|pet_id, mark?}",
             "POST /gm/tick": "run one autonomous tick; json: {chat_id|pet_id?} — omit for all pets",
-            "GET /gm/gameplay": "read active need; query: chat_id or pet_id",
-            "POST /gm/need": "create/clear active need; json: {chat_id|pet_id, kind?, clear?}",
-            "POST /gm/resolve_need": "resolve active need; json: {chat_id|pet_id, action, actor?}",
             "GET /gm/cards": "list memory cards; query: chat_id or pet_id, limit?",
             "GET /gm/messages": "list recent messages; query: chat_id or pet_id, limit?",
-            "POST /gm/image": "send image (memory-only, no save); multipart form: file=<image> + chat_id|pet_id; query ?token=...",
+            "POST /gm/image": "send image; multipart form: file=<image> + chat_id|pet_id; query ?token=...",
             "POST /gm/text": "send text; json: {chat_id|pet_id, text}",
-
-            "GET /web": "html dashboard; open /web?token=... (supports paste/file image send)",
+            "GET /web": "html dashboard; open /web?token=...",
         },
     }
 
@@ -135,8 +127,6 @@ async def gm_pets(req: Request):
         )
     return {
         "pets": pets,
-        "numeric_keys": list(container.config.state_numeric_keys),
-        "bar_labels": dict(container.config.card_bar_labels),
     }
 
 
@@ -205,203 +195,6 @@ async def gm_get_state(req: Request):
     return {
         "pet_id": pet_id,
         "chat_id": chat_id,
-        "state": container.state_domain.public_state(state),
-    }
-
-
-@router.get("/gm/gameplay")
-async def gm_gameplay(req: Request):
-    auth = _gm_auth(req)
-    if auth:
-        return auth
-    pet_id_param = req.query_params.get("pet_id")
-    resolved = await _gm_resolve_pet(
-        req,
-        chat_id=req.query_params.get("chat_id"),
-        pet_id=pet_id_param or None,
-    )
-    if isinstance(resolved, JSONResponse):
-        return resolved
-    pet_id, chat_id = resolved
-    container = _container(req)
-    state = await container.pet_repo.load_pet_state(pet_id)
-    public = container.state_domain.public_state(state)
-    return {
-        "pet_id": pet_id,
-        "chat_id": chat_id,
-        "active_need": public["active_need"],
-    }
-
-
-@router.post("/gm/need")
-async def gm_need(req: Request):
-    auth = _gm_auth(req)
-    if auth:
-        return auth
-    container = _container(req)
-    body = await _gm_body(req)
-    pet_id_param = body.get("pet_id") or req.query_params.get("pet_id")
-    resolved = await _gm_resolve_pet(
-        req,
-        chat_id=body.get("chat_id") or req.query_params.get("chat_id"),
-        pet_id=pet_id_param or None,
-    )
-    if isinstance(resolved, JSONResponse):
-        return resolved
-    pet_id, chat_id = resolved
-    now = time.time()
-    clear = _gm_bool(body.get("clear", req.query_params.get("clear")), default=False)
-    kind = (body.get("kind") or req.query_params.get("kind") or "").strip()
-    if kind and kind not in NEED_SPECS:
-        return JSONResponse({"error": "unknown_need_kind", "kind": kind}, status_code=400)
-    severity = 1
-    if kind:
-        raw_sev = body.get("severity", 1) or 1
-        try:
-            severity = int(raw_sev)
-        except (TypeError, ValueError):
-            return JSONResponse({"error": "invalid_severity", "severity": raw_sev}, status_code=400)
-
-    created = None
-
-    def _mutator(state: dict) -> dict:
-        nonlocal created
-        if clear:
-            state["active_need"] = {}
-            return state
-        if kind:
-            created = container.gameplay_domain.build_need(kind, severity, now)
-            state["active_need"] = created
-            return state
-        state, created = container.gameplay_domain.maybe_create_need(state, now, pet_id)
-        return state
-
-    state = await container.pet_repo.mutate_state(pet_id, _mutator)
-    return {
-        "ok": True,
-        "pet_id": pet_id,
-        "chat_id": chat_id,
-        "created": created,
-        "state": container.state_domain.public_state(state),
-    }
-
-
-@router.post("/gm/resolve_need")
-async def gm_resolve_need(req: Request):
-    auth = _gm_auth(req)
-    if auth:
-        return auth
-    container = _container(req)
-    body = await _gm_body(req)
-    pet_id_param = body.get("pet_id") or req.query_params.get("pet_id")
-    resolved = await _gm_resolve_pet(
-        req,
-        chat_id=body.get("chat_id") or req.query_params.get("chat_id"),
-        pet_id=pet_id_param or None,
-    )
-    if isinstance(resolved, JSONResponse):
-        return resolved
-    pet_id, chat_id = resolved
-    action = (body.get("action") or req.query_params.get("action") or "").strip()
-    actor = (body.get("actor") or req.query_params.get("actor") or "GM").strip()
-    now = time.time()
-
-    async with container.runtime.state_lock(pet_id):
-        state = await container.pet_repo.load_pet_state(pet_id)
-        need = container.gameplay_domain.current_need(state, now)
-        if not need:
-            return JSONResponse({"error": "no_active_need"}, status_code=400)
-        if not action:
-            choices = container.gameplay_domain.choice_keys_for_need(need["kind"])
-            action = choices[0] if choices else ""
-        try:
-            result = container.services.gameplay.resolve_need_choice_state(
-                state, action, actor, now
-            )
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc), "action": action}, status_code=400)
-        await container.pet_repo.update_pet_state(pet_id, result.state)
-
-    return {
-        "ok": True,
-        "pet_id": pet_id,
-        "chat_id": chat_id,
-        "action": action,
-        "delta": result.delta,
-        "state": container.state_domain.public_state(result.state),
-    }
-
-
-@router.post("/gm/state")
-async def gm_set_state(req: Request):
-    auth = _gm_auth(req)
-    if auth:
-        return auth
-    container = _container(req)
-    body = await _gm_body(req)
-    pet_id_param = body.get("pet_id") or req.query_params.get("pet_id")
-    resolved = await _gm_resolve_pet(
-        req,
-        chat_id=body.get("chat_id") or req.query_params.get("chat_id"),
-        pet_id=pet_id_param or None,
-    )
-    if isinstance(resolved, JSONResponse):
-        return resolved
-    pet_id, chat_id = resolved
-
-    set_values = body.get("set")
-    set_values = set_values if isinstance(set_values, dict) else {}
-    delta_values = body.get("delta")
-    delta_values = delta_values if isinstance(delta_values, dict) else {}
-    for key in container.config.state_numeric_keys:
-        qv = req.query_params.get(key)
-        if qv is not None:
-            set_values[key] = qv
-    rv_payload = set_values.get("recent_vibe")
-    if rv_payload is None:
-        rv_payload = body.get("recent_vibe")
-
-    changed: dict = {}
-
-    set_floats: dict[str, float] = {}
-    delta_floats: dict[str, float] = {}
-    for key in container.config.state_numeric_keys:
-        if key in set_values:
-            try:
-                set_floats[key] = float(set_values[key])
-            except (TypeError, ValueError):
-                return JSONResponse({"error": "invalid_numeric", "key": key, "value": set_values[key]}, status_code=400)
-        if key in delta_values:
-            try:
-                delta_floats[key] = float(delta_values[key])
-            except (TypeError, ValueError):
-                return JSONResponse({"error": "invalid_numeric", "key": key, "value": delta_values[key]}, status_code=400)
-
-    def _mutator(state: dict) -> dict:
-        for key in container.config.state_numeric_keys:
-            if key in set_floats:
-                state[key] = max(0.0, min(100.0, set_floats[key]))
-                changed[key] = state[key]
-            if key in delta_floats:
-                state[key] = max(0.0, min(100.0, state[key] + delta_floats[key]))
-                changed[key] = state[key]
-        if rv_payload is not None:
-            rv = str(rv_payload).strip()
-            if rv.lower() == "random" and container.config.recent_vibe_pool:
-                rv = random.choice(container.config.recent_vibe_pool)
-            date_key, _ = container.state_domain.local_date_hour(time.time())
-            state["recent_vibe"] = rv
-            state["recent_vibe_date"] = date_key
-            changed["recent_vibe"] = rv
-        state["last_update_ts"] = time.time()
-        return state
-
-    state = await container.pet_repo.mutate_state(pet_id, _mutator)
-    return {
-        "ok": True,
-        "pet_id": pet_id,
-        "chat_id": chat_id,
-        "changed": changed,
         "state": container.state_domain.public_state(state),
     }
 
@@ -499,10 +292,8 @@ async def gm_image(req: Request):
     file = form.get("file") or form.get("image")
     if file is None:
         return JSONResponse({"error": "missing_file", "hint": "multipart field 'file' is required"}, status_code=400)
-    # starlette UploadFile duck-typing
     filename = getattr(file, "filename", None) or "image"
     content_type = (getattr(file, "content_type", None) or "").lower()
-    # Allow image/* ; fallback sniff by filename extension if content_type missing
     is_image_ct = content_type.startswith("image/")
     is_image_ext = filename.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".heif"))
     if not is_image_ct and not is_image_ext:
@@ -513,12 +304,10 @@ async def gm_image(req: Request):
         return JSONResponse({"error": "read_failed"}, status_code=400)
     if not image_bytes:
         return JSONResponse({"error": "empty_file"}, status_code=400)
-    # Feishu image upload limit is 10 MB
     if len(image_bytes) > 10 * 1024 * 1024:
         return JSONResponse({"error": "file_too_large", "size": len(image_bytes), "limit": 10 * 1024 * 1024}, status_code=400)
     pet_id_param = form.get("pet_id") or req.query_params.get("pet_id")
     chat_id_param = form.get("chat_id") or req.query_params.get("chat_id")
-    # Form values may be UploadFile-adjacent strings; normalize to str
     if pet_id_param is not None and not isinstance(pet_id_param, str):
         pet_id_param = str(pet_id_param)
     if chat_id_param is not None and not isinstance(chat_id_param, str):
@@ -529,7 +318,6 @@ async def gm_image(req: Request):
     pet_id, chat_id = resolved
     container = _container(req)
     image_key = await container.feishu.upload_image(image_bytes)
-    # image_bytes goes out of scope here — no disk write, no DB write
     if not image_key:
         return JSONResponse({"error": "feishu_upload_failed", "hint": "check im:resource:upload permission and re-publish app"}, status_code=502)
     try:

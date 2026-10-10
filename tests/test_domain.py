@@ -7,7 +7,6 @@ from collections import Counter
 
 from config import load_config
 from domain.card import CardDomain
-from domain.gameplay import GameplayDomain
 from domain.memory import MemoryDomain
 from domain.pet import PetDomain
 from domain.state import StateDomain
@@ -365,261 +364,48 @@ class StateDomainTests(unittest.TestCase):
         self.assertTrue(self.state.in_quiet_hours(self.local_ts(2026, 1, 2, 9)))
         self.assertFalse(self.state.in_quiet_hours(self.local_ts(2026, 1, 2, 12)))
 
-    def test_stale_vibe_not_in_current_pool_rotates_same_day(self):
-        now = self.local_ts(2026, 1, 2, 12)
-        date_key, _hour = self.state.local_date_hour(now)
-        state = {
-            **self.state.initial_state(),
-            "recent_vibe": "我准备撤退了",
-            "recent_vibe_date": date_key,
-        }
-        rotated = self.state.maybe_rotate_vibe(state, now, pet_id=17)
-        self.assertIn(rotated["recent_vibe"], self.state.config.recent_vibe_pool)
-        self.assertNotEqual(rotated["recent_vibe"], "我准备撤退了")
+    def test_initial_state_contains_expected_keys(self):
+        st = self.state.initial_state()
+        self.assertIn("last_update_ts", st)
+        self.assertIn("last_reply_ts", st)
+        self.assertIn("last_proactive_ts", st)
+        self.assertIn("last_proactive_answered", st)
+        self.assertNotIn("satiety", st)
+        self.assertNotIn("mood", st)
 
-    def test_numeric_state_prevents_daily_vibe_from_stacking(self):
-        state = {
-            **self.state.initial_state(),
-            "satiety": 60,
-            "mood": 60,
-            "energy": 40,
-            "curiosity": 60,
-            "affection": 60,
-            "recent_vibe": "准备撤了",
-        }
-        rendered = self.state.render_state(state)
-        self.assertIn("精力稍低", rendered)
-        self.assertNotIn("准备撤了", rendered)
+    def test_normalize_clears_active_need(self):
+        raw = {"active_need": {"kind": "hungry"}, "custom": "keep"}
+        normalized = self.state.normalize_state(raw)
+        self.assertNotIn("active_need", normalized)
+        self.assertEqual(normalized["custom"], "keep")
 
-    def test_direct_reply_can_exclude_daily_vibe(self):
-        state = {
-            **self.state.initial_state(),
-            "satiety": 60,
-            "mood": 60,
-            "energy": 60,
-            "curiosity": 60,
-            "affection": 60,
-            "recent_vibe": "好饿",
-        }
-        self.assertEqual(self.state.render_state(state, include_vibe=False), "")
-        self.assertIn("好饿", self.state.render_state(state))
-
-    def test_weekend_is_rest_time(self):
-        self.assertTrue(self.state.in_quiet_hours(self.local_ts(2026, 1, 3, 12)))
-        self.assertTrue(self.state.in_quiet_hours(self.local_ts(2026, 1, 4, 12)))
-        self.assertFalse(self.state.in_quiet_hours(self.local_ts(2026, 1, 5, 12)))
-
-    def test_weekend_rest_counts_as_quiet_decay_time(self):
-        q_hours, a_hours = self.state.partition_hours(
-            self.local_ts(2026, 1, 3, 10),
-            self.local_ts(2026, 1, 3, 12),
-        )
-        self.assertEqual(q_hours, 2.0)
-        self.assertEqual(a_hours, 0.0)
-
-    def test_scheduled_events_skip_weekend_rest(self):
-        service = AutonomousService(
-            self.config,
-            self.state,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        state = self.state.initial_state()
-        self.assertIsNone(
-            service.scheduled_event_due(state, self.local_ts(2026, 1, 3, 12))
-        )
-        self.assertIsNotNone(
-            service.scheduled_event_due(state, self.local_ts(2026, 1, 5, 10))
-        )
-        # Restarting hours later must not replay a whole day's scheduled cards.
-        self.assertIsNone(
-            service.scheduled_event_due(state, self.local_ts(2026, 1, 5, 12))
-        )
-
-    def test_tick_fires_all_due_scheduled_events_one_tick(self):
-        import asyncio
-
-        service = AutonomousService(
-            self.config,
-            self.state,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        # 模拟「DB 里逐步累计 date_key 标记」：fake scheduled_speak 标记自己的 state_key 并回传整份状态
-        db_state = dict(self.state.initial_state())
-        calls: list[str] = []
-
-        async def fake_scheduled(pet_id, chat_id, event, date_key, mark_date=True):
-            calls.append(event["kind"])
-            db_state[event["state_key"]] = date_key
-            return "reply", dict(db_state)
-
-        service.scheduled_speak = fake_scheduled
-        # 定时事件只在一小时补发窗口内触发；19:00 这一 tick 只触发日记。
-        now = self.local_ts(2026, 1, 5, 19)
-        spoke = asyncio.run(
-            service.tick_pet(1, "chat", current=dict(db_state), now=now)
-        )
-        self.assertTrue(spoke)
-        self.assertEqual(calls, ["diary"])
-
-    def test_state_band(self):
-        self.assertEqual(self.state.state_band("satiety", 10), "satiety_extreme_low")
-        self.assertEqual(self.state.state_band("mood", 10), "mood_extreme_low")
-
-    def test_decay_updates_timestamp_and_bounds_values(self):
-        stored = self.state.initial_state()
-        stored["last_update_ts"] = 0.0
-        decayed = self.state.decay_state(stored, 3600.0, pet_id=1)
-        self.assertEqual(decayed["last_update_ts"], 3600.0)
-        for key in self.config.state_numeric_keys:
-            self.assertGreaterEqual(decayed[key], 0.0)
-            self.assertLessEqual(decayed[key], 100.0)
+    def test_public_state_returns_clean_dict(self):
+        st = self.state.initial_state()
+        pub = self.state.public_state(st)
+        self.assertIn("last_update_ts", pub)
+        self.assertIn("last_reply_ts", pub)
+        self.assertNotIn("active_need", pub)
 
 
 class CardDomainTests(unittest.TestCase):
     def setUp(self):
         self.config = make_config()
-        self.state = StateDomain(self.config)
-        self.card = CardDomain(self.config, self.state)
+        self.card = CardDomain(self.config)
 
-    def test_card_actions_and_text_helpers(self):
-        pet_state = {key: 50.0 for key in self.config.state_numeric_keys}
-        pet_state["satiety"] = 10.0
-        self.assertIn("feed", self.card.pick_card_actions(pet_state))
+    def test_build_pet_card_elements(self):
+        card = self.card.build_pet_card(1, "今天很开心", action_keys=["查看详情"])
+        self.assertEqual(card["config"]["wide_screen_mode"], True)
+        self.assertEqual(card["elements"][0]["tag"], "markdown")
+        self.assertEqual(card["elements"][0]["content"], "今天很开心")
+        actions = [el for el in card["elements"] if el.get("tag") == "action"]
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["actions"][0]["text"]["content"], "查看详情")
 
-        text = self.card.compose_card_text("hello", ["one"], "two")
-        self.assertIn("hello", text)
-        self.assertIn("one", text)
-        self.assertIn("two", text)
-
-        card = self.card.build_pet_card(1, "hello", pet_state, action_keys=["feed"])
-        value = card["elements"][-1]["actions"][0]["value"]
-        self.assertEqual(value["v"], 2)
-        self.assertIn("card_id", value)
-        self.assertIn("expires_at", value)
-
-
-
-class GameplayDomainTests(unittest.TestCase):
-    def setUp(self):
-        self.config = make_config()
-        self.state = StateDomain(self.config)
-        self.gameplay = GameplayDomain(self.config)
-
-    def test_need_detection_prefers_extreme_severity(self):
-        state = {
-            **self.state.initial_state(),
-            "satiety": 19,
-            "energy": 5,
-        }
-        detected = self.gameplay.detect_need_kind(state, 1000.0)
-        self.assertEqual(detected, ("sleepy", 2))
-
-    def test_need_choice_resolves_state_and_cooldown(self):
-        now = 1000.0
-        state = {
-            **self.state.initial_state(),
-            "satiety": 10,
-        }
-        state, need = self.gameplay.maybe_create_need(state, now, pet_id=1)
-        self.assertEqual(need["kind"], "hungry")
-
-        result = self.gameplay.apply_choice(state, "feed", "群友-A", now + 1)
-        self.assertEqual(result.state["active_need"], {})
-        self.assertEqual(result.state["satiety"], 55)
-        self.assertEqual(result.state["mood"], 74)
-        self.assertEqual(result.state["affection"], 52)
-        self.assertGreater(result.state["need_cooldowns"]["hungry"], now)
-        detected = self.gameplay.detect_need_kind(result.state, now + 2)
-        self.assertIsNone(detected)
-
-    def test_free_card_action_uses_same_settlement_path(self):
-        now = 1000.0
-        state = {
-            **self.state.initial_state(),
-            "satiety": 10,
-        }
-
-        result = self.gameplay.apply_card_action(state, "feed", "群友-A", now)
-
-        self.assertEqual(result.state["satiety"], 55)
-        self.assertEqual(result.state["mood"], 74)
-        self.assertEqual(result.state["affection"], 52)
-        self.assertEqual(result.state["need_cooldowns"], {})
-
-    def test_fixed_card_can_use_free_rule_without_resolving_need(self):
-        now = 1000.0
-        state = {
-            **self.state.initial_state(),
-            "active_need": self.gameplay.build_need("hungry", 1, now),
-        }
-
-        result = self.gameplay.apply_card_action(
-            state, "goodnight", "系统", now, prefer_free=True
-        )
-
-        self.assertEqual(result.state["active_need"]["kind"], "hungry")
-        self.assertEqual(result.state["mood"], 74)
-        self.assertEqual(result.state["affection"], 53)
-
-    def test_expired_need_escalates_and_keeps_the_problem(self):
-        now = 1000.0
-        state = {
-            **self.state.initial_state(),
-            "satiety": 10,
-            "active_need": self.gameplay.build_need("hungry", 1, now - 3600),
-        }
-        state["active_need"]["expires_at"] = now - 1
-
-        cleared = self.gameplay.expired_need_cleared(state, now)
-
-        self.assertEqual(cleared["active_need"]["kind"], "hungry")
-        self.assertEqual(cleared["active_need"]["severity"], 2)
-        self.assertEqual(cleared["active_need"]["round"], 1)
-        self.assertEqual(cleared["active_need"]["announced_card_id"], "")
-        self.assertEqual(cleared["need_cooldowns"], {})
-
-    def test_weak_need_choice_is_partial_and_continues_with_new_round(self):
-        now = 1000.0
-        state = {**self.state.initial_state(), "satiety": 10}
-        state, _ = self.gameplay.maybe_create_need(state, now, pet_id=1)
-        result = self.gameplay.apply_choice(state, "promise_food", "群友-A", now + 1)
-        self.assertFalse(result.resolved)
-        self.assertEqual(result.state["active_need"]["kind"], "hungry")
-        self.assertEqual(result.state["active_need"]["round"], 1)
-        self.assertEqual(result.state["active_need"]["announced_card_id"], "")
-
-    def test_need_ttl_pauses_and_resumes(self):
-        state = {**self.state.initial_state(), "active_need": self.gameplay.build_need("hungry", 1, 1000)}
-        paused = self.gameplay.pause_need(state, 1100)
-        self.assertEqual(
-            paused["active_need"]["remaining_ttl_sec"],
-            self.config.gameplay_need_ttl_sec - 100,
-        )
-        resumed = self.gameplay.resume_need(paused, 2000)
-        self.assertEqual(
-            resumed["active_need"]["expires_at"],
-            2000 + self.config.gameplay_need_ttl_sec - 100,
-        )
+    def test_compose_card_text(self):
+        composed = self.card.compose_card_text("base", ["line1", "line2"])
+        self.assertIn("base", composed)
+        self.assertIn("↳ line1", composed)
+        self.assertIn("↳ line2", composed)
 
 
 class MemoryDomainTests(unittest.TestCase):

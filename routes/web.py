@@ -17,7 +17,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>电子宠物面板</title>
+<title>小苍蝇 Chatbot 控制面板</title>
 <style>
   :root {
     --bg: #15171c; --panel: #1e2128; --line: #2c3038;
@@ -59,35 +59,25 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .span2 { grid-column: 1 / -1; }
   .meta { display: flex; flex-wrap: wrap; gap: 18px; }
   .meta div span { color: var(--muted); margin-right: 6px; }
-  .bar-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
-  .bar-label { width: 84px; flex-shrink: 0; }
-  .bar-track {
-    flex: 1; height: 12px; background: var(--line);
-    border-radius: 6px; overflow: hidden;
-  }
-  .bar-fill { display: block; height: 100%; border-radius: 6px; transition: width .4s; }
-  .bar-input { width: 56px; text-align: right; padding: 4px 6px; font-size: 13px; }
-  .vibe-edit { display: flex; gap: 8px; align-items: center; margin-top: 14px; }
-  .vibe-edit input { flex: 1; }
-  .state-controls { margin-top: 12px; }
   .gm-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
   .gm-actions input[type=text] { flex: 1; min-width: 200px; }
   .gm-actions label { color: var(--muted); display: flex; align-items: center; gap: 4px; }
   .gm-result { margin-top: 12px; font-size: 13px; color: var(--muted); min-height: 20px; }
   .gm-result.ok { color: var(--good); }
   .gm-result.bad { color: var(--bad); }
-  .gameplay-box {
-    border: 1px solid var(--line); border-radius: 8px; padding: 12px;
-    background: #00000018;
-  }
-  .gameplay-box h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
   .card {
     border-left: 3px solid var(--accent); padding: 6px 12px;
     margin-bottom: 10px; background: #00000022; border-radius: 0 6px 6px 0;
   }
+  .card.imagination { border-left-color: var(--warn); }
+  .card.hearsay { border-left-color: var(--muted); }
   .card .who { color: var(--accent); }
   .card .when { color: var(--muted); font-size: 12px; }
   .card .vibe-tag { color: var(--warn); font-size: 12px; }
+  .card .kind-badge {
+    display: inline-block; padding: 1px 6px; border-radius: 4px;
+    font-size: 11px; margin-right: 6px; background: var(--line);
+  }
   .msg { padding: 4px 0; border-bottom: 1px solid var(--line); }
   .msg:last-child { border-bottom: none; }
   .msg .name { color: var(--accent); }
@@ -112,7 +102,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>🐾 电子宠物面板</h1>
+  <h1>🪰 小苍蝇 Chatbot 控制面板</h1>
   <select id="petSelect"></select>
   <span class="muted" id="refreshInfo"></span>
 </header>
@@ -122,19 +112,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <h2>基本信息</h2>
     <div class="meta" id="meta"></div>
   </div>
-  <div class="panel">
-    <h2>状态 <span class="muted">（可改数值后保存）</span></h2>
-    <div id="bars"></div>
-    <div class="vibe-edit">
-      <span class="muted">vibe</span>
-      <input type="text" id="vibeInput" placeholder="今日 vibe">
-      <button class="secondary" id="vibeRandom">🎲 随机</button>
-    </div>
-    <div class="state-controls">
-      <button id="saveState">💾 保存状态</button>
-    </div>
-  </div>
-  <div class="panel">
+  <div class="panel span2">
     <h2>GM 操作</h2>
     <div class="gm-actions">
       <input type="text" id="speakTrigger" placeholder="主动发言触发情境（可选）">
@@ -168,15 +146,9 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <button id="sendImageBtn" disabled>📤 发送到当前群</button>
       <button class="secondary" id="clearImageBtn" style="display:none">清除</button>
-      <span class="muted" id="imageHint">目标：上方下拉选中的宠物所在群</span>
+      <span class="muted" id="imageHint">目标：上方下拉选中的群聊</span>
     </div>
     <div class="gm-result" id="imageResult"></div>
-  </div>
-  <div class="panel span2">
-    <h2>当前需求</h2>
-    <div class="gameplay-box">
-      <div id="needBox"></div>
-    </div>
   </div>
   <div class="panel span2">
     <h2>记忆卡片 <span class="muted" id="cardCount"></span></h2>
@@ -191,8 +163,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 const TOKEN = new URLSearchParams(location.search).get("token") || "";
 const REFRESH_MS = 15000;
 let currentPet = null;
-let barLabels = {};
-let numericKeys = [];
 
 function esc(s) {
   const d = document.createElement("div");
@@ -225,77 +195,40 @@ function fmtTime(ts) {
   if (!ts) return "—";
   return new Date(ts * 1000).toLocaleString("zh-CN", { hour12: false });
 }
-function barColor(v) {
-  if (v >= 60) return "var(--good)";
-  if (v >= 30) return "var(--warn)";
-  return "var(--bad)";
-}
-function isEditing() {
-  const a = document.activeElement;
-  return a && (a.classList.contains("bar-input")
-    || a.id === "vibeInput" || a.id === "speakTrigger");
-}
 function setBusy(busy) {
   document.querySelectorAll("button").forEach(b => { b.disabled = busy; });
 }
 
-function renderState(pet) {
-  const st = pet.state;
-  document.getElementById("bars").innerHTML = numericKeys.map(dim => {
-    const shown = st[dim] == null ? 50 : st[dim];
-    const label = barLabels[dim] || dim;
-    return '<div class="bar-row" data-dim="' + dim + '">'
-      + '<span class="bar-label">' + esc(label) + '</span>'
-      + '<span class="bar-track"><span class="bar-fill" style="width:'
-      + shown + '%;background:' + barColor(shown) + '"></span></span>'
-      + '<input class="bar-input" type="number" min="0" max="100" value="'
-      + Math.round(shown) + '"></div>';
-  }).join("");
-  document.querySelectorAll("#bars .bar-row").forEach(row => {
-    const input = row.querySelector(".bar-input");
-    const fill = row.querySelector(".bar-fill");
-    input.addEventListener("input", () => {
-      const v = Math.max(0, Math.min(100, Number(input.value) || 0));
-      fill.style.width = v + "%";
-      fill.style.background = barColor(v);
-    });
-  });
-  document.getElementById("vibeInput").value = st.recent_vibe || "";
-
+function renderMeta(pet) {
+  const st = pet.state || {};
   document.getElementById("meta").innerHTML = [
     ["chat_id", esc(pet.chat_id)],
     ["pet_id", pet.id],
-    ["年龄", fmtAge(pet.born_at)],
-    ["消息数", pet.message_count],
+    ["创建时长", fmtAge(pet.born_at)],
+    ["消息总数", pet.message_count],
     ["记忆卡片", pet.card_count],
     ["最后互动", fmtTime(st.last_update_ts)],
+    ["最后回复", fmtTime(st.last_reply_ts)],
     ["最后主动发言", fmtTime(st.last_proactive_ts)],
+    ["前次主动话题", esc(st.last_proactive_topic || "无")],
+    ["待办交付", st.pending_deliverable ? esc(st.pending_deliverable.task || "有") : "无"],
   ].map(([k, v]) => "<div><span>" + k + "</span>" + v + "</div>").join("");
-  renderGameplay(st);
-}
-
-function renderGameplay(st) {
-  const need = st.active_need || {};
-  document.getElementById("needBox").innerHTML = need.kind
-    ? '<div><strong>' + esc(need.title || need.kind) + '</strong></div>'
-      + '<div>' + esc(need.description || "") + '</div>'
-      + '<div class="muted">severity ' + esc(need.severity || 1)
-      + ' · expires ' + fmtTime(need.expires_at) + '</div>'
-    : '<div class="empty">暂无需求</div>';
 }
 
 function renderCards(cards) {
   document.getElementById("cardCount").textContent = "(" + cards.length + ")";
   const box = document.getElementById("cards");
   if (!cards.length) { box.innerHTML = '<div class="empty">还没有记忆卡片</div>'; return; }
-  box.innerHTML = cards.map(c =>
-    '<div class="card">'
-    + '<div class="when">' + esc(c.when || "") + "</div>"
-    + '<div><span class="who">' + esc(c.who || "") + "</span> "
-    + esc(c.what || "") + "</div>"
-    + (c.vibe ? '<div class="vibe-tag">' + esc(c.vibe) + "</div>" : "")
-    + "</div>"
-  ).join("");
+  box.innerHTML = cards.map(c => {
+    const kind = c.kind || "reality";
+    const kindLabel = kind === "imagination" ? "🌙 梦境/想象" : (kind === "hearsay" ? "🗣️ 转述" : "📌 真实互动");
+    return '<div class="card ' + esc(kind) + '">'
+      + '<div class="when"><span class="kind-badge">' + kindLabel + '</span>' + esc(c.when || "") + "</div>"
+      + '<div><span class="who">' + esc(c.who || "") + "</span> "
+      + esc(c.what || "") + "</div>"
+      + (c.vibe ? '<div class="vibe-tag">' + esc(c.vibe) + "</div>" : "")
+      + "</div>";
+  }).join("");
 }
 
 function renderMessages(msgs) {
@@ -303,7 +236,7 @@ function renderMessages(msgs) {
   if (!msgs.length) { box.innerHTML = '<div class="empty">还没有消息</div>'; return; }
   box.innerHTML = msgs.map(m => {
     const cls = m.role === "assistant" ? "assistant" : (m.is_observer ? "observer" : "");
-    const name = m.role === "assistant" ? "🐾 宠物"
+    const name = m.role === "assistant" ? "🪰 小苍蝇"
       : (m.sender_name || "群友") + (m.is_observer ? "（旁听）" : "");
     return '<div class="msg ' + cls + '">'
       + '<span class="name">' + esc(name) + "</span>"
@@ -318,198 +251,190 @@ async function loadPet(petId) {
     api("/gm/cards?pet_id=" + petId + "&limit=50"),
     api("/gm/messages?pet_id=" + petId + "&limit=60"),
   ]);
-  renderCards(cardsResp.cards);
-  renderMessages(msgResp.messages);
+  renderCards(cardsResp.cards || []);
+  renderMessages(msgResp.messages || []);
 }
 
-async function refresh() {
+async function refreshAll(keepSelection) {
   try {
     const data = await api("/gm/pets");
-    barLabels = data.bar_labels || {};
-    numericKeys = data.numeric_keys || [];
     const pets = data.pets || [];
-    const sel = document.getElementById("petSelect");
-    if (sel.options.length !== pets.length) {
-      sel.innerHTML = pets.map(p =>
-        '<option value="' + p.id + '">#' + p.id + " " + esc(p.chat_id) + "</option>").join("");
-    }
     if (!pets.length) {
-      document.getElementById("err").textContent = "还没有宠物。";
+      document.getElementById("err").textContent = "数据库里还没有群聊/宠物记录。在飞书群里 @ 它一次即可自动注册。";
+      document.getElementById("main").style.display = "none";
       return;
     }
     document.getElementById("err").textContent = "";
     document.getElementById("main").style.display = "grid";
-    if (currentPet == null) currentPet = pets[0].id;
-    sel.value = currentPet;
-    const pet = pets.find(p => p.id == currentPet) || pets[0];
-    renderState(pet);
-    await loadPet(pet.id);
-    document.getElementById("refreshInfo").textContent =
-      "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
-  } catch (e) {
-    document.getElementById("err").textContent = "加载失败: " + e.message;
+
+    const sel = document.getElementById("petSelect");
+    const prevId = keepSelection && sel.value ? Number(sel.value) : (currentPet ? currentPet.id : pets[0].id);
+    sel.innerHTML = pets.map(p =>
+      '<option value="' + p.id + '">' + esc(p.chat_id) + " (id=" + p.id + ")</option>"
+    ).join("");
+    const matched = pets.find(p => p.id === prevId) || pets[0];
+    sel.value = String(matched.id);
+    currentPet = matched;
+    renderMeta(matched);
+    await loadPet(matched.id);
+    document.getElementById("refreshInfo").textContent = "更新于 " + new Date().toLocaleTimeString();
+  } catch (err) {
+    document.getElementById("err").textContent = "加载失败: " + err.message;
   }
 }
 
-async function gmAction(path, body, okMsg) {
-  const res = document.getElementById("gmResult");
-  res.className = "gm-result";
-  res.textContent = "处理中…";
+document.getElementById("petSelect").addEventListener("change", async (e) => {
+  const id = Number(e.target.value);
+  const data = await api("/gm/pets");
+  const pet = (data.pets || []).find(p => p.id === id);
+  if (pet) {
+    currentPet = pet;
+    renderMeta(pet);
+    await loadPet(id);
+  }
+});
+
+document.querySelectorAll(".gm-btn").forEach(btn => {
+  btn.addEventListener("click", async () => {
+    if (!currentPet) return;
+    const act = btn.dataset.act;
+    const res = document.getElementById("gmResult");
+    res.className = "gm-result";
+    res.textContent = "执行中...";
+    setBusy(true);
+    try {
+      let r;
+      if (act === "speak") {
+        const trig = document.getElementById("speakTrigger").value.trim();
+        r = await apiPost("/gm/speak", { pet_id: currentPet.id, trigger: trig || undefined });
+      } else if (act === "dream") {
+        r = await apiPost("/gm/dream", { pet_id: currentPet.id, mark: document.getElementById("markDate").checked });
+      } else if (act === "diary") {
+        r = await apiPost("/gm/diary", { pet_id: currentPet.id, mark: document.getElementById("markDate").checked });
+      } else if (act === "tick") {
+        r = await apiPost("/gm/tick", { pet_id: currentPet.id });
+      }
+      res.className = "gm-result ok";
+      res.textContent = "成功: " + JSON.stringify(r);
+      await refreshAll(true);
+    } catch (err) {
+      res.className = "gm-result bad";
+      res.textContent = "失败: " + err.message;
+    } finally {
+      setBusy(false);
+    }
+  });
+});
+
+document.getElementById("sendTextBtn").addEventListener("click", async () => {
+  if (!currentPet) return;
+  const input = document.getElementById("sendTextInput");
+  const text = input.value.trim();
+  const res = document.getElementById("textResult");
+  if (!text) { res.className = "gm-result bad"; res.textContent = "请输入文字"; return; }
+  res.className = "gm-result"; res.textContent = "发送中...";
   setBusy(true);
   try {
-    const j = await apiPost(path, body);
-    res.className = "gm-result ok";
-    res.textContent = okMsg
-      + (j.reply ? " — " + j.reply : "")
-      + (j.spoke === false ? "（未触发发言）" : "");
-    await refresh();
-  } catch (e) {
-    res.className = "gm-result bad";
-    res.textContent = "失败: " + e.message;
+    await apiPost("/gm/text", { pet_id: currentPet.id, text });
+    res.className = "gm-result ok"; res.textContent = "已发送";
+    input.value = "";
+    await refreshAll(true);
+  } catch (err) {
+    res.className = "gm-result bad"; res.textContent = "失败: " + err.message;
   } finally {
     setBusy(false);
   }
-}
+});
 
-function saveState() {
-  if (currentPet == null) return;
-  const set = {};
-  document.querySelectorAll("#bars .bar-row").forEach(row => {
-    const dim = row.dataset.dim;
-    const shown = Math.max(0, Math.min(100,
-      Number(row.querySelector(".bar-input").value) || 0));
-    set[dim] = shown;
-  });
-  const body = { pet_id: Number(currentPet), set: set };
-  const vibe = document.getElementById("vibeInput").value.trim();
-  if (vibe) body.recent_vibe = vibe;
-  gmAction("/gm/state", body, "状态已保存");
-}
+let pendingImageFile = null;
+const imageDrop = document.getElementById("imageDrop");
+const imageFile = document.getElementById("imageFile");
+const imagePreview = document.getElementById("imagePreview");
+const previewImg = document.getElementById("previewImg");
+const previewMeta = document.getElementById("previewMeta");
+const sendImageBtn = document.getElementById("sendImageBtn");
+const clearImageBtn = document.getElementById("clearImageBtn");
+const imageResult = document.getElementById("imageResult");
 
-function gmButton(act) {
-  if (currentPet == null) return;
-  const body = { pet_id: Number(currentPet) };
-  if (act === "tick") { gmAction("/gm/tick", body, "已 tick 当前宠物"); return; }
-  if (act === "speak") {
-    const t = document.getElementById("speakTrigger").value.trim();
-    if (t) body.trigger = t;
-    gmAction("/gm/speak", body, "已触发主动发言");
+function setImageFile(file) {
+  if (!file) return;
+  if (!file.type.startsWith("image/")) {
+    imageResult.className = "gm-result bad"; imageResult.textContent = "不是图片文件: " + file.type;
     return;
   }
-  body.mark = document.getElementById("markDate").checked;
-  gmAction("/gm/" + act, body, act === "dream" ? "已触发梦境" : "已触发日记");
-}
-
-document.getElementById("petSelect").addEventListener("change", e => {
-  currentPet = e.target.value;
-  refresh();
-});
-document.getElementById("saveState").addEventListener("click", saveState);
-document.getElementById("vibeRandom").addEventListener("click", () => {
-  if (currentPet == null) return;
-  gmAction("/gm/state", { pet_id: Number(currentPet), recent_vibe: "random" }, "已重抽 vibe");
-});
-let pendingImageFile = null;
-document.getElementById("sendTextBtn").addEventListener("click", async () => {
-  const inp = document.getElementById("sendTextInput");
-  const t = inp.value.trim();
-  if (!t || currentPet == null) return;
-  const res = document.getElementById("textResult");
-  res.className = "gm-result"; res.textContent = "发送中…"; setBusy(true);
-  try {
-    const j = await apiPost("/gm/text", { pet_id: Number(currentPet), text: t });
-    res.className = "gm-result ok"; res.textContent = "已发送到群 ✓";
-    inp.value = ""; await refresh();
-  } catch (e) {
-    res.className = "gm-result bad"; res.textContent = "发送失败: " + e.message;
-  } finally {
-    setBusy(false);
-  }
-});
-function setImageFile(file) {
-  if (!file || !file.type || !file.type.startsWith("image/")) return;
   if (file.size > 10 * 1024 * 1024) {
-    const r = document.getElementById("imageResult");
-    r.className = "gm-result bad"; r.textContent = "图片超过 10MB，请压缩后重试";
+    imageResult.className = "gm-result bad"; imageResult.textContent = "图片不能超过 10MB";
     return;
   }
   pendingImageFile = file;
   const url = URL.createObjectURL(file);
-  document.getElementById("previewImg").src = url;
-  document.getElementById("previewMeta").textContent = file.name + " · " + (file.size/1024).toFixed(1) + " KB · " + file.type;
-  document.getElementById("imagePreview").style.display = "block";
-  document.getElementById("clearImageBtn").style.display = "inline-block";
-  document.getElementById("sendImageBtn").disabled = !currentPet;
-  const r = document.getElementById("imageResult"); r.className = "gm-result"; r.textContent = "";
+  previewImg.src = url;
+  previewMeta.textContent = (file.name || "paste.png") + " · " + (file.size / 1024).toFixed(1) + " KB";
+  imagePreview.style.display = "block";
+  sendImageBtn.disabled = false;
+  clearImageBtn.style.display = "inline-block";
+  imageResult.textContent = "";
 }
+
 function clearImage() {
   pendingImageFile = null;
-  document.getElementById("imageFile").value = "";
-  document.getElementById("imagePreview").style.display = "none";
-  document.getElementById("previewImg").removeAttribute("src");
-  document.getElementById("previewMeta").textContent = "";
-  document.getElementById("clearImageBtn").style.display = "none";
-  document.getElementById("sendImageBtn").disabled = true;
-  const r = document.getElementById("imageResult"); r.className = "gm-result"; r.textContent = "";
+  imagePreview.style.display = "none";
+  previewImg.src = "";
+  previewMeta.textContent = "";
+  sendImageBtn.disabled = true;
+  clearImageBtn.style.display = "none";
+  imageFile.value = "";
+  imageResult.textContent = "";
 }
-async function sendImage() {
-  if (!pendingImageFile || currentPet == null) return;
-  const btn = document.getElementById("sendImageBtn");
-  const res = document.getElementById("imageResult");
-  res.className = "gm-result"; res.textContent = "上传发送中…";
-  btn.disabled = true; setBusy(true);
+
+imageDrop.addEventListener("click", () => imageFile.click());
+imageFile.addEventListener("change", () => { if (imageFile.files[0]) setImageFile(imageFile.files[0]); });
+clearImageBtn.addEventListener("click", clearImage);
+
+window.addEventListener("paste", (e) => {
+  const items = (e.clipboardData || {}).items || [];
+  for (const item of items) {
+    if (item.type && item.type.startsWith("image/")) {
+      const file = item.getAsFile();
+      if (file) { setImageFile(file); e.preventDefault(); break; }
+    }
+  }
+});
+
+sendImageBtn.addEventListener("click", async () => {
+  if (!currentPet || !pendingImageFile) return;
+  imageResult.className = "gm-result"; imageResult.textContent = "上传并发送中...";
+  sendImageBtn.disabled = true;
   try {
     const fd = new FormData();
-    fd.append("file", pendingImageFile, pendingImageFile.name || "image.png");
-    fd.append("pet_id", String(currentPet));
-    const resp = await fetch(withToken("/gm/image"), { method: "POST", body: fd });
-    const j = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(j.error || ("HTTP " + resp.status));
-    res.className = "gm-result ok";
-    res.textContent = "已发送到群 ✓  image_key=" + (j.image_key||"") + " message_id=" + (j.message_id||"");
+    fd.append("file", pendingImageFile);
+    fd.append("pet_id", String(currentPet.id));
+    const r = await fetch(withToken("/gm/image"), { method: "POST", body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || j.detail || r.status);
+    imageResult.className = "gm-result ok"; imageResult.textContent = "发送成功 (key=" + j.image_key + ")";
     clearImage();
-  } catch (e) {
-    res.className = "gm-result bad";
-    res.textContent = "发送失败: " + e.message;
-    btn.disabled = false;
-  } finally {
-    setBusy(false);
-    if (pendingImageFile) document.getElementById("sendImageBtn").disabled = false;
+    await refreshAll(true);
+  } catch (err) {
+    imageResult.className = "gm-result bad"; imageResult.textContent = "失败: " + err.message;
+    sendImageBtn.disabled = false;
   }
-}
-document.getElementById("imageDrop").addEventListener("click", () => document.getElementById("imageFile").click());
-document.getElementById("imageDrop").addEventListener("dragover", e => { e.preventDefault(); e.currentTarget.classList.add("dragover"); });
-document.getElementById("imageDrop").addEventListener("dragleave", e => e.currentTarget.classList.remove("dragover"));
-document.getElementById("imageDrop").addEventListener("drop", e => {
-  e.preventDefault(); e.currentTarget.classList.remove("dragover");
-  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-  if (f) setImageFile(f);
 });
-document.getElementById("imageDrop").addEventListener("paste", e => {
-  const items = (e.clipboardData && e.clipboardData.files) || [];
-  if (items.length) { const f = items[0]; if (f.type.startsWith("image/")) { e.preventDefault(); setImageFile(f); } }
-});
-document.addEventListener("paste", e => {
-  const ae = document.activeElement;
-  if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
-  const files = e.clipboardData && e.clipboardData.files;
-  if (files && files.length) { const f = files[0]; if (f.type.startsWith("image/")) setImageFile(f); }
-});
-document.getElementById("imageFile").addEventListener("change", e => { const f = e.target.files && e.target.files[0]; if (f) setImageFile(f); });
-document.getElementById("sendImageBtn").addEventListener("click", sendImage);
-document.getElementById("clearImageBtn").addEventListener("click", clearImage);
-document.querySelectorAll(".gm-btn").forEach(btn => {
-  btn.addEventListener("click", () => gmButton(btn.dataset.act));
-});
-refresh();
-setInterval(() => { if (!isEditing()) refresh(); }, REFRESH_MS);
+
+refreshAll();
+setInterval(() => {
+  const active = document.activeElement;
+  if (!active || active.tagName !== "INPUT") {
+    refreshAll(true);
+  }
+}, REFRESH_MS);
 </script>
 </body>
 </html>
 """
 
 
-@router.get("/web")
+@router.get("/web", response_class=HTMLResponse)
 async def web_dashboard(req: Request):
     container = _container(req)
     if not container.config.gm_token:

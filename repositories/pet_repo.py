@@ -78,9 +78,7 @@ class PetRepository:
             }
             for row in msg_rows
         ]
-        current = self.state_domain.decay_state(
-            self.decode_state(pet_row["state_json"]), time.time(), pet_id
-        )
+        current = self.decode_state(pet_row["state_json"])
         return history, current
 
     async def load_pet_context(self, pet_id: int) -> tuple[list[dict], dict]:
@@ -115,9 +113,7 @@ class PetRepository:
             ).fetchone()
         if row is None:
             raise ValueError(f"pet not found: {pet_id}")
-        return self.state_domain.decay_state(
-            self.decode_state(row["state_json"]), time.time(), pet_id
-        )
+        return self.decode_state(row["state_json"])
 
     async def load_pet_state(self, pet_id: int) -> dict:
         return await asyncio.to_thread(self._load_pet_state, pet_id)

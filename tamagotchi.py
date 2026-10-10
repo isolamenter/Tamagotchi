@@ -9,7 +9,6 @@ from fastapi import FastAPI
 
 from config import AppConfig, load_config
 from domain.card import CardDomain
-from domain.gameplay import GameplayDomain
 from domain.memory import MemoryDomain
 from domain.pet import PetDomain
 from domain.state import StateDomain
@@ -26,7 +25,6 @@ from routes import feishu, gm, health, web
 from runtime import RuntimeState
 from services.autonomous_service import AutonomousService
 from services.card_service import CardService
-from services.gameplay_service import GameplayService
 from services.memory_service import MemoryService
 from services.observer_service import ObserverService
 from services.reply_service import ReplyService
@@ -46,7 +44,6 @@ class AppServices:
     observer: ObserverService
     autonomous: AutonomousService
     card: CardService
-    gameplay: GameplayService
     memory: MemoryService
     style: StyleService
 
@@ -58,7 +55,6 @@ class AppContainer:
     db: Database
     state_domain: StateDomain
     card_domain: CardDomain
-    gameplay_domain: GameplayDomain
     pet_domain: PetDomain
     memory_domain: MemoryDomain
     system_repo: SystemRepository
@@ -77,8 +73,7 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
     runtime = RuntimeState()
 
     state_domain = StateDomain(config)
-    gameplay_domain = GameplayDomain(config)
-    card_domain = CardDomain(config, state_domain, gameplay_domain)
+    card_domain = CardDomain(config)
     pet_domain = PetDomain(config)
     memory_domain = MemoryDomain(config)
 
@@ -116,23 +111,15 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
         memory_service,
         pet_repo,
     )
-    gameplay_service = GameplayService(
-        state_domain,
-        gameplay_domain,
-        pet_repo,
-    )
     card_service = CardService(
         config,
         runtime,
-        state_domain,
-        gameplay_domain,
         card_domain,
         pet_domain,
         pet_repo,
         card_repo,
         message_repo,
         system_repo,
-        gameplay_service,
         memory_service,
         feishu_client,
         llm,
@@ -141,13 +128,11 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
     autonomous_service = AutonomousService(
         config,
         state_domain,
-        gameplay_domain,
         card_domain,
         pet_domain,
         pet_repo,
         message_repo,
         system_repo,
-        gameplay_service,
         memory_service,
         observer_service,
         feishu_client,
@@ -159,14 +144,12 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
         config,
         runtime,
         state_domain,
-        gameplay_domain,
         pet_domain,
         pet_repo,
         message_repo,
         system_repo,
         memory_service,
         observer_service,
-        card_service,
         feishu_client,
         llm,
         style_service=style_service,
@@ -177,7 +160,6 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
         observer=observer_service,
         autonomous=autonomous_service,
         card=card_service,
-        gameplay=gameplay_service,
         memory=memory_service,
         style=style_service,
     )
@@ -188,7 +170,6 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
         db=db,
         state_domain=state_domain,
         card_domain=card_domain,
-        gameplay_domain=gameplay_domain,
         pet_domain=pet_domain,
         memory_domain=memory_domain,
         system_repo=system_repo,

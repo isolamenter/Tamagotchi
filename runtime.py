@@ -9,9 +9,10 @@ class RuntimeState:
     token_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     compress_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
     state_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
+    chat_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
     card_update_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     observer_buffer: dict[int, list[dict]] = field(default_factory=dict)
-    reply_gate: dict[int, float] = field(default_factory=dict)
+    chat_pending_messages: dict[int, list[dict]] = field(default_factory=dict)
 
     def compress_lock(self, pet_id: int) -> asyncio.Lock:
         lock = self.compress_locks.get(pet_id)
@@ -26,6 +27,14 @@ class RuntimeState:
         if lock is None:
             lock = asyncio.Lock()
             self.state_locks[pet_id] = lock
+        return lock
+
+    def chat_lock(self, pet_id: int) -> asyncio.Lock:
+        """串行化同一宠物的直接回复处理，防止并发竞争。"""
+        lock = self.chat_locks.get(pet_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.chat_locks[pet_id] = lock
         return lock
 
     def card_update_lock(self, message_id: str) -> asyncio.Lock:

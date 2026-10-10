@@ -47,38 +47,23 @@ class AppConfig:
     compress_user_message_template: str
     recall_header: str
     recall_card_template: str
-    state_render_header: str
-    state_render_line_prefix: str
-    state_render_vibe_template: str
-    state_render_lines: dict
     json_output_prompt: str
+    proactive_eval_prompt: str
     proactive_prompt: str
-    proactive_trigger_templates: dict
-    proactive_user_stub_template: str
     scheduled_event_prompt: str
-    scheduled_user_stub_template: str
     fallback_replies: dict
     gm_default_speak_trigger: str
 
     buffer_keep: int
     compress_threshold: int
     recall_scan_max: int
-    reply_min_interval_sec: int
+    reply_debounce_sec: float
     observer_flush_max_count: int
     reply_max_tokens: int
     reply_temperature: float
     autonomous_temperature: float
-    card_reply_temperature: float
     scheduled_max_tokens: int
     compress_max_tokens: int
-    card_reply_max_tokens: int
-
-    initial_state: dict[str, float]
-    decay_active: dict
-    decay_quiet: dict
-    state_bands: dict
-    state_numeric_keys: tuple[str, ...]
-    recent_vibe_pool: list
 
     tick_interval_sec: int
     proactive_cooldown_sec: int
@@ -86,56 +71,18 @@ class AppConfig:
     quiet_hours: tuple[int, int]
     quiet_weekends: bool
     scheduled_events: tuple[dict, ...]
-    satiety_trigger: float
-    mood_trigger: float
-    energy_trigger: float
-    curiosity_trigger: float
-    affection_trigger: float
-    spontaneous_prob: float
+    scheduled_grace_sec: int
+    proactive_min_new_msgs: int
 
     card_enabled: bool
-    card_bar_width: int
-    card_max_buttons: int
-    card_scheduled_max_settlements: int
-    card_default_actions: list
-    card_button_ttl_sec: int
-    card_log_max_lines: int
-    card_actions: dict
-    card_bar_filled: str
-    card_bar_empty: str
-    card_bars_header: str
+    card_image_timeout_sec: int
     card_toast_done: str
     card_toast_expired: str
-    card_followup_prefix: str
-    card_vibe_template: str
-    card_bar_labels: dict
-    card_action_text: dict
-    card_action_reply_prompt: str
-    card_image_timeout_sec: int
-
-    gameplay_enabled: bool
-    gameplay_need_ttl_sec: int
-    gameplay_need_cooldown_sec: int
-    gameplay_need_thresholds: dict[str, float]
-    gameplay_resolution_thresholds: dict[str, float]
-    gameplay_need_severe_ttl_sec: int
-    scheduled_grace_sec: int
 
 
 def _load_toml(path: Path) -> dict:
     with open(path, "rb") as f:
         return tomllib.load(f)
-
-
-def _parse_decay_table(initial_state: dict[str, float], raw: dict) -> dict:
-    out = {}
-    for key in initial_state.keys():
-        cfg = raw.get(key) or {}
-        out[key] = {
-            "baseline": float(cfg.get("baseline", initial_state.get(key, 50.0))),
-            "rate": float(cfg.get("rate", 0.0)),
-        }
-    return out
 
 
 def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
@@ -151,7 +98,6 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
     if llm_provider not in {"openai", "gemini"}:
         raise ValueError("LLM_PROVIDER must be 'openai' or 'gemini'")
     gemini_base_url = env.get("GEMINI_BASE_URL", "")
-    # provider=gemini 时缺 key 直接 KeyError 早死（符合 os.environ 直读约束）
     gemini_api_key = (
         env["GEMINI_API_KEY"] if llm_provider == "gemini" else env.get("GEMINI_API_KEY", "")
     )
@@ -161,44 +107,34 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
     style_corpus = _load_toml(ROOT_DIR / "style_corpus.toml")
     pet_config = _load_toml(ROOT_DIR / "pet_config.toml")
 
-    pet_style_prompt = pet_style["style"]["prompt"]
-    pet_style_reinforcement = pet_style["style"]["reinforcement"]
-    system_prompt = prompts["system"]["template"].format(style_prompt=pet_style_prompt)
+    memory_config = pet_config.get("memory", {})
+    reply_config = pet_config.get("reply", {})
+    observer_config = pet_config.get("observer", {})
+    llm_config = pet_config.get("llm", {})
+    autonomous_config = pet_config.get("autonomous", {})
+    card_config = pet_config.get("card", {})
+    style_retrieval = pet_config.get("style_retrieval", {})
+
+    pet_style_prompt = pet_style["style"]["prompt"].strip()
+    pet_style_reinforcement = pet_style["style"]["reinforcement"].strip()
+    system_prompt = prompts["system"]["template"].format(
+        style_prompt=pet_style_prompt
+    )
     persona_reinforcement = prompts["persona_reinforcement"]["template"].format(
         style_reinforcement=pet_style_reinforcement
     )
 
-    memory_config = pet_config["memory"]
-    reply_config = pet_config["reply"]
-    observer_config = pet_config["observer"]
-    llm_config = pet_config["llm"]
-    style_retrieval = pet_config.get("style_retrieval", {})
-    state_config = pet_config["state"]
+    quiet_start = int(autonomous_config.get("quiet_start_hour", 19))
+    quiet_end = int(autonomous_config.get("quiet_end_hour", 10))
+    quiet_hours = (quiet_start, quiet_end)
 
-    initial_state = {k: float(v) for k, v in state_config["initial"].items()}
-    state_numeric_keys = tuple(initial_state.keys())
-    decay_active = _parse_decay_table(initial_state, state_config.get("decay_active", {}))
-    decay_quiet = _parse_decay_table(initial_state, state_config.get("decay_quiet", {}))
-
-    autonomous_config = pet_config["autonomous"]
-    quiet_hours = (
-        int(autonomous_config["quiet_start_hour"]),
-        int(autonomous_config["quiet_end_hour"]),
-    )
     scheduled_hour_lock = {"diary": quiet_hours[0], "dream": quiet_hours[1]}
     scheduled_events = tuple(
         {**event, "hour": scheduled_hour_lock.get(event["kind"], event["hour"])}
-        for event in prompts["scheduled_events"]
+        for event in prompts.get("scheduled_events", [])
     )
-    trigger_thresholds = autonomous_config["trigger_thresholds"]
 
-    card_config = pet_config.get("card", {})
-    gameplay_config = pet_config.get("gameplay", {})
     card_prompts = prompts.get("card", {})
-    card_bars = dict(card_prompts.get("bars", {}))
-    card_vibe_template = card_bars.pop("vibe_template", "✨ {vibe}")
-
-    state_render = prompts["state_render"]
 
     return AppConfig(
         feishu_app_id=feishu_app_id,
@@ -206,8 +142,6 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         feishu_verification_token=feishu_verification_token,
         feishu_encrypt_key=feishu_encrypt_key,
         gm_token=gm_token,
-        # The two providers are alternatives: a Gemini-only deployment should
-        # not require unused OpenAI credentials at startup.
         openai_base_url=(env["OPENAI_BASE_URL"] if llm_provider == "openai" else env.get("OPENAI_BASE_URL", "")),
         openai_api_key=(env["OPENAI_API_KEY"] if llm_provider == "openai" else env.get("OPENAI_API_KEY", "")),
         model_name=env.get("CHAT_MODEL", "gpt-4o-mini"),
@@ -232,15 +166,19 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
             "second_semantic_threshold": float(
                 style_retrieval.get("second_semantic_threshold", 0.68)
             ),
-            "second_max_gap": float(style_retrieval.get("second_max_gap", 0.05)),
-            "keyword_bonus": float(style_retrieval.get("keyword_bonus", 0.04)),
+            "second_max_gap": float(
+                style_retrieval.get("second_max_gap", 0.05)
+            ),
+            "keyword_bonus": float(
+                style_retrieval.get("keyword_bonus", 0.04)
+            ),
             "keyword_bonus_cap": float(
                 style_retrieval.get("keyword_bonus_cap", 0.12)
             ),
             "context_messages": int(style_retrieval.get("context_messages", 2)),
             "query_max_chars": int(style_retrieval.get("query_max_chars", 1500)),
             "assistant_history_keep": int(
-                style_retrieval.get("assistant_history_keep", 4)
+                style_retrieval.get("assistant_history_keep", 2)
             ),
             "embedding_batch_size": int(
                 style_retrieval.get("embedding_batch_size", 50)
@@ -262,93 +200,32 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         compress_user_message_template=prompts["compress"]["user_message_template"],
         recall_header=prompts["recall"]["header"],
         recall_card_template=prompts["recall"]["card_template"],
-        state_render_header=state_render["header"],
-        state_render_line_prefix=state_render["line_prefix"],
-        state_render_vibe_template=state_render["vibe_template"],
-        state_render_lines=state_render["lines"],
         json_output_prompt=prompts["json_output"]["prompt"],
+        proactive_eval_prompt=prompts.get("proactive_eval", {}).get("prompt", ""),
         proactive_prompt=prompts["proactive"]["prompt"],
-        proactive_trigger_templates=prompts["proactive_triggers"],
-        proactive_user_stub_template=prompts["autonomous_user_stub"]["proactive"],
         scheduled_event_prompt=prompts["scheduled_event"]["prompt"],
-        scheduled_user_stub_template=prompts["autonomous_user_stub"]["scheduled"],
         fallback_replies=prompts["fallback_reply"],
         gm_default_speak_trigger=prompts["gm"]["default_speak_trigger"],
-        buffer_keep=int(memory_config["buffer_keep"]),
-        compress_threshold=int(memory_config["compress_threshold"]),
+        buffer_keep=int(memory_config.get("buffer_keep", 80)),
+        compress_threshold=int(memory_config.get("compress_threshold", 200)),
         recall_scan_max=int(memory_config.get("recall_scan_max", 2000)),
-        reply_min_interval_sec=int(reply_config["min_interval_sec"]),
-        observer_flush_max_count=int(observer_config["flush_max_count"]),
-        reply_max_tokens=int(llm_config["reply_max_tokens"]),
-        reply_temperature=float(llm_config.get("reply_temperature", 0.35)),
+        reply_debounce_sec=float(reply_config.get("debounce_sec", 1.5)),
+        observer_flush_max_count=int(observer_config.get("flush_max_count", 50)),
+        reply_max_tokens=int(llm_config.get("reply_max_tokens", 350)),
+        reply_temperature=float(llm_config.get("reply_temperature", 0.5)),
         autonomous_temperature=float(llm_config.get("autonomous_temperature", 0.5)),
-        card_reply_temperature=float(llm_config.get("card_reply_temperature", 0.35)),
-        scheduled_max_tokens=int(llm_config["scheduled_max_tokens"]),
-        compress_max_tokens=int(llm_config["compress_max_tokens"]),
-        card_reply_max_tokens=int(llm_config.get("card_reply_max_tokens", 150)),
-        initial_state=initial_state,
-        decay_active=decay_active,
-        decay_quiet=decay_quiet,
-        state_bands={k: dict(v) for k, v in state_config.get("bands", {}).items()},
-        state_numeric_keys=state_numeric_keys,
-        recent_vibe_pool=list(pet_style.get("recent_vibes", {}).get("pool", [])),
-        tick_interval_sec=int(autonomous_config["tick_interval_sec"]),
-        proactive_cooldown_sec=int(autonomous_config["cooldown_sec"]),
-        proactive_tz_offset_hours=float(autonomous_config["timezone_offset_hours"]),
+        scheduled_max_tokens=int(llm_config.get("scheduled_max_tokens", 1000)),
+        compress_max_tokens=int(llm_config.get("compress_max_tokens", 2000)),
+        tick_interval_sec=int(autonomous_config.get("tick_interval_sec", 600)),
+        proactive_cooldown_sec=int(autonomous_config.get("cooldown_sec", 7200)),
+        proactive_tz_offset_hours=float(autonomous_config.get("timezone_offset_hours", 8.0)),
         quiet_hours=quiet_hours,
         quiet_weekends=bool(autonomous_config.get("quiet_weekends", False)),
-        scheduled_events=scheduled_events,
-        satiety_trigger=float(trigger_thresholds["satiety"]),
-        mood_trigger=float(trigger_thresholds["mood"]),
-        energy_trigger=float(trigger_thresholds["energy"]),
-        curiosity_trigger=float(trigger_thresholds["curiosity"]),
-        affection_trigger=float(trigger_thresholds["affection"]),
-        spontaneous_prob=float(autonomous_config["spontaneous_prob"]),
-        card_enabled=bool(card_config.get("enabled", False)),
-        card_bar_width=int(card_config.get("bar_width", 10)),
-        card_max_buttons=int(card_config.get("max_buttons", 3)),
-        card_scheduled_max_settlements=int(card_config.get("scheduled_max_settlements", 3)),
-        card_default_actions=list(card_config.get("default_actions", [])),
-        card_button_ttl_sec=int(card_config.get("button_ttl_sec", 1800)),
-        card_log_max_lines=int(card_config.get("card_log_max_lines", 6)),
-        card_actions={k: dict(v) for k, v in card_config.get("actions", {}).items()},
-        card_bar_filled=card_prompts.get("bar_filled", "▰"),
-        card_bar_empty=card_prompts.get("bar_empty", "▱"),
-        card_bars_header=card_prompts.get("bars_header", ""),
-        card_toast_done=card_prompts.get("toast_done", "✓"),
-        card_toast_expired=card_prompts.get("toast_expired", "这张卡片过期了~"),
-        card_followup_prefix=card_prompts.get("followup_prefix", "↳ "),
-        card_vibe_template=card_vibe_template,
-        card_bar_labels=card_bars,
-        card_action_text={k: dict(v) for k, v in card_prompts.get("actions", {}).items()},
-        card_action_reply_prompt=card_prompts.get("action_reply", {}).get("prompt", ""),
-        card_image_timeout_sec=int(card_config.get("image_timeout_sec", 120)),
-        gameplay_enabled=bool(gameplay_config.get("enabled", True)),
-        gameplay_need_ttl_sec=int(gameplay_config.get("need_ttl_sec", 7200)),
-        gameplay_need_cooldown_sec=int(
-            gameplay_config.get(
-                "need_cooldown_sec", gameplay_config.get("need_ttl_sec", 7200)
-            )
-        ),
-        gameplay_need_thresholds={
-            k: float(v)
-            for k, v in gameplay_config.get(
-                "need_thresholds",
-                {
-                    "hungry": 80,
-                    "sleepy": 25,
-                    "sad": 30,
-                    "bored": 30,
-                    "lonely": 25,
-                },
-            ).items()
-        },
-        gameplay_resolution_thresholds={
-            k: float(v)
-            for k, v in gameplay_config.get("resolution_thresholds", {}).items()
-        },
-        gameplay_need_severe_ttl_sec=int(
-            gameplay_config.get("need_severe_ttl_sec", gameplay_config.get("need_ttl_sec", 7200))
-        ),
+        scheduled_events=tuple(scheduled_events),
         scheduled_grace_sec=int(autonomous_config.get("scheduled_grace_sec", 3600)),
+        proactive_min_new_msgs=int(autonomous_config.get("proactive_min_new_msgs", 3)),
+        card_enabled=bool(card_config.get("enabled", True)),
+        card_image_timeout_sec=int(card_config.get("image_timeout_sec", 120)),
+        card_toast_done=card_prompts.get("toast_done", "没问题"),
+        card_toast_expired=card_prompts.get("toast_expired", "拉了"),
     )
