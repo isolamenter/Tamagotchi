@@ -314,7 +314,10 @@ class AutonomousService:
         if self.state_domain.in_quiet_hours(now):
             return False
         last_proactive_ts = float(current.get("last_proactive_ts", 0) or 0)
-        if now - last_proactive_ts < self.config.proactive_cooldown_sec:
+        cooldown = self.config.proactive_cooldown_sec
+        if not current.get("last_proactive_answered", True):
+            cooldown = getattr(self.config, "unanswered_cooldown_sec", cooldown)
+        if now - last_proactive_ts < cooldown:
             return False
 
         # 4. 基于新人类素材的主动发言价值评估

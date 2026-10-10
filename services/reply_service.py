@@ -40,6 +40,7 @@ class ReplyService:
         llm: LLMClient,
         style_service: StyleService | None = None,
         card_service: Any | None = None,
+        autonomous_service: Any | None = None,
     ):
         self.config = config
         self.runtime = runtime
@@ -53,6 +54,8 @@ class ReplyService:
         self.feishu = feishu
         self.llm = llm
         self.style_service = style_service
+        self.card_service = card_service
+        self.autonomous_service = autonomous_service
 
     @classmethod
     def parse_llm_content(cls, content: str) -> tuple[str, str, str, bool]:
@@ -409,6 +412,11 @@ class ReplyService:
             await self._buffer_observer_text(
                 pet_id, user_text, sender_name, sender_open_id
             )
+            if (
+                getattr(self.config, "event_interject_enabled", True)
+                and getattr(self, "autonomous_service", None) is not None
+            ):
+                asyncio.create_task(self.maybe_event_interject(pet_id, chat_id))
             return
 
         pet_id = await self.pet_repo.get_or_create_pet(chat_id)
@@ -502,3 +510,58 @@ class ReplyService:
                 )
 
             await self._maybe_compress(pet_id)
+
+    async def maybe_event_interject(self, pet_id: int, chat_id: str) -> None:
+        """群内旁听消息到来时，轻量级事件驱动的主动插话判定。"""
+        debounce = float(getattr(self.config, "event_interject_debounce_sec", 2.0) or 0.0)
+        if debounce > 0:
+            await asyncio.sleep(debounce)
+
+        now = time.time()
+        if self.state_domain.in_quiet_hours(now):
+            return
+
+        # 若当前有直接回复正在排队或进行中，跳过主动插话
+        if self.runtime.chat_pending_messages.get(pet_id):
+            return
+        if pet_id in self.runtime.chat_locks and self.runtime.chat_locks[pet_id].locked():
+            return
+
+        current_state = await self.pet_repo.load_pet_state(pet_id)
+        last_proactive_ts = float(current_state.get("last_proactive_ts", 0) or 0)
+        last_reply_ts = float(current_state.get("last_reply_ts", 0) or 0)
+
+        # 刚直接回复过不久（30 秒内），避免连珠炮插嘴
+        if now - last_reply_ts < 30.0:
+            return
+
+        cooldown = self.config.proactive_cooldown_sec
+        if not current_state.get("last_proactive_answered", True):
+            cooldown = getattr(self.config, "unanswered_cooldown_sec", cooldown)
+
+        if now - last_proactive_ts < cooldown:
+            return
+
+        # 将缓冲中的最新旁听消息落库，使评估时能读取到最新对话
+        await self.observer_service.flush_observer_buffer(pet_id)
+
+        try:
+            eval_result = await self.autonomous_service.evaluate_proactive_speaking(
+                pet_id, current_state
+            )
+            if eval_result is None:
+                return
+
+            reason, topic = eval_result
+            log.info(
+                "pet %d event interject triggered: reason=%r topic=%r",
+                pet_id,
+                reason,
+                topic,
+            )
+            async with self.runtime.chat_lock(pet_id):
+                await self.autonomous_service.proactive_speak(
+                    pet_id, chat_id, reason, topic=topic
+                )
+        except Exception:
+            log.exception("event interject failed for pet %d", pet_id)

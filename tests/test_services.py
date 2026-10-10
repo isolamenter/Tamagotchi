@@ -381,5 +381,73 @@ class ProactiveEvaluationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(res)
 
 
+class EventInterjectTests(unittest.IsolatedAsyncioTestCase):
+    def _ret(self, value):
+        async def _inner(*a, **k):
+            return value
+        return _inner()
+
+    async def test_event_interject_triggers_proactive_speak(self):
+        from runtime import RuntimeState
+        from types import SimpleNamespace
+        service = ReplyService.__new__(ReplyService)
+        service.runtime = RuntimeState()
+        service.config = SimpleNamespace(
+            event_interject_debounce_sec=0.0,
+            proactive_cooldown_sec=600,
+            unanswered_cooldown_sec=1800,
+        )
+        service.state_domain = SimpleNamespace(in_quiet_hours=lambda ts: False)
+        service.pet_repo = SimpleNamespace(
+            load_pet_state=lambda pet: self._ret({
+                "last_proactive_ts": 0.0,
+                "last_reply_ts": 0.0,
+                "last_proactive_answered": True,
+            })
+        )
+        service.observer_service = SimpleNamespace(
+            flush_observer_buffer=lambda pet: self._ret(0)
+        )
+        spoken = []
+        async def _speak(pet, chat, reason, topic=""):
+            spoken.append((reason, topic))
+            return ("reply", {})
+        service.autonomous_service = SimpleNamespace(
+            evaluate_proactive_speaking=lambda pet, state: self._ret(("群友暴论", "暴论话题")),
+            proactive_speak=_speak,
+        )
+        await service.maybe_event_interject(1, "c1")
+        self.assertEqual(spoken, [("群友暴论", "暴论话题")])
+
+    async def test_event_interject_suppressed_when_under_unanswered_cooldown(self):
+        import time
+        from runtime import RuntimeState
+        from types import SimpleNamespace
+        service = ReplyService.__new__(ReplyService)
+        service.runtime = RuntimeState()
+        now = time.time()
+        service.config = SimpleNamespace(
+            event_interject_debounce_sec=0.0,
+            proactive_cooldown_sec=600,
+            unanswered_cooldown_sec=1800,
+        )
+        service.state_domain = SimpleNamespace(in_quiet_hours=lambda ts: False)
+        # 上次主动发言才过去 1000 秒，但因为无人回应需要 1800 秒
+        service.pet_repo = SimpleNamespace(
+            load_pet_state=lambda pet: self._ret({
+                "last_proactive_ts": now - 1000,
+                "last_reply_ts": 0.0,
+                "last_proactive_answered": False,
+            })
+        )
+        spoken = []
+        service.autonomous_service = SimpleNamespace(
+            evaluate_proactive_speaking=lambda pet, state: self._ret(("理由", "话题")),
+            proactive_speak=lambda pet, chat, reason, topic="": spoken.append((reason, topic)),
+        )
+        await service.maybe_event_interject(1, "c1")
+        self.assertEqual(spoken, [])
+
+
 if __name__ == "__main__":
     unittest.main()

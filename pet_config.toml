@@ -45,8 +45,10 @@ init_timeout_sec = 30
 [autonomous]
 # 心跳间隔（秒）
 tick_interval_sec = 600
-# 主动发言最小冷却（秒）
-cooldown_sec = 7200
+# 主动发言基础冷却（秒）——缩短为 10 分钟（600 秒）
+cooldown_sec = 600
+# 若前次主动发言无人响应，冷静期延长为 30 分钟（1800 秒）
+unanswered_cooldown_sec = 1800
 # 本地时区偏移（默认上海 +8）
 timezone_offset_hours = 8.0
 # 定时事件发送窗口锁定时间：日记 19:00，梦境 10:00
@@ -57,7 +59,10 @@ quiet_weekends = false
 # 梦境/日记窗口补发宽限（秒）
 scheduled_grace_sec = 3600
 # 触发主动发言评估所需的最少新人类旁听消息数
-proactive_min_new_msgs = 3
+proactive_min_new_msgs = 2
+# 事件驱动主动插嘴开关与防抖（群友发消息时轻量快速判定并现场接梗）
+event_interject_enabled = true
+event_interject_debounce_sec = 2.0
 
 [card]
 # 卡片展示总开关（用于梦境配图与日记等富文本展示）

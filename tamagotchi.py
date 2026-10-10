@@ -153,6 +153,7 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
         feishu_client,
         llm,
         style_service=style_service,
+        autonomous_service=autonomous_service,
     )
 
     services = AppServices(

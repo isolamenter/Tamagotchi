@@ -67,12 +67,15 @@ class AppConfig:
 
     tick_interval_sec: int
     proactive_cooldown_sec: int
+    unanswered_cooldown_sec: int
     proactive_tz_offset_hours: float
     quiet_hours: tuple[int, int]
     quiet_weekends: bool
     scheduled_events: tuple[dict, ...]
     scheduled_grace_sec: int
     proactive_min_new_msgs: int
+    event_interject_enabled: bool
+    event_interject_debounce_sec: float
 
     card_enabled: bool
     card_image_timeout_sec: int
@@ -217,13 +220,16 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         scheduled_max_tokens=int(llm_config.get("scheduled_max_tokens", 1000)),
         compress_max_tokens=int(llm_config.get("compress_max_tokens", 2000)),
         tick_interval_sec=int(autonomous_config.get("tick_interval_sec", 600)),
-        proactive_cooldown_sec=int(autonomous_config.get("cooldown_sec", 7200)),
+        proactive_cooldown_sec=int(autonomous_config.get("cooldown_sec", 600)),
+        unanswered_cooldown_sec=int(autonomous_config.get("unanswered_cooldown_sec", 1800)),
         proactive_tz_offset_hours=float(autonomous_config.get("timezone_offset_hours", 8.0)),
         quiet_hours=quiet_hours,
         quiet_weekends=bool(autonomous_config.get("quiet_weekends", False)),
         scheduled_events=tuple(scheduled_events),
         scheduled_grace_sec=int(autonomous_config.get("scheduled_grace_sec", 3600)),
-        proactive_min_new_msgs=int(autonomous_config.get("proactive_min_new_msgs", 3)),
+        proactive_min_new_msgs=int(autonomous_config.get("proactive_min_new_msgs", 2)),
+        event_interject_enabled=bool(autonomous_config.get("event_interject_enabled", True)),
+        event_interject_debounce_sec=float(autonomous_config.get("event_interject_debounce_sec", 2.0)),
         card_enabled=bool(card_config.get("enabled", True)),
         card_image_timeout_sec=int(card_config.get("image_timeout_sec", 120)),
         card_toast_done=card_prompts.get("toast_done", "没问题"),
