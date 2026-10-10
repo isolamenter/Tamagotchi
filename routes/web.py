@@ -211,7 +211,6 @@ function renderMeta(pet) {
     ["最后回复", fmtTime(st.last_reply_ts)],
     ["最后主动发言", fmtTime(st.last_proactive_ts)],
     ["前次主动话题", esc(st.last_proactive_topic || "无")],
-    ["待办交付", st.pending_deliverable ? esc(st.pending_deliverable.task || "有") : "无"],
   ].map(([k, v]) => "<div><span>" + k + "</span>" + v + "</div>").join("");
 }
 

@@ -18,7 +18,6 @@ class StateDomain:
             "last_diary_date": "",
             "last_proactive_topic": "",
             "last_proactive_answered": True,
-            "pending_deliverable": None,
         }
 
     def normalize_state(self, stored: dict | None) -> dict:
@@ -67,5 +66,4 @@ class StateDomain:
             "last_diary_date": state.get("last_diary_date", ""),
             "last_proactive_topic": state.get("last_proactive_topic", ""),
             "last_proactive_answered": state.get("last_proactive_answered", True),
-            "pending_deliverable": state.get("pending_deliverable"),
         }

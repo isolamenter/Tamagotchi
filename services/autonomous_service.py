@@ -270,25 +270,6 @@ class AutonomousService:
             gen_image=bool(event.get("gen_image")),
         )
 
-    async def deliver_pending(
-        self, pet_id: int, chat_id: str, deliverable: dict
-    ) -> bool:
-        """处理群友明确约定的单次后续交付，交付一次后即刻清空。"""
-        task_desc = deliverable.get("task", "约定内容")
-        prompt = f"群友之前与你明确约定了后续交付：{task_desc}。现在请按你的风格向群里完成本次交付，直接交付结果，交付完成后结束。"
-        result = await self.autonomous_speak(
-            pet_id,
-            chat_id,
-            prompt,
-            f"[完成约定交付] {task_desc}",
-            f"DELIVER task={task_desc[:60]!r}",
-            max_tokens=self.config.reply_max_tokens,
-            set_last_proactive=True,
-            extra_state={"pending_deliverable": None},
-            as_card=False,
-        )
-        return result is not None
-
     async def tick_pet(
         self,
         pet_id: int,
@@ -329,14 +310,7 @@ class AutonomousService:
         if fired_scheduled:
             return True
 
-        # 2. 检查单次约定交付
-        pending = current.get("pending_deliverable")
-        if isinstance(pending, dict) and pending.get("task"):
-            delivered = await self.deliver_pending(pet_id, chat_id, pending)
-            if delivered:
-                return True
-
-        # 3. 检查静默时段与冷却
+        # 2. 检查静默时段与冷却
         if self.state_domain.in_quiet_hours(now):
             return False
         last_proactive_ts = float(current.get("last_proactive_ts", 0) or 0)
