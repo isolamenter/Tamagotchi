@@ -380,6 +380,55 @@ class ProactiveEvaluationTests(unittest.IsolatedAsyncioTestCase):
         res = await service.evaluate_proactive_speaking(1, state)
         self.assertIsNone(res)
 
+    async def test_includes_assistant_replies_in_context(self):
+        from services.autonomous_service import AutonomousService
+        from types import SimpleNamespace
+        service = AutonomousService.__new__(AutonomousService)
+        service.config = SimpleNamespace(
+            proactive_min_new_msgs=2,
+            proactive_eval_prompt="eval_prompt",
+        )
+        service.message_repo = SimpleNamespace(
+            recent_messages=lambda pet, limit: self._ret([
+                {"role": "user", "content": "问题 1", "ts": 100, "sender_name": "张三"},
+                {"role": "assistant", "content": "回答 1", "ts": 101},
+                {"role": "user", "content": "新消息 1", "ts": 102, "sender_name": "李四"},
+                {"role": "user", "content": "新消息 2", "ts": 103, "sender_name": "王五"},
+            ])
+        )
+        captured_dialogue = []
+        async def _mock_chat(msgs, **k):
+            captured_dialogue.append(msgs[1]["content"])
+            return json.dumps({"should_speak": True, "reason": "接梗", "topic": "新话题"})
+        service.llm = SimpleNamespace(chat_json=_mock_chat)
+        # 上次直接回复发生在 ts=101
+        state = {"last_reply_ts": 101, "last_proactive_ts": 0}
+        res = await service.evaluate_proactive_speaking(1, state)
+        self.assertEqual(res, ("接梗", "新话题"))
+        self.assertTrue(len(captured_dialogue) > 0)
+        self.assertIn("[小苍蝇]: 回答 1", captured_dialogue[0])
+        self.assertIn("[张三]: 问题 1", captured_dialogue[0])
+        self.assertIn("[李四]: 新消息 1", captured_dialogue[0])
+
+    async def test_skips_when_no_new_msgs_after_reply(self):
+        from services.autonomous_service import AutonomousService
+        from types import SimpleNamespace
+        service = AutonomousService.__new__(AutonomousService)
+        service.config = SimpleNamespace(
+            proactive_min_new_msgs=2,
+            proactive_eval_prompt="eval_prompt",
+        )
+        service.message_repo = SimpleNamespace(
+            recent_messages=lambda pet, limit: self._ret([
+                {"role": "user", "content": "提问", "ts": 100},
+                {"role": "assistant", "content": "回答", "ts": 101},
+            ])
+        )
+        # 上次直接回复发生在 ts=101，之后没有任何新人类消息
+        state = {"last_reply_ts": 101, "last_proactive_ts": 0}
+        res = await service.evaluate_proactive_speaking(1, state)
+        self.assertIsNone(res)
+
 
 class EventInterjectTests(unittest.IsolatedAsyncioTestCase):
     def _ret(self, value):
@@ -447,6 +496,135 @@ class EventInterjectTests(unittest.IsolatedAsyncioTestCase):
         )
         await service.maybe_event_interject(1, "c1")
         self.assertEqual(spoken, [])
+
+    async def test_event_interject_suppressed_when_recently_replied(self):
+        import time
+        from runtime import RuntimeState
+        from types import SimpleNamespace
+        service = ReplyService.__new__(ReplyService)
+        service.runtime = RuntimeState()
+        now = time.time()
+        service.config = SimpleNamespace(
+            event_interject_debounce_sec=0.0,
+            proactive_cooldown_sec=600,
+            unanswered_cooldown_sec=1800,
+            proactive_reply_cooldown_sec=60.0,
+        )
+        service.state_domain = SimpleNamespace(in_quiet_hours=lambda ts: False)
+        # 刚直接回复过（20 秒前），处于 60 秒冷静期内
+        service.pet_repo = SimpleNamespace(
+            load_pet_state=lambda pet: self._ret({
+                "last_proactive_ts": 0.0,
+                "last_reply_ts": now - 20,
+                "last_proactive_answered": True,
+            })
+        )
+        spoken = []
+        service.autonomous_service = SimpleNamespace(
+            evaluate_proactive_speaking=lambda pet, state: self._ret(("理由", "话题")),
+            proactive_speak=lambda pet, chat, reason, topic="": spoken.append((reason, topic)),
+        )
+        await service.maybe_event_interject(1, "c1")
+        self.assertEqual(spoken, [])
+
+    async def test_event_interject_allowed_after_reply_cooldown_expires(self):
+        import time
+        from runtime import RuntimeState
+        from types import SimpleNamespace
+        service = ReplyService.__new__(ReplyService)
+        service.runtime = RuntimeState()
+        now = time.time()
+        service.config = SimpleNamespace(
+            event_interject_debounce_sec=0.0,
+            proactive_cooldown_sec=600,
+            unanswered_cooldown_sec=1800,
+            proactive_reply_cooldown_sec=60.0,
+        )
+        service.state_domain = SimpleNamespace(in_quiet_hours=lambda ts: False)
+        service.pet_repo = SimpleNamespace(
+            load_pet_state=lambda pet: self._ret({
+                "last_proactive_ts": 0.0,
+                "last_reply_ts": now - 70,  # 已经过了 60 秒冷静期
+                "last_proactive_answered": True,
+            })
+        )
+        service.observer_service = SimpleNamespace(
+            flush_observer_buffer=lambda pet: self._ret(0)
+        )
+        spoken = []
+        async def _mock_speak(pet, chat, reason, topic=""):
+            spoken.append((reason, topic))
+        service.autonomous_service = SimpleNamespace(
+            evaluate_proactive_speaking=lambda pet, state: self._ret(("群友暴论", "话题")),
+            proactive_speak=_mock_speak,
+        )
+        await service.maybe_event_interject(1, "c1")
+        self.assertEqual(spoken, [("群友暴论", "话题")])
+
+
+class AutonomousTickTests(unittest.IsolatedAsyncioTestCase):
+    def _ret(self, value):
+        async def _inner(*a, **k):
+            return value
+        return _inner()
+
+    async def test_tick_suppressed_when_recently_replied(self):
+        import time
+        from services.autonomous_service import AutonomousService
+        from types import SimpleNamespace
+        service = AutonomousService.__new__(AutonomousService)
+        now = time.time()
+        service.config = SimpleNamespace(
+            proactive_cooldown_sec=600,
+            unanswered_cooldown_sec=1800,
+            proactive_reply_cooldown_sec=60.0,
+            scheduled_events=(),
+        )
+        service.pick_scheduled_event = lambda pet, cur, t: None
+        service.state_domain = SimpleNamespace(in_quiet_hours=lambda ts: False)
+        service.runtime = None
+        spoken = []
+        service.evaluate_proactive_speaking = lambda pet, cur: self._ret(("理由", "话题"))
+        service.proactive_speak = lambda pet, chat, reason, topic="": spoken.append((reason, topic))
+
+        # 刚回复过（10 秒前），处于 60 秒冷却内
+        state = {
+            "last_proactive_ts": 0.0,
+            "last_reply_ts": now - 10,
+            "last_proactive_answered": True,
+        }
+        res = await service.tick_pet(1, "c1", current=state, now=now)
+        self.assertFalse(res)
+        self.assertEqual(spoken, [])
+
+    async def test_tick_suppressed_when_chat_locked(self):
+        import asyncio
+        import time
+        from runtime import RuntimeState
+        from services.autonomous_service import AutonomousService
+        from types import SimpleNamespace
+        service = AutonomousService.__new__(AutonomousService)
+        now = time.time()
+        service.config = SimpleNamespace(
+            proactive_cooldown_sec=600,
+            unanswered_cooldown_sec=1800,
+            proactive_reply_cooldown_sec=60.0,
+            scheduled_events=(),
+        )
+        service.pick_scheduled_event = lambda pet, cur, t: None
+        service.state_domain = SimpleNamespace(in_quiet_hours=lambda ts: False)
+        service.runtime = RuntimeState()
+        # 模拟当前 pet 正在回复锁定中
+        lock = service.runtime.chat_locks.setdefault(1, asyncio.Lock())
+        await lock.acquire()
+
+        state = {
+            "last_proactive_ts": 0.0,
+            "last_reply_ts": 0.0,
+            "last_proactive_answered": True,
+        }
+        res = await service.tick_pet(1, "c1", current=state, now=now)
+        self.assertFalse(res)
 
 
 if __name__ == "__main__":

@@ -531,15 +531,12 @@ class ReplyService:
         last_proactive_ts = float(current_state.get("last_proactive_ts", 0) or 0)
         last_reply_ts = float(current_state.get("last_reply_ts", 0) or 0)
 
-        # 刚直接回复过不久（30 秒内），避免连珠炮插嘴
-        if now - last_reply_ts < 30.0:
-            return
-
         cooldown = self.config.proactive_cooldown_sec
         if not current_state.get("last_proactive_answered", True):
             cooldown = getattr(self.config, "unanswered_cooldown_sec", cooldown)
+        reply_cooldown = float(getattr(self.config, "proactive_reply_cooldown_sec", 60.0) or 60.0)
 
-        if now - last_proactive_ts < cooldown:
+        if now - last_proactive_ts < cooldown or now - last_reply_ts < reply_cooldown:
             return
 
         # 将缓冲中的最新旁听消息落库，使评估时能读取到最新对话

@@ -76,6 +76,7 @@ class AppConfig:
     proactive_min_new_msgs: int
     event_interject_enabled: bool
     event_interject_debounce_sec: float
+    proactive_reply_cooldown_sec: float
 
     card_enabled: bool
     card_image_timeout_sec: int
@@ -230,6 +231,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         proactive_min_new_msgs=int(autonomous_config.get("proactive_min_new_msgs", 2)),
         event_interject_enabled=bool(autonomous_config.get("event_interject_enabled", True)),
         event_interject_debounce_sec=float(autonomous_config.get("event_interject_debounce_sec", 2.0)),
+        proactive_reply_cooldown_sec=float(autonomous_config.get("reply_cooldown_sec", 60.0)),
         card_enabled=bool(card_config.get("enabled", True)),
         card_image_timeout_sec=int(card_config.get("image_timeout_sec", 120)),
         card_toast_done=card_prompts.get("toast_done", "没问题"),

@@ -139,6 +139,7 @@ def build_container(config: AppConfig | None = None) -> AppContainer:
         llm,
         card_service=card_service,
         style_service=style_service,
+        runtime=runtime,
     )
     reply_service = ReplyService(
         config,

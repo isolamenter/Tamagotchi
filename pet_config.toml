@@ -63,6 +63,8 @@ proactive_min_new_msgs = 2
 # 事件驱动主动插嘴开关与防抖（群友发消息时轻量快速判定并现场接梗）
 event_interject_enabled = true
 event_interject_debounce_sec = 2.0
+# 直接回复（@ 对话）后的主动插嘴冷静期（秒）——防连珠炮，1分钟后群友热聊即可正常接梗
+reply_cooldown_sec = 60.0
 
 [card]
 # 卡片展示总开关（用于梦境配图与日记等富文本展示）

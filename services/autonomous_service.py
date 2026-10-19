@@ -14,6 +14,7 @@ from integrations.llm_client import LLMClient
 from repositories.message_repo import MessageRepository
 from repositories.pet_repo import PetRepository
 from repositories.system_repo import SystemRepository
+from runtime import RuntimeState
 from services.card_service import CardService
 from services.memory_service import MemoryService
 from services.observer_service import ObserverService
@@ -38,6 +39,7 @@ class AutonomousService:
         llm: LLMClient,
         card_service: CardService | None = None,
         style_service: StyleService | None = None,
+        runtime: RuntimeState | None = None,
     ):
         self.config = config
         self.state_domain = state_domain
@@ -52,6 +54,7 @@ class AutonomousService:
         self.observer_service = observer_service
         self.feishu = feishu
         self.llm = llm
+        self.runtime = runtime
 
     def scheduled_event_due(self, state: dict, now: float) -> tuple[dict, str] | None:
         if self.state_domain.is_weekend_rest(now):
@@ -173,29 +176,34 @@ class AutonomousService:
     async def evaluate_proactive_speaking(
         self, pet_id: int, state: dict
     ) -> tuple[str, str] | None:
-        """评估最近新的人类消息是否值得主动开口。返回 (trigger_reason, topic) 或 None。"""
-        # 获取最近 15 条消息
+        """评估最近群聊进展是否值得主动开口。返回 (trigger_reason, topic) 或 None。"""
+        # 获取最近 15 条消息（包含人类消息与自身回复，保留完整上下文）
         recent_rows = await self.message_repo.recent_messages(pet_id, limit=15)
-        # 严格过滤出人类消息，小苍蝇自身消息、梦境、日记绝不计入
         human_msgs = [r for r in recent_rows if r.get("role") == "user"]
         if len(human_msgs) < self.config.proactive_min_new_msgs:
             return None
 
         last_proactive_ts = float(state.get("last_proactive_ts", 0) or 0)
-        # 检查上次主动发言后是否有人类响应
-        msgs_after_proactive = [
-            m for m in human_msgs if float(m.get("ts", 0)) > last_proactive_ts
+        last_reply_ts = float(state.get("last_reply_ts", 0) or 0)
+        last_activity_ts = max(last_proactive_ts, last_reply_ts)
+
+        # 检查上次小苍蝇开口（主动发言或直接回复）后，群里是否有足够的新人类消息
+        new_human_msgs = [
+            m for m in human_msgs if float(m.get("ts", 0)) > last_activity_ts
         ]
+        if len(new_human_msgs) < self.config.proactive_min_new_msgs:
+            return None
 
-        if not state.get("last_proactive_answered", True):
-            # 若上次发言无人响应，必须有新的不同对话进展才允许继续
-            if len(msgs_after_proactive) < self.config.proactive_min_new_msgs:
-                return None
-
-        recent_dialogue = "\n".join(
-            f"[{m.get('sender_name') or '群友'}]: {m.get('content')}"
-            for m in human_msgs[-8:]
-        )
+        # 构建真实的群聊对话片段（包含群友发言和小苍蝇之前的发言，防止上下文割裂或误以为未回答）
+        lines = []
+        for m in recent_rows[-8:]:
+            role = m.get("role")
+            if role == "assistant":
+                speaker = "小苍蝇"
+            else:
+                speaker = m.get("sender_name") or "群友"
+            lines.append(f"[{speaker}]: {m.get('content')}")
+        recent_dialogue = "\n".join(lines)
 
         eval_messages = [
             {"role": "system", "content": self.config.proactive_eval_prompt},
@@ -313,11 +321,21 @@ class AutonomousService:
         # 2. 检查静默时段与冷却
         if self.state_domain.in_quiet_hours(now):
             return False
+
+        # 若当前有直接回复正在排队或进行中，跳过主动发言
+        if getattr(self, "runtime", None) is not None:
+            if self.runtime.chat_pending_messages.get(pet_id):
+                return False
+            if pet_id in self.runtime.chat_locks and self.runtime.chat_locks[pet_id].locked():
+                return False
+
         last_proactive_ts = float(current.get("last_proactive_ts", 0) or 0)
+        last_reply_ts = float(current.get("last_reply_ts", 0) or 0)
         cooldown = self.config.proactive_cooldown_sec
         if not current.get("last_proactive_answered", True):
             cooldown = getattr(self.config, "unanswered_cooldown_sec", cooldown)
-        if now - last_proactive_ts < cooldown:
+        reply_cooldown = float(getattr(self.config, "proactive_reply_cooldown_sec", 60.0) or 60.0)
+        if now - last_proactive_ts < cooldown or now - last_reply_ts < reply_cooldown:
             return False
 
         # 4. 基于新人类素材的主动发言价值评估
@@ -326,7 +344,11 @@ class AutonomousService:
             return False
 
         reason, topic = eval_result
-        await self.proactive_speak(pet_id, chat_id, reason, topic)
+        if getattr(self, "runtime", None) is not None:
+            async with self.runtime.chat_lock(pet_id):
+                await self.proactive_speak(pet_id, chat_id, reason, topic)
+        else:
+            await self.proactive_speak(pet_id, chat_id, reason, topic)
         return True
 
     async def tick_all_pets(self) -> None:
