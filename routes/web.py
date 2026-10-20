@@ -17,7 +17,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>小苍蝇 Chatbot 控制面板</title>
+<title>大肥鱼 Chatbot 控制面板</title>
 <style>
   :root {
     --bg: #15171c; --panel: #1e2128; --line: #2c3038;
@@ -102,7 +102,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>🪰 小苍蝇 Chatbot 控制面板</h1>
+  <h1>🐋 大肥鱼 Chatbot 控制面板</h1>
   <select id="petSelect"></select>
   <span class="muted" id="refreshInfo"></span>
 </header>
@@ -235,7 +235,7 @@ function renderMessages(msgs) {
   if (!msgs.length) { box.innerHTML = '<div class="empty">还没有消息</div>'; return; }
   box.innerHTML = msgs.map(m => {
     const cls = m.role === "assistant" ? "assistant" : (m.is_observer ? "observer" : "");
-    const name = m.role === "assistant" ? "🪰 小苍蝇"
+    const name = m.role === "assistant" ? "🐋 大肥鱼"
       : (m.sender_name || "群友") + (m.is_observer ? "（旁听）" : "");
     return '<div class="msg ' + cls + '">'
       + '<span class="name">' + esc(name) + "</span>"

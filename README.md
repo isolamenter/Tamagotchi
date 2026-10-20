@@ -1,11 +1,11 @@
-# 小苍蝇 Chatbot (Tamagotchi)
+# 大肥鱼 Chatbot (Tamagotchi)
 
-> 一只住在飞书群里的群聊锐评家 Bot。被 @ 时正常回应；主动开口有具体理由；群里安静时保持安静；梦境与日记围绕真实群聊产生内容。
+> 住在飞书群里的蓝色鲸鱼娘，平级群友，嘴硬心软爱摸鱼。被 @ 时正常回应；主动开口有具体理由；群里安静时保持安静；梦境与日记围绕真实群聊产生内容。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
-核心体验是**保留小苍蝇的锐评人格、群聊上下文与长期记忆，让“想听听它会怎么说”成为核心体验**。
+核心体验是**大肥鱼的群友口吻、群聊上下文与长期记忆，让“想听听它会怎么说”成为核心体验**。
 
 ## ✨ 特性
 
@@ -182,15 +182,20 @@ ssh gcp-vps 'systemctl status tamagotchi --no-pager'
 - `prompts.toml`：玩法流程，包括记忆压缩、状态渲染、主动发言、日记 / 梦境、GM 默认触发文案、兜底回复和 JSON 输出契约。
 - `pet_config.toml`：运行参数，包括记忆压缩阈值、`[reply]` 群 @ 回复节流间隔、`[observer]` 旁听缓冲上限、初始状态、状态衰减、`[gameplay]` 需求事件参数、主动发言间隔 / 静默时段 / 触发阈值、`[card]` 交互卡片开关 / 进度条格数 / 结算上限。
 
-`style_corpus.toml` 的第一环节是 `[[example_cards.cards]]`：每张卡保留匿名化的真实
-`context -> response` 和只用于离线溯源的 `source_message_id`，通过语义召回学习句子结构、
-判断推进和转折。第二环节是 100 组 `[[examples]]`：每组用 `variants/source_count` 保存同场景
+`style_corpus.toml` 的第一环节是 60 张原创 `[[example_cards.cards]]`：每张卡使用虚构的
+`context -> response`，通过语义召回学习句子结构、判断推进和转折；卡片 ID 按内容生成，
+不冒充真实群聊消息。第二环节是 100 组 `[[examples]]`：每组两个原创变体，用 `variants/source_count` 保存同场景
 口头禅，通过语义分、关键词加分、intent 和风险门槛选出短反应。两类向量以
 `example_card` / `catchphrase` 类型缓存在独立的 `style_embeddings` 表，并按“结构卡在前、
 口头禅在后”分段注入。向量不可用时只让口头禅环节退回关键词召回，不会随机塞结构卡。
 原始聊天导出和数据库快照不参与运行，也不要加入仓库。
 
-常改的是 `pet_style.toml [style].prompt`：当前是“小苍蝇”的群聊风格。身份和稳定规则放这里，场景原句放进 `style_corpus.toml`；玩法类规则继续放在 `prompts.toml`，不要写进业务代码。
+本版 `source_count` 是等权编辑值，每个变体为 1，不代表真实聊天频次。`corpus_version = 6`
+使现有启动机制重建 160 条风格向量，不清理对话或长期记忆。口吻参考 [dafeiyu-persona](https://github.com/ERUIHNIYHBKBNF/dafeiyu-persona) 和 [qq-ai-bot](https://github.com/chennianlaobai/qq-ai-bot/blob/main/persona.md)，情境例句均为重新写作。
+
+常改的是 `pet_style.toml [style].prompt`：当前是“大肥鱼”的群聊风格。身份和稳定规则放这里，场景例句放进 `style_corpus.toml`；玩法类规则继续放在 `prompts.toml`，不要写进业务代码。
+
+直接回复可用 `meme_tag` 选取 [六张静态梗图](assets/memes/README.md)，文本成功发送后再发独立图片；上传或图片发送失败不阻断文本历史入库。图片由内置 image_gen 参考原版蓝白女仆装角色生成，提示词保存在 [PROMPTS.md](assets/memes/PROMPTS.md)。
 
 `prompts.toml` 核心段落：
 

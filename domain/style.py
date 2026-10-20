@@ -182,7 +182,7 @@ class StyleDomain:
             context = "（没有直接上文，是自然发起的话）"
         return (
             f"句子结构模式：{str(card.get('mode') or 'conversation')}\n"
-            f"真实聊天上文：\n{context}\n"
+            f"示例上文：\n{context}\n"
             f"我的回复：{str(card.get('response') or '').strip()}"
         )
 

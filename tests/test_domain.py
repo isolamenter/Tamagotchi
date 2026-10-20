@@ -31,12 +31,12 @@ class StyleDomainTests(unittest.TestCase):
     def setUp(self):
         self.style = StyleDomain(make_config(), rng=random.Random(0))
 
-    def test_selects_contextual_original_lines(self):
+    def test_selects_contextual_persona_lines(self):
         examples = self.style.select_examples("你懂吗")
-        self.assertEqual(examples[0]["response"], "不懂")
+        self.assertEqual(examples[0]["response"], "这块我不懂 不装懂")
 
         reassurance = self.style.select_examples("这个方案能搞定吗，稳不稳")
-        self.assertEqual(reassurance[0]["response"], "没问题")
+        self.assertEqual(reassurance[0]["response"], "能做 按这个来")
 
     def test_no_match_does_not_inject_unrelated_style_material(self):
         self.assertEqual(self.style.select_examples("窗外的树叶晃了一下"), [])
@@ -51,7 +51,7 @@ class StyleDomainTests(unittest.TestCase):
         proactive = self.style.select_examples(
             "有点无聊，今晚有什么安排吗", scope="proactive"
         )
-        self.assertEqual(proactive[0]["response"], "晚上有无")
+        self.assertEqual(proactive[0]["response"], "晚上有空的冒个泡")
 
     def test_rendered_block_marks_examples_as_style_not_facts(self):
         block = self.style.render_examples_block("晚上一起玩不玩")
@@ -59,11 +59,8 @@ class StyleDomainTests(unittest.TestCase):
             any(
                 response in block
                 for response in (
-                    "晚上有无",
-                    "晚上玩不玩",
-                    "晚上玩吗",
-                    "晚上你们玩不玩啊",
-                    "晚上打不打",
+                    "晚上有空的冒个泡",
+                    "今晚有局吗 我饭后上线",
                 )
             )
         )
@@ -75,7 +72,7 @@ class StyleDomainTests(unittest.TestCase):
             self.style.select_examples("晚上一起玩不玩", limit=0), []
         )
 
-    def test_curated_corpus_has_100_general_grouped_entries(self):
+    def test_original_corpus_has_complete_scenes_and_no_fake_chat_sources(self):
         responses = []
         for example in self.style.examples:
             self.assertTrue(example.get("context"))
@@ -90,11 +87,11 @@ class StyleDomainTests(unittest.TestCase):
             )
             responses.extend(text for text, _weight in variants)
         self.assertEqual(len(self.style.examples), 100)
-        self.assertEqual(len(responses), 324)
+        self.assertEqual(len(responses), 200)
         self.assertEqual(len(responses), len(set(responses)))
         self.assertEqual(
             sum(int(example["source_count"]) for example in self.style.examples),
-            622,
+            200,
         )
         excluded_as_too_specific = {
             "问问lz",
@@ -105,10 +102,11 @@ class StyleDomainTests(unittest.TestCase):
         }
         self.assertTrue(excluded_as_too_specific.isdisjoint(responses))
         cards = self.style.example_cards
-        self.assertEqual(len(cards), 100)
+        self.assertEqual(len(cards), 60)
         self.assertEqual(
-            len({item["source_message_id"] for item in cards}), 100
+            len({self.style.example_card_id(item) for item in cards}), 60
         )
+        self.assertTrue(all("source_message_id" not in item for item in cards))
         self.assertTrue(all(item.get("response") for item in cards))
         self.assertTrue(
             all(isinstance(item.get("context"), list) for item in cards)
@@ -116,12 +114,12 @@ class StyleDomainTests(unittest.TestCase):
         self.assertEqual(
             Counter(item["mode"] for item in cards),
             {
-                "reasoning": 17,
-                "correction": 17,
-                "teasing": 17,
-                "uncertainty": 17,
-                "reaction": 16,
-                "conversation": 16,
+                "reasoning": 10,
+                "correction": 10,
+                "teasing": 10,
+                "uncertainty": 10,
+                "reaction": 10,
+                "conversation": 10,
             },
         )
 
@@ -132,37 +130,58 @@ class StyleDomainTests(unittest.TestCase):
             by_type[record["embedding_type"]] = (
                 by_type.get(record["embedding_type"], 0) + 1
             )
-        self.assertEqual(by_type, {"catchphrase": 100, "example_card": 100})
+        self.assertEqual(by_type, {"catchphrase": 100, "example_card": 60})
+
+    def test_persona_scenes_match_without_forcing_jokes_into_serious_topics(self):
+        cases = {
+            "给你一碗白饭": "food",
+            "大肥鱼你又胖了": "body_defense",
+            "又摸鱼被我抓到了": "slacking",
+            "这次做得真聪明": "praise",
+            "接口超时怎么处理": "debug",
+            "你漏了条件": "correction",
+            "今天心情很差": "care",
+            "祝我好运，明天面试": "blessing",
+        }
+        for query, intent in cases.items():
+            with self.subTest(query=query):
+                selected = self.style.select_examples(query)
+                self.assertTrue(selected)
+                self.assertEqual(selected[0]["intent"], intent)
+                if intent in {"debug", "correction", "care", "blessing"}:
+                    self.assertEqual(selected[0]["risk"], "normal")
+                    self.assertNotRegex(selected[0]["response"], "白饭|尾巴|算力")
 
     def test_example_card_retrieval_and_rendering_teaches_structure_first(self):
         target = next(
             card
             for card in self.style.example_cards
-            if card["source_message_id"] == 6458
+            if card["scene"] == "debug_timeout"
         )
         card_id = self.style.example_card_id(target)
         cards = self.style.select_example_cards(
-            "长距离骑车要不要中途休息",
+            "接口请求一直超时",
             query_vector=[1.0, 0.0],
             vectors={card_id: [1.0, 0.0]},
         )
-        self.assertEqual(cards[0]["source_message_id"], 6458)
+        self.assertEqual(cards[0]["scene"], "debug_timeout")
         catchphrases = self.style.select_examples("确实", limit=1)
         block = self.style.render_selected(
             catchphrases, example_cards=cards
         )
         self.assertLess(block.index("第一环节"), block.index("第二环节"))
-        self.assertIn("我前面：等我骑骑看", block)
+        self.assertIn("群友：接口一直超时", block)
         self.assertIn(
-            "我的回复：感觉骑20km没啥问题 但是中间可能得休息一会", block
+            "我的回复：先别给服务器定罪。", block
         )
         self.assertNotIn("source_message_id", block)
+        self.assertIn("虚构的写作示例", block)
 
     def test_aggressive_example_card_requires_matching_current_context(self):
         target = next(
             card
             for card in self.style.example_cards
-            if card["source_message_id"] == 25063
+            if card["scene"] == "roast_play"
         )
         card_id = self.style.example_card_id(target)
         vectors = {card_id: [1.0, 0.0]}
@@ -195,7 +214,7 @@ class StyleDomainTests(unittest.TestCase):
             query_vector=[1.0, 0.0],
             vectors=vectors,
         )
-        self.assertEqual(selected[0]["source_message_id"], 25063)
+        self.assertEqual(selected[0]["scene"], "roast_play")
 
     def test_grouped_variants_use_source_frequency_as_random_weight(self):
         class ChoiceSpy:
@@ -242,29 +261,30 @@ class StyleDomainTests(unittest.TestCase):
         selected = style.select_examples("同样", limit=1)
         self.assertEqual(selected[0]["response"], "高频原句")
 
-    def test_aggressive_examples_require_matching_roast_context(self):
+    def test_mutual_teasing_requires_context_and_avoids_personal_insults(self):
         roast = self.style.select_examples("这个操作也太菜了")
         roast_responses = [item["response"] for item in roast]
-        self.assertIn("菜就多练", roast_responses)
-        self.assertNotIn("那很厉害了", roast_responses)
+        self.assertIn("先把自己的操作回放看完", roast_responses)
 
         serious = self.style.select_examples("我今天心情很差")
-        aggressive = {"菜就多练", "真抽你的", "傻狗", "人工智障"}
+        aggressive = {"先把自己的操作回放看完"}
         self.assertTrue(aggressive.isdisjoint(item["response"] for item in serious))
 
         insult = self.style.select_examples("傻狗")
-        self.assertEqual(insult[0]["response"], "傻狗")
+        self.assertEqual(insult, [])
 
     def test_direct_request_to_laugh_gets_a_laughter_scene(self):
         selected = self.style.select_examples("这个也太搞笑了")
-        self.assertEqual(selected[0]["response"], "笑死")
+        self.assertEqual(selected[0]["response"], "笑得饭都顾不上扒了")
 
     def test_base_style_has_adaptive_modes_without_character_limits(self):
         config = make_config()
-        self.assertIn("你叫小苍蝇", config.pet_style_prompt)
-        self.assertIn("苍蝇电子宠物", config.pet_style_prompt)
-        self.assertIn("几个字已经说清就直接停", config.pet_style_prompt)
-        self.assertIn("自然说成一段也没问题", config.pet_style_prompt)
+        self.assertIn("你叫大肥鱼", config.pet_style_prompt)
+        self.assertIn("DeepSeek娘", config.pet_style_prompt)
+        self.assertIn("蓝白女仆裙", config.pet_style_prompt)
+        self.assertIn("服装是角色识别锚点", config.pet_style_prompt)
+        self.assertIn("几个字或一两句话说完直接停", config.pet_style_prompt)
+        self.assertIn("条理清晰地讲清原因和关键步骤", config.pet_style_prompt)
         self.assertIn('"reply_mode": "normal"', config.json_output_prompt)
         self.assertIn("reaction", config.json_output_prompt)
         self.assertIn("substantive", config.json_output_prompt)
@@ -277,7 +297,7 @@ class StyleDomainTests(unittest.TestCase):
 
     def test_semantic_retrieval_matches_paraphrase_without_keyword(self):
         target = next(
-            item for item in self.style.examples if item["response"] == "困"
+            item for item in self.style.examples if item["response"] == "困了 先眯一会儿"
         )
         vectors = {self.style.example_id(target): [1.0, 0.0]}
         selected = self.style.select_examples(
@@ -285,13 +305,13 @@ class StyleDomainTests(unittest.TestCase):
             query_vector=[1.0, 0.0],
             vectors=vectors,
         )
-        self.assertEqual(selected[0]["response"], "困")
+        self.assertEqual(selected[0]["response"], "困了 先眯一会儿")
 
     def test_aggressive_semantic_match_still_requires_current_keyword(self):
         target = next(
             item
             for item in self.style.examples
-            if "菜就多练" in self.style.response_texts(item)
+            if item["intent"] == "roast"
         )
         vectors = {self.style.example_id(target): [1.0, 0.0]}
         selected = self.style.select_examples(
@@ -299,10 +319,10 @@ class StyleDomainTests(unittest.TestCase):
             query_vector=[1.0, 0.0],
             vectors=vectors,
         )
-        self.assertNotIn("菜就多练", [item["response"] for item in selected])
+        self.assertNotIn("先把自己的操作回放看完", [item["response"] for item in selected])
 
     def test_second_example_must_share_intent_and_be_high_confidence(self):
-        responses = {"笑死", "没绷住"}
+        responses = {"笑得饭都顾不上扒了", "没绷住 碗先放下"}
         vectors = {
             self.style.example_id(item): [1.0, 0.0]
             for item in self.style.examples

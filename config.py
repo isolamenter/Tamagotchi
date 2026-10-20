@@ -34,6 +34,10 @@ class AppConfig:
     pet_config: dict
     style_retrieval: dict
 
+    pet_name: str
+    pet_icon: str
+    memes_dir: Path
+
     pet_style_prompt: str
     pet_style_reinforcement: str
     system_prompt: str
@@ -139,6 +143,9 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
     )
 
     card_prompts = prompts.get("card", {})
+    pet_name = str(pet_style.get("style", {}).get("name", "大肥鱼")).strip() or "大肥鱼"
+    pet_icon = str(pet_style.get("style", {}).get("icon", "🐋")).strip() or "🐋"
+    memes_dir = ROOT_DIR / "assets" / "memes"
 
     return AppConfig(
         feishu_app_id=feishu_app_id,
@@ -160,6 +167,9 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         pet_style=pet_style,
         style_corpus=style_corpus,
         pet_config=pet_config,
+        pet_name=pet_name,
+        pet_icon=pet_icon,
+        memes_dir=memes_dir,
         style_retrieval={
             "semantic_threshold": float(
                 style_retrieval.get("semantic_threshold", 0.62)
@@ -200,7 +210,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         user_wrap_observer_template=prompts["user_wrap"]["observer_template"],
         compress_prompt=prompts["compress"]["prompt"],
         compress_user_line_template=prompts["compress"]["user_line_template"],
-        compress_assistant_line_template=prompts["compress"]["assistant_line_template"],
+        compress_assistant_line_template=prompts["compress"]["assistant_line_template"].replace("{pet_name}", pet_name),
         compress_user_message_template=prompts["compress"]["user_message_template"],
         recall_header=prompts["recall"]["header"],
         recall_card_template=prompts["recall"]["card_template"],

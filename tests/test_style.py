@@ -52,7 +52,7 @@ class StyleCacheTests(unittest.IsolatedAsyncioTestCase):
         await service.initialize()
         self.assertTrue(service.ready)
         self.assertEqual(
-            [size for _purpose, size in llm.calls], [50, 50, 50, 50]
+            [size for _purpose, size in llm.calls], [50, 50, 50, 10]
         )
         with self.db.connect() as conn:
             count = conn.execute(
@@ -64,7 +64,7 @@ class StyleCacheTests(unittest.IsolatedAsyncioTestCase):
                     "SELECT DISTINCT dimension FROM style_embeddings"
                 ).fetchall()
             }
-        self.assertEqual(count, 200)
+        self.assertEqual(count, 160)
         self.assertEqual(dimensions, {3})
         with self.db.connect() as conn:
             type_counts = dict(
@@ -74,7 +74,7 @@ class StyleCacheTests(unittest.IsolatedAsyncioTestCase):
                 ).fetchall()
             )
         self.assertEqual(
-            type_counts, {"catchphrase": 100, "example_card": 100}
+            type_counts, {"catchphrase": 100, "example_card": 60}
         )
         block = await service.render_examples_block("你懂吗")
         self.assertIn("第一环节", block)
@@ -147,7 +147,7 @@ class StyleCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any(
                 response in block
-                for response in ("不懂", "不懂呢", "不懂欸", "听不懂", "我怎么听不懂")
+                for response in ("这块我不懂 不装懂", "不熟 先别让我瞎指挥")
             )
         )
 

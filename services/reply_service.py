@@ -24,6 +24,7 @@ log = logging.getLogger("tamagotchi")
 
 class ReplyService:
     REPLY_MODES = frozenset({"reaction", "normal", "substantive"})
+    MEME_TAGS = frozenset({"eat_rice", "slack_off", "fat_defense", "overload", "smug", "shocked"})
 
     def __init__(
         self,
@@ -56,9 +57,10 @@ class ReplyService:
         self.style_service = style_service
         self.card_service = card_service
         self.autonomous_service = autonomous_service
+        self._meme_cache: dict[str, str] = {}
 
     @classmethod
-    def parse_llm_content(cls, content: str) -> tuple[str, str, str, bool]:
+    def parse_llm_content(cls, content: str) -> tuple[str, str, str, str, bool]:
         """Parse normal, double-encoded, or partially malformed JSON safely."""
         candidate = (content or "").strip()
         for _ in range(2):
@@ -70,10 +72,13 @@ class ReplyService:
                 reply_mode = str(data.get("reply_mode") or "").strip().lower()
                 if reply_mode not in cls.REPLY_MODES:
                     reply_mode = "unknown"
+                raw_tag = str(data.get("meme_tag") or "").strip().lower()
+                meme_tag = raw_tag if raw_tag in cls.MEME_TAGS else ""
                 return (
                     str(data.get("reply") or "").strip(),
                     str(data.get("speaker_name") or "").strip(),
                     reply_mode,
+                    meme_tag,
                     True,
                 )
             if isinstance(data, str):
@@ -98,8 +103,11 @@ class ReplyService:
             )
             if reply_mode not in cls.REPLY_MODES:
                 reply_mode = "unknown"
-            return str(reply).strip(), "", reply_mode, False
-        return candidate, "", "unknown", False
+            tag_match = re.search(r'"meme_tag"\s*:\s*"([^"\\]*)"', candidate)
+            raw_tag = tag_match.group(1).strip().lower() if tag_match else ""
+            meme_tag = raw_tag if raw_tag in cls.MEME_TAGS else ""
+            return str(reply).strip(), "", reply_mode, meme_tag, False
+        return candidate, "", "unknown", "", False
 
     async def resolve_user_name(self, open_id: str) -> str:
         if not open_id:
@@ -116,7 +124,7 @@ class ReplyService:
         sender_name: str = "",
         current_msg_id: int | None = None,
         sender_open_id: str = "",
-    ) -> tuple[str, dict, str]:
+    ) -> tuple[str, str, dict, str]:
         history, _current_state = await self.pet_repo.load_pet_context(pet_id)
 
         recall_block = await self.memory_service.build_recall_block(
@@ -156,7 +164,7 @@ class ReplyService:
             temperature=self.config.reply_temperature,
         )
 
-        reply, speaker_name, reply_mode, structured = self.parse_llm_content(content)
+        reply, speaker_name, reply_mode, meme_tag, structured = self.parse_llm_content(content)
         if not structured:
             if reply and reply != content.strip():
                 log.warning("recovered reply from malformed JSON: %r", content[:200])
@@ -169,9 +177,10 @@ class ReplyService:
             reply = self.config.fallback_replies["empty_llm"]
 
         log.info(
-            "pet %d reply shape: mode=%s chars=%d",
+            "pet %d reply shape: mode=%s meme_tag=%s chars=%d",
             pet_id,
             reply_mode,
+            meme_tag,
             len(reply),
         )
 
@@ -202,7 +211,41 @@ class ReplyService:
             return out
 
         new_state = await self.pet_repo.mutate_state(pet_id, _mutator)
-        return reply, new_state, learned_name
+        return reply, meme_tag, new_state, learned_name
+
+    async def _send_meme_if_any(self, chat_id: str, meme_tag: str) -> None:
+        if not meme_tag or not chat_id:
+            return
+        tag = meme_tag.strip().lower()
+        if tag not in self.MEME_TAGS:
+            return
+        image_key = self._meme_cache.get(tag)
+        if not image_key:
+            memes_dir = getattr(self.config, "memes_dir", None)
+            if not memes_dir or not memes_dir.is_dir():
+                return
+            image_file = memes_dir / f"{tag}.png"
+            if not image_file.is_file():
+                image_file = memes_dir / f"{tag}.jpg"
+            if not image_file.is_file():
+                return
+            try:
+                image_bytes = image_file.read_bytes()
+                uploaded_key = await self.feishu.upload_image(image_bytes)
+                if not uploaded_key:
+                    log.warning("failed to upload meme %s", tag)
+                    return
+                image_key = uploaded_key
+                self._meme_cache[tag] = image_key
+            except Exception:
+                log.exception("upload meme failed for %s", tag)
+                return
+
+        try:
+            await self.feishu.send_image(chat_id, image_key)
+            log.info("sent meme %s to chat %s", tag, chat_id)
+        except Exception:
+            log.exception("send meme failed for %s", tag)
 
     async def mark_replied(self, pet_id: int) -> None:
         await self.pet_repo.mutate_state(
@@ -477,8 +520,9 @@ class ReplyService:
             combined_text = "\n".join(item["user_text"] for item in items)
 
             learned_name = ""
+            meme_tag = ""
             try:
-                reply, _reply_state, learned_name = await self.call_llm_with_memory(
+                reply, meme_tag, _reply_state, learned_name = await self.call_llm_with_memory(
                     pet_id,
                     combined_text,
                     sender_name=last_sender_name,
@@ -490,13 +534,17 @@ class ReplyService:
                 reply = self.config.fallback_replies["llm_error_template"].format(
                     error_class=exc.__class__.__name__
                 )
-            log.info("reply=%r", reply)
+                meme_tag = "overload"
+            log.info("reply=%r meme_tag=%r", reply, meme_tag)
 
             try:
                 await self._send_response(last_chat_type, last_chat_id, last_message_id, reply)
             except Exception:
                 log.exception("reply delivery failed for pet %d", pet_id)
                 return
+
+            if meme_tag:
+                await self._send_meme_if_any(last_chat_id, meme_tag)
 
             await self.message_repo.append_message(pet_id, "assistant", reply)
             await self.mark_replied(pet_id)

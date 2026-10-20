@@ -187,19 +187,20 @@ class AutonomousService:
         last_reply_ts = float(state.get("last_reply_ts", 0) or 0)
         last_activity_ts = max(last_proactive_ts, last_reply_ts)
 
-        # 检查上次小苍蝇开口（主动发言或直接回复）后，群里是否有足够的新人类消息
+        # 检查上次宠物开口（主动发言或直接回复）后，群里是否有足够的新人类消息
         new_human_msgs = [
             m for m in human_msgs if float(m.get("ts", 0)) > last_activity_ts
         ]
         if len(new_human_msgs) < self.config.proactive_min_new_msgs:
             return None
 
-        # 构建真实的群聊对话片段（包含群友发言和小苍蝇之前的发言，防止上下文割裂或误以为未回答）
+        # 构建真实的群聊对话片段（包含群友发言和宠物之前的发言，防止上下文割裂或误以为未回答）
         lines = []
+        pet_name = getattr(self.config, "pet_name", "大肥鱼")
         for m in recent_rows[-8:]:
             role = m.get("role")
             if role == "assistant":
-                speaker = "小苍蝇"
+                speaker = pet_name
             else:
                 speaker = m.get("sender_name") or "群友"
             lines.append(f"[{speaker}]: {m.get('content')}")

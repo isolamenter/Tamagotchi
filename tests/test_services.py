@@ -32,28 +32,28 @@ class ReplyParsingTests(unittest.TestCase):
     def test_parses_normal_and_double_encoded_json(self):
         normal = (
             '{"reply_mode":"reaction","reply":"难绷",'
-            '"speaker_name":"小明"}'
+            '"speaker_name":"小明","meme_tag":"smug"}'
         )
         self.assertEqual(
             ReplyService.parse_llm_content(normal),
-            ("难绷", "小明", "reaction", True),
+            ("难绷", "小明", "reaction", "smug", True),
         )
         double_encoded = json.dumps(normal, ensure_ascii=False)
         self.assertEqual(
             ReplyService.parse_llm_content(double_encoded),
-            ("难绷", "小明", "reaction", True),
+            ("难绷", "小明", "reaction", "smug", True),
         )
 
     def test_legacy_or_invalid_mode_is_kept_compatible_as_unknown(self):
         legacy = '{"reply":"难绷","speaker_name":"小明"}'
         self.assertEqual(
             ReplyService.parse_llm_content(legacy),
-            ("难绷", "小明", "unknown", True),
+            ("难绷", "小明", "unknown", "", True),
         )
-        invalid = '{"reply_mode":"long","reply":"展开说说"}'
+        invalid = '{"reply_mode":"long","reply":"展开说说","meme_tag":"invalid_tag"}'
         self.assertEqual(
             ReplyService.parse_llm_content(invalid),
-            ("展开说说", "", "unknown", True),
+            ("展开说说", "", "unknown", "", True),
         )
 
     def test_recovers_reply_when_later_json_field_is_malformed(self):
@@ -62,7 +62,7 @@ class ReplyParsingTests(unittest.TestCase):
             '"reply": "发就发呗，反正你们开心就行。", '
             '"speaker_name": " : ""}'
         )
-        reply, speaker_name, reply_mode, structured = (
+        reply, speaker_name, reply_mode, meme_tag, structured = (
             ReplyService.parse_llm_content(malformed)
         )
         self.assertEqual(reply, "发就发呗，反正你们开心就行。")
@@ -298,7 +298,7 @@ class ImageRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_llm(pet_id: int, user_text: str, **k):
             self.assertIn("没看清", user_text)
-            return ("看到啦", {}, "")
+            return ("看到啦", "", {}, "")
         service.call_llm_with_memory = fake_llm  # type: ignore[method-assign]
         service.mark_replied = lambda pet_id: self._ret(None)
         self._observer(service)
@@ -309,6 +309,48 @@ class ImageRoutingTests(unittest.IsolatedAsyncioTestCase):
             "sender": {"sender_id": {"open_id": "u1"}},
         })
         self.assertEqual(sent, ["看到啦"])
+
+    async def test_meme_delivery_order_and_failure_preserve_text_history(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, Mock
+
+        # Exercise the actual event -> text -> asset upload -> image -> history path.
+        for failing_step in (None, "upload", "image", "text"):
+            with self.subTest(failing_step=failing_step):
+                calls = Mock()
+                text = AsyncMock(side_effect=RuntimeError("text failed") if failing_step == "text" else None)
+                upload = AsyncMock(return_value="image_key", side_effect=RuntimeError("upload failed") if failing_step == "upload" else None)
+                image = AsyncMock(return_value="image_message", side_effect=RuntimeError("image failed") if failing_step == "image" else None)
+                for name, mock in (("text", text), ("upload", upload), ("image", image)):
+                    calls.attach_mock(mock, name)
+                service = self._service(feishu=SimpleNamespace(upload_image=upload, send_image=image))
+                service.config.memes_dir = Path(__file__).resolve().parents[1] / "assets" / "memes"
+                service._meme_cache = {}
+                service._send_response = text
+                service.is_direct_to_bot = AsyncMock(return_value=True)
+                service.pet_domain = SimpleNamespace(clean_text=lambda raw, mentions: raw)
+                service.pet_repo = SimpleNamespace(get_or_create_pet=AsyncMock(return_value=9))
+                service.message_repo = SimpleNamespace(append_message=AsyncMock(return_value=1), count_unsummarized=AsyncMock(return_value=0))
+                service.call_llm_with_memory = AsyncMock(return_value=("基本操作", "smug", {}, ""))
+                service.mark_replied = AsyncMock()
+                self._observer(service)
+                await service.handle_message_event({
+                    "message": {"message_id": "m1", "chat_id": "c1", "chat_type": "p2p",
+                                "message_type": "text", "content": '{"text":"真厉害"}'},
+                    "sender": {"sender_id": {"open_id": "u1"}},
+                })
+                expected_order = ["text"]
+                if failing_step != "text":
+                    expected_order.append("upload")
+                    if failing_step != "upload":
+                        expected_order.append("image")
+                    service.message_repo.append_message.assert_any_await(9, "assistant", "基本操作")
+                    service.mark_replied.assert_awaited_once_with(9)
+                else:
+                    self.assertEqual(service.message_repo.append_message.await_count, 1)
+                    service.mark_replied.assert_not_awaited()
+                self.assertEqual([call[0] for call in calls.mock_calls], expected_order)
 
 
 class ProactiveEvaluationTests(unittest.IsolatedAsyncioTestCase):
@@ -406,7 +448,7 @@ class ProactiveEvaluationTests(unittest.IsolatedAsyncioTestCase):
         res = await service.evaluate_proactive_speaking(1, state)
         self.assertEqual(res, ("接梗", "新话题"))
         self.assertTrue(len(captured_dialogue) > 0)
-        self.assertIn("[小苍蝇]: 回答 1", captured_dialogue[0])
+        self.assertIn("[大肥鱼]: 回答 1", captured_dialogue[0])
         self.assertIn("[张三]: 问题 1", captured_dialogue[0])
         self.assertIn("[李四]: 新消息 1", captured_dialogue[0])
 
@@ -625,6 +667,55 @@ class AutonomousTickTests(unittest.IsolatedAsyncioTestCase):
         }
         res = await service.tick_pet(1, "c1", current=state, now=now)
         self.assertFalse(res)
+
+
+class MemeSendingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_send_meme_uploads_and_caches_key(self):
+        from pathlib import Path
+        import tempfile
+        from types import SimpleNamespace
+        from services.reply_service import ReplyService
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "eat_rice.png").write_bytes(b"dummy_png_bytes")
+
+            service = ReplyService.__new__(ReplyService)
+            service.config = typing.cast(typing.Any, SimpleNamespace(memes_dir=tmp_path))
+            service._meme_cache = {}
+
+            uploaded = []
+            sent_images = []
+
+            async def fake_upload(image_bytes: bytes):
+                uploaded.append(image_bytes)
+                return "key_123"
+
+            async def fake_send_image(chat_id: str, image_key: str):
+                sent_images.append((chat_id, image_key))
+                return "msg_id_1"
+
+            service.feishu = typing.cast(typing.Any, SimpleNamespace(
+                upload_image=fake_upload,
+                send_image=fake_send_image,
+            ))
+
+            # 首次发送：应触发 upload 和 send
+            await service._send_meme_if_any("chat_001", "eat_rice")
+            self.assertEqual(len(uploaded), 1)
+            self.assertEqual(uploaded[0], b"dummy_png_bytes")
+            self.assertEqual(sent_images, [("chat_001", "key_123")])
+            self.assertEqual(service._meme_cache.get("eat_rice"), "key_123")
+
+            # 第二次发送：应走内存缓存，不重复 upload
+            await service._send_meme_if_any("chat_001", "eat_rice")
+            self.assertEqual(len(uploaded), 1)  # 仍为 1
+            self.assertEqual(len(sent_images), 2)
+            self.assertEqual(sent_images[1], ("chat_001", "key_123"))
+
+            # 无效 tag：忽略
+            await service._send_meme_if_any("chat_001", "invalid_tag")
+            self.assertEqual(len(sent_images), 2)
 
 
 if __name__ == "__main__":
