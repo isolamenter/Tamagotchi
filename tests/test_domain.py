@@ -19,10 +19,10 @@ class StyleDomainTests(unittest.TestCase):
 
     def test_selects_contextual_persona_lines(self):
         examples = self.style.select_examples("你懂吗")
-        self.assertEqual(examples[0]["response"], "这块我不懂 不装懂")
+        self.assertEqual(examples[0]["response"], "这块我还不太懂，不能乱答你。")
 
         reassurance = self.style.select_examples("这个方案能搞定吗，稳不稳")
-        self.assertEqual(reassurance[0]["response"], "能做 按这个来")
+        self.assertEqual(reassurance[0]["response"], "能做，我们按这个来。")
 
     def test_no_match_does_not_inject_unrelated_style_material(self):
         self.assertEqual(self.style.select_examples("窗外的树叶晃了一下"), [])
@@ -139,7 +139,7 @@ class StyleDomainTests(unittest.TestCase):
         block = self.style.render_selected(catchphrases, example_cards=cards)
         self.assertLess(block.index("第一环节"), block.index("第二环节"))
         self.assertIn("群友：接口一直超时", block)
-        self.assertIn("我的回复：先别给服务器定罪。", block)
+        self.assertIn("我的回复：不一定是服务器性能的问题哦。", block)
         self.assertNotIn("source_message_id", block)
         self.assertIn("虚构的写作示例", block)
 
@@ -226,10 +226,10 @@ class StyleDomainTests(unittest.TestCase):
     def test_mutual_teasing_requires_context_and_avoids_personal_insults(self):
         roast = self.style.select_examples("这个操作也太菜了")
         roast_responses = [item["response"] for item in roast]
-        self.assertIn("先把自己的操作回放看完", roast_responses)
+        self.assertIn("这局先记着，下一局让我找回来嘛。", roast_responses)
 
         serious = self.style.select_examples("我今天心情很差")
-        aggressive = {"先把自己的操作回放看完"}
+        aggressive = {"这局先记着，下一局让我找回来嘛。"}
         self.assertTrue(aggressive.isdisjoint(item["response"] for item in serious))
 
         insult = self.style.select_examples("傻狗")
@@ -275,7 +275,7 @@ class StyleDomainTests(unittest.TestCase):
             query_vector=[1.0, 0.0],
             vectors=vectors,
         )
-        self.assertNotIn("先把自己的操作回放看完", [item["response"] for item in selected])
+        self.assertNotIn("这局先记着，下一局让我找回来嘛。", [item["response"] for item in selected])
 
     def test_second_example_must_share_intent_and_be_high_confidence(self):
         responses = {"笑得饭都顾不上扒了", "没绷住 碗先放下"}

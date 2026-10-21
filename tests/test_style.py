@@ -123,7 +123,10 @@ class StyleCacheTests(unittest.IsolatedAsyncioTestCase):
         )
         block, _ = await service.render_examples_block("你懂吗")
         self.assertTrue(
-            any(response in block for response in ("这块我不懂 不装懂", "不熟 先别让我瞎指挥"))
+            any(
+                response in block
+                for response in ("这块我还不太懂，不能乱答你。", "这个我不熟，要先弄清楚才行。")
+            )
         )
 
 
