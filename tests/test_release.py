@@ -24,7 +24,7 @@ class ReleaseTests(unittest.TestCase):
                     any(
                         ".env" in n
                         or n.endswith((".db", ".pyc"))
-                        or n.startswith(("tests/", "docs/"))
+                        or n.startswith(("tests/", ".docs/"))
                         for n in names
                     )
                 )

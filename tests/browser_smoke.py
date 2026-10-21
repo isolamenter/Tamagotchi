@@ -13,8 +13,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 async def main():
-    output = ROOT / "docs" / "preview"
-    output.mkdir(exist_ok=True)
+    output = ROOT / ".docs" / "preview"
+    output.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
