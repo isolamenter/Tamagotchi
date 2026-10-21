@@ -7,7 +7,6 @@ from dataclasses import replace
 
 from dafeiyu.config import AppConfig
 from dafeiyu.domain.conversation import ConversationContext
-from dafeiyu.domain.meme import meme_rejection_reason
 from dafeiyu.domain.reply import GeneratedReply
 from dafeiyu.integrations.llm_client import LLMClient
 from dafeiyu.repositories.conversation_repo import ConversationRepository
@@ -94,16 +93,22 @@ class ReplyService:
             reason = (
                 "ambiguous_batch"
                 if len(items) != 1
-                else meme_rejection_reason(reply.meme_tag, reply.meme_evidence, query, reply.text)
+                else self.config.meme_catalog.rejection_reason(
+                    reply.meme_tag, reply.meme_evidence, query, reply.text
+                )
             )
             if reason:
                 log.info(
-                    "meme decision conversation=%d tag=%s result=%s",
+                    "meme candidate conversation=%d tag=%s result=%s",
                     conversation_id,
-                    reply.meme_tag,
+                    reply.meme_tag
+                    if reply.meme_tag in self.config.meme_catalog.scenes
+                    else "invalid",
                     reason,
                 )
                 reply = replace(reply, meme_tag="", meme_evidence="")
+        else:
+            log.info("meme candidate conversation=%d tag=none result=no_candidate", conversation_id)
         log.info(
             "reply generated conversation=%d mode=%s chars=%d",
             conversation_id,

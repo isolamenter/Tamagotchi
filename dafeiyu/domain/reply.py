@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-MEME_TAGS = frozenset({"eat_rice", "slack_off", "fat_defense", "overload", "smug", "shocked"})
 REPLY_MODES = frozenset({"reaction", "normal", "substantive"})
 
 
@@ -31,7 +30,7 @@ class GeneratedReply:
             text.strip(),
             mode,
             str(data.get("speaker_name") or "").strip(),
-            tag if isinstance(tag, str) and tag in MEME_TAGS else "",
+            tag.strip() if isinstance(tag, str) else "",
             str(data.get("image_prompt") or "").strip(),
             meme_evidence=evidence.strip() if isinstance(evidence, str) else "",
         )

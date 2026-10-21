@@ -144,6 +144,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_meme_failures_keep_successful_text(self):
         for failure in ["upload", "image"]:
+            self.c.llm.responses.append('{"allow":true,"reason":"matched"}')
             self.c.feishu.fail = failure
             await self.c.services.delivery.send(
                 self.cid,
@@ -158,7 +159,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(r["meme_tag"] == "" for r in rows))
 
-    async def test_meme_frequency_is_limited_and_upload_is_cached(self):
+    async def test_consecutive_approved_memes_are_sent_and_upload_is_cached(self):
+        self.c.llm.responses.extend(['{"allow":true,"reason":"matched"}'] * 11)
         for index in range(11):
             with patch("dafeiyu.services.delivery.time.time", return_value=1000 + index * 301):
                 await self.c.services.delivery.send(
@@ -171,7 +173,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
                     meme_user_text="来吃饭",
                 )
         calls = self.c.feishu.calls
-        self.assertEqual(sum(c[0] == "image" for c in calls), 2)
+        self.assertEqual(sum(c[0] == "image" for c in calls), 11)
         self.assertEqual(sum(c[0] == "upload" for c in calls), 1)
 
     async def test_substantive_reply_has_no_meme(self):

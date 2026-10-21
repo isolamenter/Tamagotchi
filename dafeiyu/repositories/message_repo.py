@@ -137,26 +137,6 @@ class MessageRepository:
     async def count_unsummarized(self, conversation_id: int) -> int:
         return await asyncio.to_thread(self._count_unsummarized, conversation_id)
 
-    def _meme_history(self, conversation_id: int, before_id: int) -> tuple[float, int] | None:
-        with self.db.connect() as conn:
-            previous = conn.execute(
-                "SELECT id, ts FROM messages WHERE conversation_id=? AND id<? "
-                "AND role='assistant' AND source='direct' AND meme_tag!='' "
-                "ORDER BY id DESC LIMIT 1",
-                (conversation_id, before_id),
-            ).fetchone()
-            if previous is None:
-                return None
-            plain_count = conn.execute(
-                "SELECT COUNT(*) FROM messages WHERE conversation_id=? AND id>? AND id<? "
-                "AND role='assistant' AND source='direct' AND meme_tag=''",
-                (conversation_id, previous["id"], before_id),
-            ).fetchone()[0]
-            return previous["ts"], plain_count
-
-    async def meme_history(self, conversation_id: int, before_id: int) -> tuple[float, int] | None:
-        return await asyncio.to_thread(self._meme_history, conversation_id, before_id)
-
     def _set_meme_tag(self, message_id: int, tag: str) -> None:
         with self.db.connect() as conn:
             conn.execute("UPDATE messages SET meme_tag=? WHERE id=?", (tag, message_id))

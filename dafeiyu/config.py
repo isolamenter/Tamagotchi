@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import math
 import os
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+from dafeiyu.domain.meme import MemeCatalog
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
@@ -37,6 +38,7 @@ class AppConfig:
     character_name: str
     character_icon: str
     memes_dir: Path
+    meme_catalog: MemeCatalog
 
     persona_style_prompt: str
     persona_style_reinforcement: str
@@ -62,8 +64,7 @@ class AppConfig:
     compress_threshold: int
     recall_scan_max: int
     reply_debounce_sec: float
-    meme_min_plain_replies: int
-    meme_cooldown_sec: float
+    meme_review_timeout_sec: float
     observer_flush_max_count: int
     reply_max_tokens: int
     reply_temperature: float
@@ -144,6 +145,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
     character_name = str(persona.get("style", {}).get("name", "大肥鱼")).strip() or "大肥鱼"
     character_icon = str(persona.get("style", {}).get("icon", "🐋")).strip() or "🐋"
     memes_dir = ROOT_DIR / "assets" / "memes"
+    meme_catalog = MemeCatalog(_load_toml(ROOT_DIR / "config" / "meme_corpus.toml"), memes_dir)
 
     config = AppConfig(
         feishu_app_id=feishu_app_id,
@@ -172,6 +174,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         character_name=character_name,
         character_icon=character_icon,
         memes_dir=memes_dir,
+        meme_catalog=meme_catalog,
         style_retrieval={
             "semantic_threshold": float(style_retrieval.get("semantic_threshold", 0.62)),
             "example_card_semantic_threshold": float(
@@ -203,7 +206,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         compress_user_message_template=prompts["compress"]["user_message_template"],
         recall_header=prompts["recall"]["header"],
         recall_card_template=prompts["recall"]["card_template"],
-        json_output_prompt=prompts["json_output"]["prompt"],
+        json_output_prompt=prompts["json_output"]["prompt"] + "\n" + meme_catalog.render_prompt(),
         proactive_eval_prompt=prompts.get("proactive_eval", {}).get("prompt", ""),
         proactive_prompt=prompts["proactive"]["prompt"],
         scheduled_event_prompt=prompts["scheduled_event"]["prompt"],
@@ -213,8 +216,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         compress_threshold=int(memory_config.get("compress_threshold", 200)),
         recall_scan_max=int(memory_config.get("recall_scan_max", 2000)),
         reply_debounce_sec=float(reply_config.get("debounce_sec", 1.5)),
-        meme_min_plain_replies=meme_config["min_plain_replies"],
-        meme_cooldown_sec=meme_config["cooldown_sec"],
+        meme_review_timeout_sec=float(meme_config["review_timeout_sec"]),
         observer_flush_max_count=int(observer_config.get("flush_max_count", 50)),
         reply_max_tokens=int(llm_config.get("reply_max_tokens", 350)),
         reply_temperature=float(llm_config.get("reply_temperature", 0.5)),
@@ -270,14 +272,8 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         raise ValueError("Intervals, limits and token budgets must be positive")
     if config.reply_debounce_sec < 0 or config.event_interject_debounce_sec < 0:
         raise ValueError("Debounce cannot be negative")
-    if type(config.meme_min_plain_replies) is not int or config.meme_min_plain_replies < 0:
-        raise ValueError("meme.min_plain_replies must be a nonnegative integer")
-    if (
-        type(config.meme_cooldown_sec) not in {int, float}
-        or not math.isfinite(config.meme_cooldown_sec)
-        or config.meme_cooldown_sec < 0
-    ):
-        raise ValueError("meme.cooldown_sec must be finite and nonnegative")
+    if not 0 < config.meme_review_timeout_sec <= 60:
+        raise ValueError("meme.review_timeout_sec must be in (0, 60]")
     if not all(0 <= hour < 24 for hour in config.quiet_hours):
         raise ValueError("Quiet hours must be between 0 and 23")
     if any(event["kind"] not in {"dream", "diary"} for event in config.scheduled_events):

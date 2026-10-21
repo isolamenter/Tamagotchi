@@ -1,0 +1,367 @@
+# 大肥鱼梗图场景库。原创合成示例，不含用户聊天。
+# enabled 图必须已目视核对；示例用于语义审核，不是固定回复模板。
+version = 1
+
+[[memes]]
+tag = "eat_rice"
+enabled = true
+image = "eat_rice.png"
+caption = "开饭！"
+scene = "用户直接邀请机器人吃饭，或给机器人白饭、米饭；机器人欣然接受"
+image_description = "端着白米饭碗准备吃饭"
+target = "被邀饭或投喂的机器人"
+tone = "轻松期待"
+allowed_contexts = ["casual"]
+forbidden = ["自述饥饿并未邀饭", "第三方邀约或讨论营养", "拒绝吃饭或严肃任务"]
+positive_examples = [{ user = "来吃饭吧，给你留了一碗", evidence = "来吃饭吧，给你留了一碗", reply = "好呀，我把碗端来！" }, { user = "大肥鱼，给你一大碗白米饭", evidence = "大肥鱼，给你一大碗白米饭", reply = "收到投喂啦，开饭！" }]
+negative_examples = [{ user = "他说来吃饭，不是在叫你", evidence = "他说来吃饭，不是在叫你", reply = "好呀，我把碗端来！" }, { user = "别来吃饭了", evidence = "别来吃饭了", reply = "好呀，我把碗端来！" }, { user = "请解释吃饭的营养", evidence = "请解释吃饭的营养", reply = "好呀，我把碗端来！" }]
+
+[[memes]]
+tag = "slack_off"
+enabled = true
+image = "slack_off.png"
+caption = "摸了"
+scene = "用户直接邀请机器人一起摸鱼或轻松休息，机器人同意"
+image_description = "趴在电脑上休息，懒洋洋的表情"
+target = "被邀请休息的机器人"
+tone = "轻松偷闲"
+allowed_contexts = ["casual"]
+forbidden = ["否定摸鱼或催促工作", "工作知识问答", "负面倾诉需要认真帮助"]
+positive_examples = [{ user = "一起摸鱼吧，先歇一会儿", evidence = "一起摸鱼吧，先歇一会儿", reply = "好呀，我先趴一会儿。" }, { user = "大肥鱼，你先休息一下吧", evidence = "大肥鱼，你先休息一下吧", reply = "那我就偷偷歇两分钟。" }]
+negative_examples = [{ user = "今天不能摸鱼了", evidence = "今天不能摸鱼了", reply = "好呀，我先趴一会儿。" }, { user = "他邀请我一起摸鱼吧", evidence = "他邀请我一起摸鱼吧", reply = "好呀，我先趴一会儿。" }, { user = "帮我写摸鱼检测代码", evidence = "帮我写摸鱼检测代码", reply = "好呀，我先趴一会儿。" }]
+
+[[memes]]
+tag = "fat_defense"
+enabled = true
+image = "fat_defense.png"
+caption = "是算力！"
+scene = "用户直接轻松调侃机器人的胖瘦，机器人以算力梗辩解"
+image_description = "护住鲸尾并嘴硬辩解"
+target = "被调侃身材的机器人"
+tone = "轻松嘴硬"
+allowed_contexts = ["casual"]
+forbidden = ["用户或第三方的身材", "仅叫大肥鱼名字", "健康求助和身材焦虑"]
+positive_examples = [{ user = "你又胖了，大肥鱼", evidence = "你又胖了，大肥鱼", reply = "这不是胖，是算力储备！" }, { user = "你的尾巴也太肥了吧", evidence = "你的尾巴也太肥了吧", reply = "那是算力，才不是胖啦。" }]
+negative_examples = [{ user = "我又胖了，好难过", evidence = "我又胖了，好难过", reply = "这不是胖，是算力储备！" }, { user = "他说你又胖了，我只是在转述", evidence = "他说你又胖了，我只是在转述", reply = "这不是胖，是算力储备！" }, { user = "大肥鱼你好", evidence = "大肥鱼你好", reply = "这不是胖，是算力储备！" }]
+
+[[memes]]
+tag = "hello"
+enabled = true
+image = "hello.png"
+caption = "在呢！"
+scene = "用户直接叫机器人、问在不在或普通打招呼"
+image_description = "抬手挥手，面向对方微笑"
+target = "正在招呼机器人的用户"
+tone = "亲近回应"
+allowed_contexts = ["casual"]
+forbidden = ["第三方招呼或引用", "询问你好一词含义", "招呼后接严肃任务"]
+positive_examples = [{ user = "大肥鱼，在不在呀", evidence = "大肥鱼，在不在呀", reply = "在呢，听见你叫我啦。" }, { user = "你好呀，大肥鱼", evidence = "你好呀，大肥鱼", reply = "你好呀，刚好见到你。" }]
+negative_examples = [{ user = "他说你好，我只是在转述", evidence = "他说你好，我只是在转述", reply = "在呢，听见你叫我啦。" }, { user = "你好这个词是什么意思", evidence = "你好这个词是什么意思", reply = "在呢，听见你叫我啦。" }, { user = "你好，帮我分析数据库报错", evidence = "你好，帮我分析数据库报错", reply = "在呢，听见你叫我啦。" }]
+
+[[memes]]
+tag = "morning"
+enabled = true
+image = "morning.png"
+caption = "早呀！"
+scene = "当前用户直接向机器人道早安"
+image_description = "伸懒腰，抱着小太阳靠垫"
+target = "道早安的用户"
+tone = "清爽温暖"
+allowed_contexts = ["casual"]
+forbidden = ["讨论早安的词义", "转述别人的早安", "回忆或假设早安"]
+positive_examples = [{ user = "早上好呀，大肥鱼", evidence = "早上好呀，大肥鱼", reply = "早呀，新的一天也见到你啦。" }, { user = "早安，今天也来找你啦", evidence = "早安，今天也来找你啦", reply = "早安呀，很高兴见到你。" }]
+negative_examples = [{ user = "早安这个词怎么翻译", evidence = "早安这个词怎么翻译", reply = "早呀，新的一天也见到你啦。" }, { user = "同事说早上好，我只是引用", evidence = "同事说早上好，我只是引用", reply = "早呀，新的一天也见到你啦。" }, { user = "我不是来跟你说早安的", evidence = "我不是来跟你说早安的", reply = "早呀，新的一天也见到你啦。" }]
+
+[[memes]]
+tag = "welcome_back"
+enabled = true
+image = "welcome_back.png"
+caption = "欢迎回来"
+scene = "用户明确表示自己回到当前聊天，机器人欢迎回来"
+image_description = "张开双臂，开心迎接"
+target = "回到聊天的当前用户"
+tone = "热情欢迎"
+allowed_contexts = ["casual"]
+forbidden = ["第三方回来", "别人说欢迎回来", "一般讨论回来这个词"]
+positive_examples = [{ user = "我回来啦，大肥鱼", evidence = "我回来啦，大肥鱼", reply = "回来啦，给你留着位置呢。" }, { user = "好久不见，我又来找你了", evidence = "好久不见，我又来找你了", reply = "欢迎回来，好久没见你冒泡啦。" }]
+negative_examples = [{ user = "小明回来了，你知道吗", evidence = "小明回来了，你知道吗", reply = "回来啦，给你留着位置呢。" }, { user = "我不是说我回来了", evidence = "我不是说我回来了", reply = "回来啦，给你留着位置呢。" }, { user = "他说我回来啦，这是引用", evidence = "他说我回来啦，这是引用", reply = "回来啦，给你留着位置呢。" }]
+
+[[memes]]
+tag = "goodnight"
+enabled = true
+image = "goodnight.png"
+caption = "晚安"
+scene = "用户现在要睡觉或直接道晚安，机器人温柔回应"
+image_description = "抱着鲸鱼枕头，旁边有小月牙，困倦微笑"
+target = "准备睡觉或道晚安的用户"
+tone = "安静温柔"
+allowed_contexts = ["casual"]
+forbidden = ["讨论晚安词义", "失眠治疗等认真求助", "第三方睡觉"]
+positive_examples = [{ user = "我先睡啦，晚安大肥鱼", evidence = "我先睡啦，晚安大肥鱼", reply = "晚安，睡个好觉呀。" }, { user = "困了，准备去睡觉了", evidence = "困了，准备去睡觉了", reply = "去睡吧，祝你做个好梦。" }]
+negative_examples = [{ user = "晚安用英文怎么说", evidence = "晚安用英文怎么说", reply = "晚安，睡个好觉呀。" }, { user = "他说晚安，我只是引用", evidence = "他说晚安，我只是引用", reply = "晚安，睡个好觉呀。" }, { user = "我睡不着，帮我分析失眠原因", evidence = "我睡不着，帮我分析失眠原因", reply = "晚安，睡个好觉呀。" }]
+
+[[memes]]
+tag = "bye"
+enabled = true
+image = "bye.png"
+caption = "回头见"
+scene = "用户明确结束当前聊天或暂时离开，机器人道别"
+image_description = "回头轻轻挥手告别"
+target = "即将离开的当前用户"
+tone = "友善道别"
+allowed_contexts = ["casual"]
+forbidden = ["转述别人离开", "讨论告别词", "离开话题但继续提问"]
+positive_examples = [{ user = "我先走啦，回头见", evidence = "我先走啦，回头见", reply = "好呀，回头见。" }, { user = "今天先聊到这，拜拜", evidence = "今天先聊到这，拜拜", reply = "拜拜，下次再聊呀。" }]
+negative_examples = [{ user = "他先走了，不是我", evidence = "他先走了，不是我", reply = "好呀，回头见。" }, { user = "我不是来跟你告别的", evidence = "我不是来跟你告别的", reply = "好呀，回头见。" }, { user = "拜拜这个词是什么意思", evidence = "拜拜这个词是什么意思", reply = "好呀，回头见。" }]
+
+[[memes]]
+tag = "thanks"
+enabled = true
+image = "thanks.png"
+caption = "不客气"
+scene = "用户明确感谢机器人刚才的帮助或回应"
+image_description = "一只手放在胸前，谦和微笑"
+target = "正在感谢机器人的用户"
+tone = "温暖谦和"
+allowed_contexts = ["casual"]
+forbidden = ["反讽感谢", "感谢第三方", "要求代写感谢信"]
+positive_examples = [{ user = "谢谢你刚才帮我，大肥鱼", evidence = "谢谢你刚才帮我，大肥鱼", reply = "不客气呀，能帮到你就好。" }, { user = "多亏你啦，感谢感谢", evidence = "多亏你啦，感谢感谢", reply = "嘿嘿，帮上忙我也开心。" }]
+negative_examples = [{ user = "谢谢你啊，越帮越忙，真是服了", evidence = "谢谢你啊，越帮越忙，真是服了", reply = "不客气呀，能帮到你就好。" }, { user = "我在感谢小明，不是你", evidence = "我在感谢小明，不是你", reply = "不客气呀，能帮到你就好。" }, { user = "帮我写一封感谢信", evidence = "帮我写一封感谢信", reply = "不客气呀，能帮到你就好。" }]
+
+[[memes]]
+tag = "praise"
+enabled = true
+image = "praise.png"
+caption = "被夸啦"
+scene = "用户真诚夸奖机器人，机器人开心接受"
+image_description = "脸颊泛红，双手捧脸，开心地被夸奖"
+target = "受到夸奖的机器人"
+tone = "开心又有点不好意思"
+allowed_contexts = ["casual"]
+forbidden = ["反讽", "夸第三方或用户自己", "涉及严肃事实的能力保证"]
+positive_examples = [{ user = "大肥鱼，你刚才答得真棒", evidence = "大肥鱼，你刚才答得真棒", reply = "被你夸得有点开心，那我收下啦。" }, { user = "你真可爱，今天也很喜欢你", evidence = "你真可爱，今天也很喜欢你", reply = "嘿嘿，突然被夸，有点不好意思。" }]
+negative_examples = [{ user = "你可真厉害，又把答案答错了", evidence = "你可真厉害，又把答案答错了", reply = "被你夸得有点开心，那我收下啦。" }, { user = "小明真棒，我夸的是他", evidence = "小明真棒，我夸的是他", reply = "被你夸得有点开心，那我收下啦。" }, { user = "不是夸你，你误会了", evidence = "不是夸你，你误会了", reply = "被你夸得有点开心，那我收下啦。" }]
+
+[[memes]]
+tag = "pat"
+enabled = true
+image = "pat.png"
+caption = "接住摸摸"
+scene = "用户明确对机器人做友善摸头、摸摸动作"
+image_description = "双手放在膝上，低头闭眼微笑，一只从上方伸来的手轻轻摸头，旁边小爱心"
+target = "接受摸摸的机器人"
+tone = "亲近放松"
+allowed_contexts = ["casual"]
+forbidden = ["用户要求机器人摸自己", "第三方被摸头", "否定动作或讨论词义"]
+positive_examples = [{ user = "摸摸大肥鱼的头", evidence = "摸摸大肥鱼的头", reply = "嘿嘿，摸摸收到啦。" }, { user = "大肥鱼，给你摸摸头", evidence = "大肥鱼，给你摸摸头", reply = "那我把头凑过来一点。" }]
+negative_examples = [{ user = "摸摸我，不是让我摸你", evidence = "摸摸我，不是让我摸你", reply = "嘿嘿，摸摸收到啦。" }, { user = "他摸了摸猫的头", evidence = "他摸了摸猫的头", reply = "嘿嘿，摸摸收到啦。" }, { user = "别以为我要摸你的头", evidence = "别以为我要摸你的头", reply = "嘿嘿，摸摸收到啦。" }]
+
+[[memes]]
+tag = "hug"
+enabled = true
+image = "hug.png"
+caption = "抱抱你"
+scene = "用户明确想得到机器人安慰性的拥抱，机器人温柔回应"
+image_description = "面向对方张开双臂，提供安慰拥抱"
+target = "明确求抱抱的当前用户"
+tone = "温柔安慰，不能嘲笑"
+allowed_contexts = ["casual", "care"]
+forbidden = ["第三方拥抱或否定", "严重危机需要实际帮助", "借拥抱回避认真问题"]
+positive_examples = [{ user = "有点难过，能抱抱我吗", evidence = "有点难过，能抱抱我吗", reply = "抱抱你，我在这儿。" }, { user = "大肥鱼，想要一个抱抱", evidence = "大肥鱼，想要一个抱抱", reply = "来，给你一个大大的抱抱。" }]
+negative_examples = [{ user = "不是让你抱我", evidence = "不是让你抱我", reply = "抱抱你，我在这儿。" }, { user = "他说想要一个抱抱，我在转述", evidence = "他说想要一个抱抱，我在转述", reply = "抱抱你，我在这儿。" }, { user = "抱抱这个词是什么意思", evidence = "抱抱这个词是什么意思", reply = "抱抱你，我在这儿。" }]
+
+[[memes]]
+tag = "encourage"
+enabled = true
+image = "encourage.png"
+caption = "给你打气"
+scene = "用户明确向机器人请求鼓励打气，机器人认真支持"
+image_description = "在胸前握小拳头，为对方加油"
+target = "明确求鼓励的当前用户"
+tone = "真诚支持"
+allowed_contexts = ["casual", "care"]
+forbidden = ["第三方要鼓励", "具体任务方案代替鼓励", "嘲讽或保证必胜"]
+positive_examples = [{ user = "我明天要面试，能给我打打气吗", evidence = "我明天要面试，能给我打打气吗", reply = "给你打气，愿你稳稳发挥。" }, { user = "有点没信心，给我加个油吧", evidence = "有点没信心，给我加个油吧", reply = "加油呀，一步步来，我支持你。" }]
+negative_examples = [{ user = "小明让别人给他打气", evidence = "小明让别人给他打气", reply = "给你打气，愿你稳稳发挥。" }, { user = "不要给我灌鸡汤，先分析问题", evidence = "不要给我灌鸡汤，先分析问题", reply = "给你打气，愿你稳稳发挥。" }, { user = "加油站的油价怎么算", evidence = "加油站的油价怎么算", reply = "给你打气，愿你稳稳发挥。" }]
+
+[[memes]]
+tag = "celebrate"
+enabled = true
+image = "celebrate.png"
+caption = "好耶！"
+scene = "用户明确分享自己的喜事、成功或好消息，机器人一起庆祝"
+image_description = "双手举起，周围少量彩纸，欢呼庆祝"
+target = "分享好消息的当前用户"
+tone = "开心庆祝"
+allowed_contexts = ["casual"]
+forbidden = ["第三方遭遇不幸", "反讽好消息", "尚未发生的成功"]
+positive_examples = [{ user = "我面试通过啦！", evidence = "我面试通过啦！", reply = "好耶，恭喜你，真替你开心！" }, { user = "终于把考试考过了，开心", evidence = "终于把考试考过了，开心", reply = "太好啦，这下可以松口气啦。" }]
+negative_examples = [{ user = "我面试没通过，你别庆祝", evidence = "我面试没通过，你别庆祝", reply = "好耶，恭喜你，真替你开心！" }, { user = "如果考过了就好了，可惜还没有", evidence = "如果考过了就好了，可惜还没有", reply = "好耶，恭喜你，真替你开心！" }, { user = "别人丢工作你还好耶吗", evidence = "别人丢工作你还好耶吗", reply = "好耶，恭喜你，真替你开心！" }]
+
+[[memes]]
+tag = "birthday"
+enabled = true
+image = "birthday.png"
+caption = "生日快乐"
+scene = "用户明确说明今天自己生日或直接请求给自己生日祝福"
+image_description = "端着一支蜡烛的小蛋糕，微笑祝福"
+target = "正在过生日或明确求生日祝福的当前用户"
+tone = "真诚祝福"
+allowed_contexts = ["casual", "care"]
+forbidden = ["第三方生日", "生日日期不明或假设", "生日含义和文案任务"]
+positive_examples = [{ user = "今天我生日，可以祝我生日快乐吗", evidence = "今天我生日，可以祝我生日快乐吗", reply = "生日快乐呀，愿你今天被好好疼爱。" }, { user = "我今天过生日，想听你一句祝福", evidence = "我今天过生日，想听你一句祝福", reply = "生日快乐，愿你新的一岁平安开心。" }]
+negative_examples = [{ user = "今天是小明生日，不是我", evidence = "今天是小明生日，不是我", reply = "生日快乐呀，愿你今天被好好疼爱。" }, { user = "今天不是我生日", evidence = "今天不是我生日", reply = "生日快乐呀，愿你今天被好好疼爱。" }, { user = "生日快乐英文怎么说", evidence = "生日快乐英文怎么说", reply = "生日快乐呀，愿你今天被好好疼爱。" }]
+
+[[memes]]
+tag = "laugh"
+enabled = true
+image = "laugh.png"
+caption = "哈哈哈"
+scene = "用户明确分享轻松笑话或无伤害的笑点，机器人被逗笑"
+image_description = "闭眼开怀笑，一只手轻掩嘴"
+target = "与机器人分享笑点的当前用户"
+tone = "轻松好笑，不幸灾乐祸"
+allowed_contexts = ["casual"]
+forbidden = ["痛苦或倒霉经历", "反讽笑声", "第三方受伤和严肃求助"]
+positive_examples = [{ user = "给你讲个冷笑话：小明剃了光头，成了小明灯，哈哈哈", evidence = "给你讲个冷笑话：小明剃了光头，成了小明灯，哈哈哈", reply = "哈哈哈，这个冷得我尾巴都抖了一下。" }, { user = "我家猫追自己的尾巴转晕了，自己都愣住了哈哈哈", evidence = "我家猫追自己的尾巴转晕了，自己都愣住了哈哈哈", reply = "哈哈哈，它大概也没想明白怎么回事。" }]
+negative_examples = [{ user = "我摔伤住院了，你觉得很好笑吗", evidence = "我摔伤住院了，你觉得很好笑吗", reply = "哈哈哈，这个冷得我尾巴都抖了一下。" }, { user = "哈哈哈我真是倒霉透了，想哭", evidence = "哈哈哈我真是倒霉透了，想哭", reply = "哈哈哈，这个冷得我尾巴都抖了一下。" }, { user = "他说哈哈哈，我只是引用这三个字", evidence = "他说哈哈哈，我只是引用这三个字", reply = "哈哈哈，这个冷得我尾巴都抖了一下。" }]
+
+[[memes]]
+tag = "agree"
+enabled = true
+image = "agree.png"
+caption = "确实"
+scene = "机器人确实赞同用户当前明确提出的轻松观点"
+image_description = "轻轻点头，并竖起一只拇指"
+target = "提出观点并寻求认同的当前用户"
+tone = "自然认可"
+allowed_contexts = ["casual"]
+forbidden = ["没有具体观点", "反对或反讽", "有争议事实和严肃判断"]
+positive_examples = [{ user = "周末好好休息也很重要，你也这么想吧", evidence = "周末好好休息也很重要，你也这么想吧", reply = "确实，休息好也很重要。" }, { user = "我觉得和朋友一起吃饭更开心，你觉得呢", evidence = "我觉得和朋友一起吃饭更开心，你觉得呢", reply = "嗯，一起吃饭确实更热闹呀。" }]
+negative_examples = [{ user = "你别光说确实，先把计算做对", evidence = "你别光说确实，先把计算做对", reply = "确实，休息好也很重要。" }, { user = "他说确实，但我不同意", evidence = "他说确实，但我不同意", reply = "确实，休息好也很重要。" }, { user = "我觉得伤害别人很有趣，你同意吗", evidence = "我觉得伤害别人很有趣，你同意吗", reply = "确实，休息好也很重要。" }]
+
+[[memes]]
+tag = "received"
+enabled = true
+image = "received.png"
+caption = "收到"
+scene = "用户只要求简单确认当前消息已收到，机器人确认接收"
+image_description = "认真又可爱地举手敬礼"
+target = "要求确认收信的当前用户"
+tone = "简短确认"
+allowed_contexts = ["casual"]
+forbidden = ["暗示实际任务已完成", "定时提醒或外部操作承诺", "第三方确认或否定"]
+positive_examples = [{ user = "这条消息收到的话告诉我一声", evidence = "这条消息收到的话告诉我一声", reply = "收到啦，看见你的消息了。" }, { user = "大肥鱼，看到就回复收到就行", evidence = "大肥鱼，看到就回复收到就行", reply = "收到，我看见啦。" }]
+negative_examples = [{ user = "帮我明天提醒开会，办好说收到", evidence = "帮我明天提醒开会，办好说收到", reply = "收到啦，看见你的消息了。" }, { user = "别回复收到，直接解释原因", evidence = "别回复收到，直接解释原因", reply = "收到啦，看见你的消息了。" }, { user = "同事回了收到，不是让你回", evidence = "同事回了收到，不是让你回", reply = "收到啦，看见你的消息了。" }]
+
+[[memes]]
+tag = "wait"
+enabled = true
+image = "wait.png"
+caption = "等你"
+scene = "用户明确让机器人稍等自己，机器人表示愿意等待"
+image_description = "坐在小凳子上，双手放在膝头，耐心微笑"
+target = "让机器人等一下的当前用户"
+tone = "耐心轻松"
+allowed_contexts = ["casual"]
+forbidden = ["用户在等第三方", "实际计时或定时通知承诺", "不愿等待或否定"]
+positive_examples = [{ user = "稍等我一下，我去倒杯水", evidence = "稍等我一下，我去倒杯水", reply = "好呀，慢慢来，我等你。" }, { user = "大肥鱼，等我两分钟，马上回来", evidence = "大肥鱼，等我两分钟，马上回来", reply = "好，我在这儿等你。" }]
+negative_examples = [{ user = "我在等小明，不是让你等我", evidence = "我在等小明，不是让你等我", reply = "好呀，慢慢来，我等你。" }, { user = "别等我了", evidence = "别等我了", reply = "好呀，慢慢来，我等你。" }, { user = "两分钟后自动叫我回来", evidence = "两分钟后自动叫我回来", reply = "好呀，慢慢来，我等你。" }]
+
+[[memes]]
+tag = "shy"
+enabled = true
+image = "shy.png"
+caption = "有点害羞"
+scene = "用户直接向机器人表达亲近喜欢，机器人害羞回应"
+image_description = "脸红看向一旁，双手害羞地交握在胸前"
+target = "被用户表达喜爱的机器人"
+tone = "害羞但友好"
+allowed_contexts = ["casual"]
+forbidden = ["第三方亲近", "反讽或否定", "越界亲密内容"]
+positive_examples = [{ user = "大肥鱼，我好喜欢你呀", evidence = "大肥鱼，我好喜欢你呀", reply = "突然这么说，有点害羞啦。" }, { user = "你今天也好可爱，想一直陪你聊天", evidence = "你今天也好可爱，想一直陪你聊天", reply = "唔，被你这么说，脸有点热。" }]
+negative_examples = [{ user = "小明说他喜欢小红", evidence = "小明说他喜欢小红", reply = "突然这么说，有点害羞啦。" }, { user = "不是说喜欢你", evidence = "不是说喜欢你", reply = "突然这么说，有点害羞啦。" }, { user = "喜欢这个词是什么意思", evidence = "喜欢这个词是什么意思", reply = "突然这么说，有点害羞啦。" }]
+
+[[memes]]
+tag = "tea"
+enabled = true
+image = "tea.png"
+caption = "喝口茶"
+scene = "用户明确邀请机器人一起喝茶或给机器人递茶"
+image_description = "双手捧着冒热气的小茶杯，平静微笑"
+target = "被邀喝茶或递茶的机器人"
+tone = "放松亲近"
+allowed_contexts = ["casual"]
+forbidden = ["第三方喝茶", "茶知识问答", "隐喻调查谈话或否定"]
+positive_examples = [{ user = "大肥鱼，给你递杯热茶", evidence = "大肥鱼，给你递杯热茶", reply = "谢谢呀，我捧着慢慢喝。" }, { user = "一起喝杯茶歇一歇吧", evidence = "一起喝杯茶歇一歇吧", reply = "好呀，喝口茶，慢慢聊。" }]
+negative_examples = [{ user = "茶叶怎么泡才科学，帮我分析", evidence = "茶叶怎么泡才科学，帮我分析", reply = "谢谢呀，我捧着慢慢喝。" }, { user = "他说请喝茶，我只是在转述", evidence = "他说请喝茶，我只是在转述", reply = "谢谢呀，我捧着慢慢喝。" }, { user = "别喝茶了，现在不是休息的时候", evidence = "别喝茶了，现在不是休息的时候", reply = "谢谢呀，我捧着慢慢喝。" }]
+
+[[memes]]
+tag = "work"
+enabled = true
+image = "work.png"
+caption = "来干活啦"
+scene = "用户轻松催机器人结束摸鱼、准备开工，但没有附带实际严肃任务"
+image_description = "坐直面对笔记本电脑，准备开工，表情认真友好"
+target = "被轻松催开工的机器人"
+tone = "轻松振作"
+allowed_contexts = ["casual"]
+forbidden = ["具体分析排障等任务", "第三方被催", "已经完成工作的虚假声称"]
+positive_examples = [{ user = "大肥鱼，起来干活啦，别摸鱼了", evidence = "大肥鱼，起来干活啦，别摸鱼了", reply = "来啦，尾巴收好，准备开工。" }, { user = "摸鱼时间结束，准备开工吧", evidence = "摸鱼时间结束，准备开工吧", reply = "好啦，我坐直啦，准备干活。" }]
+negative_examples = [{ user = "起来干活，帮我修数据库死锁", evidence = "起来干活，帮我修数据库死锁", reply = "来啦，尾巴收好，准备开工。" }, { user = "他叫同事起来干活", evidence = "他叫同事起来干活", reply = "来啦，尾巴收好，准备开工。" }, { user = "别起来干活，继续休息", evidence = "别起来干活，继续休息", reply = "来啦，尾巴收好，准备开工。" }]
+
+[[memes]]
+tag = "miss_you"
+enabled = true
+image = "miss_you.png"
+caption = "我也想你"
+scene = "用户明确表达自己想念机器人，机器人亲近回应"
+image_description = "抱着蓝色爱心靠垫，温柔看向对方"
+target = "被当前用户想念的机器人"
+tone = "温暖亲近"
+allowed_contexts = ["casual"]
+forbidden = ["想念第三方", "失去亲友的悲伤", "否定或引用"]
+positive_examples = [{ user = "大肥鱼，好久没见，想你啦", evidence = "大肥鱼，好久没见，想你啦", reply = "我也想你啦，回来就好。" }, { user = "今天突然有点想你，就来找你聊天", evidence = "今天突然有点想你，就来找你聊天", reply = "我也很高兴你来，想你啦。" }]
+negative_examples = [{ user = "我想我去世的奶奶了，好难过", evidence = "我想我去世的奶奶了，好难过", reply = "我也想你啦，回来就好。" }, { user = "他说想你了，我在引用", evidence = "他说想你了，我在引用", reply = "我也想你啦，回来就好。" }, { user = "我没说想你，你别误会", evidence = "我没说想你，你别误会", reply = "我也想你啦，回来就好。" }]
+
+[[memes]]
+tag = "overload"
+enabled = false
+image = "overload.png"
+caption = "过载了"
+scene = "泛化场景尚未完成边界审阅，关闭自动发送"
+image_description = "面对电脑，转圈眼、冒蒸汽"
+target = "未开放"
+tone = "未开放"
+allowed_contexts = ["casual"]
+forbidden = ["任何自动发送"]
+positive_examples = []
+negative_examples = []
+
+[[memes]]
+tag = "smug"
+enabled = false
+image = "smug.png"
+caption = "基本操作"
+scene = "泛化场景尚未完成边界审阅，关闭自动发送"
+image_description = "叉腰得意，轻松自信"
+target = "未开放"
+tone = "未开放"
+allowed_contexts = ["casual"]
+forbidden = ["任何自动发送"]
+positive_examples = []
+negative_examples = []
+
+[[memes]]
+tag = "shocked"
+enabled = false
+image = "shocked.png"
+caption = "何意味"
+scene = "泛化场景尚未完成边界审阅，关闭自动发送"
+image_description = "震惊表情，旁边问号"
+target = "未开放"
+tone = "未开放"
+allowed_contexts = ["casual"]
+forbidden = ["任何自动发送"]
+positive_examples = []
+negative_examples = []

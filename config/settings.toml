@@ -14,9 +14,8 @@ recall_scan_max = 2000
 debounce_sec = 1.5
 
 [meme]
-# 仅在严格语境校验通过后检查，两项必须同时满足。
-min_plain_replies = 9
-cooldown_sec = 300
+# 候选复核超时后只发文字；梗图没有时间冷却或回复间隔。
+review_timeout_sec = 15
 
 [observer]
 # 旁听（observer）消息缓冲，批量写入。

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import time
 import uuid
 
 from dafeiyu.config import AppConfig
-from dafeiyu.domain.meme import AUTO_MEME_TAGS, meme_rejection_reason
-from dafeiyu.domain.reply import MEME_TAGS
 from dafeiyu.integrations.feishu_client import FeishuClient
+from dafeiyu.integrations.llm_client import LLMClient
 from dafeiyu.repositories.conversation_repo import ConversationRepository
 from dafeiyu.repositories.message_repo import MessageRepository
 from dafeiyu.runtime import RuntimeState
@@ -25,18 +26,21 @@ class DeliveryService:
         conversations: ConversationRepository,
         messages: MessageRepository,
         feishu: FeishuClient,
+        llm: LLMClient,
     ):
         self.config, self.runtime = config, runtime
         self.conversations, self.messages, self.feishu = conversations, messages, feishu
+        self.llm = llm
         self._image_keys: dict[str, str] = {}
 
     async def _send_meme(self, chat_id: str, tag: str) -> bool:
-        if tag not in AUTO_MEME_TAGS:
+        scene = self.config.meme_catalog.scenes.get(tag)
+        if scene is None or not scene["enabled"]:
             return False
         try:
             key = self._image_keys.get(tag)
             if not key:
-                path = self.config.memes_dir / f"{tag}.png"
+                path = self.config.memes_dir / scene["image"]
                 if not path.is_file():
                     return False
                 key = await self.feishu.upload_image(path.read_bytes())
@@ -48,6 +52,37 @@ class DeliveryService:
         except Exception as exc:
             log.warning("meme delivery failed: %s", type(exc).__name__)
             return False
+
+    async def _review_meme(self, tag: str, evidence: str, user: str, reply: str) -> str:
+        try:
+            raw = await asyncio.wait_for(
+                self.llm.chat_json(
+                    self.config.meme_catalog.review_messages(tag, evidence, user, reply),
+                    max_tokens=128,
+                    temperature=0,
+                ),
+                timeout=self.config.meme_review_timeout_sec,
+            )
+            result = json.loads(raw)
+            if not isinstance(result, dict):
+                return "invalid_review"
+            if result.get("allow") is True and result.get("reason") == "matched":
+                return ""
+            reason = result.get("reason")
+            if result.get("allow") is False and reason in {
+                "context_mismatch",
+                "target_mismatch",
+                "tone_mismatch",
+                "reply_mismatch",
+                "ambiguous",
+            }:
+                return reason
+            return "invalid_review"
+        except TimeoutError:
+            return "review_timeout"
+        except Exception as exc:
+            log.warning("meme review failed: %s", type(exc).__name__)
+            return "review_failed"
 
     async def _maybe_send_meme(
         self,
@@ -66,15 +101,9 @@ class DeliveryService:
         elif mode not in {"reaction", "normal"}:
             reason = "mode"
         else:
-            reason = meme_rejection_reason(tag, evidence, user_text, text)
+            reason = self.config.meme_catalog.rejection_reason(tag, evidence, user_text, text)
         if not reason:
-            history = await self.messages.meme_history(conversation_id, before_id=message_id)
-            if history is not None:
-                last_ts, plain_count = history
-                if plain_count < self.config.meme_min_plain_replies:
-                    reason = "reply_gap"
-                elif time.time() - last_ts < self.config.meme_cooldown_sec:
-                    reason = "cooldown"
+            reason = await self._review_meme(tag, evidence, user_text, text)
         if not reason:
             if await self._send_meme(chat_id, tag):
                 await self.messages.set_meme_tag(message_id, tag)
@@ -83,7 +112,7 @@ class DeliveryService:
         log.info(
             "meme decision conversation=%d tag=%s result=%s",
             conversation_id,
-            tag if tag in MEME_TAGS else "invalid",
+            tag if tag in self.config.meme_catalog.scenes else "invalid",
             reason or "sent",
         )
 

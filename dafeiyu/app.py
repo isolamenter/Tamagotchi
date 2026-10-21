@@ -86,7 +86,7 @@ def build_container(config: AppConfig) -> AppContainer:
     memory = MemoryService(config, runtime, memory_domain, context, memories, llm)
     observer = ObserverService(config, runtime, messages, memory, conversations)
     incoming = IncomingService(context, system, feishu_client, llm)
-    delivery = DeliveryService(config, runtime, conversations, messages, feishu_client)
+    delivery = DeliveryService(config, runtime, conversations, messages, feishu_client, llm)
     autonomous = AutonomousService(
         config,
         runtime,
