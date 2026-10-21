@@ -4,7 +4,7 @@ import typing
 import unittest
 from types import SimpleNamespace
 
-from integrations.llm_client import LLMClient, _to_gemini_contents
+from dafeiyu.integrations.llm_client import LLMClient, _to_gemini_contents
 
 
 class GeminiContentsTests(unittest.TestCase):
@@ -89,9 +89,7 @@ class EmbeddingBatchTests(unittest.IsolatedAsyncioTestCase):
         llm.config = typing.cast(typing.Any, SimpleNamespace(embed_model="gemini-embedding-001"))
         llm._types = SimpleNamespace(EmbedContentConfig=EmbedContentConfig)
         llm._genai = SimpleNamespace(aio=SimpleNamespace(models=Models()))
-        vectors = await llm.embed_texts(
-            ["doc one", "doc two"], purpose="retrieval_document"
-        )
+        vectors = await llm.embed_texts(["doc one", "doc two"], purpose="retrieval_document")
         self.assertEqual(vectors, [[1.0], [2.0]])
         self.assertEqual(calls[0]["contents"], ["doc one", "doc two"])
         self.assertEqual(calls[0]["config"].task_type, "RETRIEVAL_DOCUMENT")
@@ -119,8 +117,10 @@ class DescribeImageTests(unittest.IsolatedAsyncioTestCase):
             async def create(self, **kwargs):
                 seen.update(kwargs)
                 from types import SimpleNamespace
+
                 return SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(content=" 一只猫 "))])
+                    choices=[SimpleNamespace(message=SimpleNamespace(content=" 一只猫 "))]
+                )
 
         class Chat:
             completions = Completions()

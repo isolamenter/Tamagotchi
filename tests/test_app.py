@@ -1,72 +1,178 @@
 from __future__ import annotations
 
-import importlib
-import os
-import sys
+import asyncio
 import tempfile
 import unittest
-import asyncio
 from pathlib import Path
+from unittest.mock import patch
 
-try:
-    from fastapi.testclient import TestClient
-except ModuleNotFoundError:  # pragma: no cover - exercised only without deps installed.
-    TestClient = None
+from fastapi.testclient import TestClient
+
+from dafeiyu.app import create_app
+from tests.helpers import container, event
 
 
-class AppSmokeTests(unittest.TestCase):
-    def test_healthz(self):
-        if TestClient is None:
-            self.skipTest("fastapi is not installed in this Python environment")
-        with tempfile.TemporaryDirectory() as tmp:
-            os.environ.update(
-                {
-                    "FEISHU_APP_ID": "app",
-                    "FEISHU_APP_SECRET": "secret",
-                    "FEISHU_VERIFICATION_TOKEN": "verify-token",
-                    "OPENAI_BASE_URL": "https://example.invalid/v1",
-                    "OPENAI_API_KEY": "key",
-                    "STATE_DB": str(Path(tmp) / "state.db"),
-                }
+class AppTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.c = container(str(Path(self.tmp.name) / "new.db"))
+        with patch("dafeiyu.app.build_container", return_value=self.c):
+            self.app = create_app(self.c.config)
+        self.client = TestClient(self.app, raise_server_exceptions=False)
+        self.headers = {"X-GM-Token": "admin-fixture"}
+        self.cid = asyncio.run(self.c.conversation_repo.get_or_create_conversation("chat-fixture"))
+
+    def tearDown(self):
+        self.client.close()
+        self.tmp.cleanup()
+
+    def test_health_and_public_shell(self):
+        self.assertEqual(self.client.get("/healthz").json(), {"ok": True, "version": "2.0.0"})
+        response = self.client.get("/web")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("群聊工作台", response.text)
+        self.assertNotIn("admin-fixture", response.text)
+        self.assertEqual(self.client.get("/static/workspace.js").status_code, 200)
+
+    def test_auth_uses_header_not_url_and_reads_do_not_create_conversations(self):
+        self.assertEqual(self.client.get("/gm/conversations").status_code, 401)
+        self.assertEqual(self.client.get("/gm/conversations?token=admin-fixture").status_code, 401)
+        self.assertEqual(
+            self.client.get("/gm/conversations", headers=self.headers).status_code, 200
+        )
+        self.assertEqual(
+            self.client.get("/gm/state?conversation_id=999", headers=self.headers).status_code,
+            404,
+        )
+        response = self.client.get("/gm/conversations", headers=self.headers)
+        self.assertEqual(len(response.json()["conversations"]), 1)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+
+    def test_read_state_does_not_write(self):
+        with self.c.db.connect() as conn:
+            before = dict(conn.execute("SELECT * FROM conversations").fetchone())
+        self.assertEqual(
+            self.client.get(
+                f"/gm/state?conversation_id={self.cid}", headers=self.headers
+            ).status_code,
+            200,
+        )
+        with self.c.db.connect() as conn:
+            self.assertEqual(dict(conn.execute("SELECT * FROM conversations").fetchone()), before)
+
+    def test_validation_rejects_old_target_and_empty_or_boolean_target(self):
+        for body in [
+            {"pet_id": self.cid, "text": "hello"},
+            {"conversation_id": True, "text": "hello"},
+            {"conversation_id": self.cid, "text": "   "},
+        ]:
+            self.assertEqual(
+                self.client.post("/gm/text", headers=self.headers, json=body).status_code,
+                422,
             )
-            sys.modules.pop("tamagotchi", None)
-            app_module = importlib.import_module("tamagotchi")
-            with TestClient(app_module.app) as client:
-                resp = client.get("/healthz")
-                self.assertEqual(resp.status_code, 200)
-                self.assertEqual(resp.json(), {"ok": True})
+        self.assertFalse(self.c.feishu.calls)
 
-    def test_gm_read_does_not_write_state(self):
-        if TestClient is None:
-            self.skipTest("fastapi is not installed in this Python environment")
-        with tempfile.TemporaryDirectory() as tmp:
-            os.environ.update(
-                {
-                    "FEISHU_APP_ID": "app",
-                    "FEISHU_APP_SECRET": "secret",
-                    "FEISHU_VERIFICATION_TOKEN": "verify-token",
-                    "OPENAI_BASE_URL": "https://example.invalid/v1",
-                    "OPENAI_API_KEY": "key",
-                    "STATE_DB": str(Path(tmp) / "state.db"),
-                }
-            )
-            sys.modules.pop("tamagotchi", None)
-            app_module = importlib.import_module("tamagotchi")
-            with TestClient(app_module.app) as client:
-                container = app_module.app.state.container
-                pet_id = asyncio.run(container.pet_repo.get_or_create_pet("oc_gm"))
-                with container.db.connect() as conn:
-                    before = conn.execute(
-                        "SELECT state_json FROM pets WHERE id = ?", (pet_id,)
-                    ).fetchone()["state_json"]
-                resp = client.get(f"/gm/state?token=verify-token&pet_id={pet_id}")
-                self.assertEqual(resp.status_code, 200)
-                with container.db.connect() as conn:
-                    after = conn.execute(
-                        "SELECT state_json FROM pets WHERE id = ?", (pet_id,)
-                    ).fetchone()["state_json"]
-                self.assertEqual(after, before)
+    def test_manual_text_is_recorded_and_target_is_explicit(self):
+        response = self.client.post(
+            "/gm/text",
+            headers=self.headers,
+            json={"conversation_id": self.cid, "text": "虚构测试消息"},
+        )
+        self.assertEqual(response.status_code, 200)
+        rows = self.client.get(
+            f"/gm/messages?conversation_id={self.cid}", headers=self.headers
+        ).json()["messages"]
+        self.assertEqual(rows[0]["source"], "manual")
+        self.assertEqual(rows[0]["content"], "虚构测试消息")
+        self.assertEqual(self.c.feishu.calls[0], ("text", "chat-fixture", "虚构测试消息"))
 
+    def test_failed_send_is_not_recorded_or_disclosed_as_success(self):
+        self.c.feishu.fail = "text"
+        response = self.client.post(
+            "/gm/text",
+            headers=self.headers,
+            json={"conversation_id": self.cid, "text": "测试"},
+        )
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn("fixture delivery", response.text)
+        self.assertEqual(asyncio.run(self.c.message_repo.recent_messages(self.cid, 20)), [])
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_rename_is_local_and_pagination_is_bounded(self):
+        response = self.client.patch(
+            f"/gm/conversations/{self.cid}",
+            headers=self.headers,
+            json={"title": "测试群聊"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self.client.get("/gm/conversations", headers=self.headers).json()["conversations"][0][
+                "title"
+            ],
+            "测试群聊",
+        )
+        self.assertEqual(
+            self.client.get(
+                f"/gm/messages?conversation_id={self.cid}&limit=500",
+                headers=self.headers,
+            ).status_code,
+            422,
+        )
+        self.assertFalse(self.c.feishu.calls)
+
+    def test_upload_validates_size_and_type_and_records_delivery(self):
+        response = self.client.post(
+            "/gm/image",
+            headers=self.headers,
+            data={"conversation_id": self.cid},
+            files={"file": ("fixture.txt", b"test", "text/plain")},
+        )
+        self.assertEqual(response.status_code, 422)
+        response = self.client.post(
+            "/gm/image",
+            headers=self.headers,
+            data={"conversation_id": self.cid},
+            files={"file": ("fixture.png", b"fixture-image", "image/png")},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            asyncio.run(self.c.message_repo.recent_messages(self.cid, 20))[0]["source"],
+            "manual",
+        )
+
+    def test_webhook_verifies_challenge_and_deduplicates_messages(self):
+        self.assertEqual(
+            self.client.post(
+                "/feishu/webhook",
+                json={"type": "url_verification", "challenge": "test"},
+            ).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/feishu/webhook",
+                json={
+                    "type": "url_verification",
+                    "challenge": "test",
+                    "token": "verify-fixture",
+                },
+            ).json(),
+            {"challenge": "test"},
+        )
+        body = {
+            "header": {
+                "token": "verify-fixture",
+                "event_id": "event-fixture",
+                "event_type": "im.message.receive_v1",
+            },
+            "event": event("@_bot 你好"),
+        }
+        self.client.post("/feishu/webhook", json=body)
+        self.client.post("/feishu/webhook", json=body)
+        self.assertEqual(len(asyncio.run(self.c.message_repo.recent_messages(self.cid, 20))), 2)
+
+    def test_lifespan_closes_clients_and_background_tasks(self):
+        with TestClient(self.app) as client:
+            self.assertEqual(client.get("/healthz").status_code, 200)
+        self.assertTrue(self.c.feishu.closed)
+        self.assertTrue(self.c.llm.closed)
+        self.assertFalse(self.c.runtime.background_tasks)

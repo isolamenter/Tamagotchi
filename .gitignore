@@ -32,3 +32,6 @@ CLAUDE.md
 AGENTS.md
 *.db
 .serena
+
+# Local migration reports, snapshots and release artifacts
+/var/

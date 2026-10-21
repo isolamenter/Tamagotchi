@@ -5,26 +5,12 @@ import random
 import unittest
 from collections import Counter
 
-from config import load_config
-from domain.card import CardDomain
-from domain.memory import MemoryDomain
-from domain.pet import PetDomain
-from domain.state import StateDomain
-from domain.style import StyleDomain
-from services.autonomous_service import AutonomousService
-
-
-def make_config(db_path: str = "state.db"):
-    return load_config(
-        {
-            "FEISHU_APP_ID": "app",
-            "FEISHU_APP_SECRET": "secret",
-            "FEISHU_VERIFICATION_TOKEN": "verify-token",
-            "OPENAI_BASE_URL": "https://example.invalid/v1",
-            "OPENAI_API_KEY": "key",
-            "STATE_DB": db_path,
-        }
-    )
+from dafeiyu.config import load_config
+from dafeiyu.domain.conversation import ConversationContext
+from dafeiyu.domain.memory import MemoryDomain
+from dafeiyu.domain.state import StateDomain
+from dafeiyu.domain.style import StyleDomain
+from tests.helpers import make_config
 
 
 class StyleDomainTests(unittest.TestCase):
@@ -48,9 +34,7 @@ class StyleDomainTests(unittest.TestCase):
             self.style.select_examples("你懂吗", scope="proactive"),
             [],
         )
-        proactive = self.style.select_examples(
-            "有点无聊，今晚有什么安排吗", scope="proactive"
-        )
+        proactive = self.style.select_examples("有点无聊，今晚有什么安排吗", scope="proactive")
         self.assertEqual(proactive[0]["response"], "晚上有空的冒个泡")
 
     def test_rendered_block_marks_examples_as_style_not_facts(self):
@@ -68,9 +52,7 @@ class StyleDomainTests(unittest.TestCase):
         self.assertIn("不要用口头禅承担事实和完整推理", block)
 
     def test_limit_zero_returns_no_examples(self):
-        self.assertEqual(
-            self.style.select_examples("晚上一起玩不玩", limit=0), []
-        )
+        self.assertEqual(self.style.select_examples("晚上一起玩不玩", limit=0), [])
 
     def test_original_corpus_has_complete_scenes_and_no_fake_chat_sources(self):
         responses = []
@@ -82,9 +64,7 @@ class StyleDomainTests(unittest.TestCase):
             self.assertIn(example.get("risk"), {"normal", "aggressive"})
             variants = self.style.response_variants(example)
             self.assertTrue(variants)
-            self.assertEqual(
-                example.get("source_count"), sum(weight for _text, weight in variants)
-            )
+            self.assertEqual(example.get("source_count"), sum(weight for _text, weight in variants))
             responses.extend(text for text, _weight in variants)
         self.assertEqual(len(self.style.examples), 100)
         self.assertEqual(len(responses), 200)
@@ -103,14 +83,10 @@ class StyleDomainTests(unittest.TestCase):
         self.assertTrue(excluded_as_too_specific.isdisjoint(responses))
         cards = self.style.example_cards
         self.assertEqual(len(cards), 60)
-        self.assertEqual(
-            len({self.style.example_card_id(item) for item in cards}), 60
-        )
+        self.assertEqual(len({self.style.example_card_id(item) for item in cards}), 60)
         self.assertTrue(all("source_message_id" not in item for item in cards))
         self.assertTrue(all(item.get("response") for item in cards))
-        self.assertTrue(
-            all(isinstance(item.get("context"), list) for item in cards)
-        )
+        self.assertTrue(all(isinstance(item.get("context"), list) for item in cards))
         self.assertEqual(
             Counter(item["mode"] for item in cards),
             {
@@ -127,9 +103,7 @@ class StyleDomainTests(unittest.TestCase):
         records = self.style.corpus_records()
         by_type = {}
         for record in records:
-            by_type[record["embedding_type"]] = (
-                by_type.get(record["embedding_type"], 0) + 1
-            )
+            by_type[record["embedding_type"]] = by_type.get(record["embedding_type"], 0) + 1
         self.assertEqual(by_type, {"catchphrase": 100, "example_card": 60})
 
     def test_persona_scenes_match_without_forcing_jokes_into_serious_topics(self):
@@ -153,36 +127,24 @@ class StyleDomainTests(unittest.TestCase):
                     self.assertNotRegex(selected[0]["response"], "白饭|尾巴|算力")
 
     def test_example_card_retrieval_and_rendering_teaches_structure_first(self):
-        target = next(
-            card
-            for card in self.style.example_cards
-            if card["scene"] == "debug_timeout"
-        )
+        target = next(card for card in self.style.example_cards if card["scene"] == "debug_timeout")
         card_id = self.style.example_card_id(target)
         cards = self.style.select_example_cards(
-            "接口请求一直超时",
+            "帮我分析接口请求一直超时",
             query_vector=[1.0, 0.0],
             vectors={card_id: [1.0, 0.0]},
         )
         self.assertEqual(cards[0]["scene"], "debug_timeout")
         catchphrases = self.style.select_examples("确实", limit=1)
-        block = self.style.render_selected(
-            catchphrases, example_cards=cards
-        )
+        block = self.style.render_selected(catchphrases, example_cards=cards)
         self.assertLess(block.index("第一环节"), block.index("第二环节"))
         self.assertIn("群友：接口一直超时", block)
-        self.assertIn(
-            "我的回复：先别给服务器定罪。", block
-        )
+        self.assertIn("我的回复：先别给服务器定罪。", block)
         self.assertNotIn("source_message_id", block)
         self.assertIn("虚构的写作示例", block)
 
     def test_aggressive_example_card_requires_matching_current_context(self):
-        target = next(
-            card
-            for card in self.style.example_cards
-            if card["scene"] == "roast_play"
-        )
+        target = next(card for card in self.style.example_cards if card["scene"] == "roast_play")
         card_id = self.style.example_card_id(target)
         vectors = {card_id: [1.0, 0.0]}
         self.assertEqual(
@@ -279,26 +241,24 @@ class StyleDomainTests(unittest.TestCase):
 
     def test_base_style_has_adaptive_modes_without_character_limits(self):
         config = make_config()
-        self.assertIn("你叫大肥鱼", config.pet_style_prompt)
-        self.assertIn("DeepSeek娘", config.pet_style_prompt)
-        self.assertIn("蓝白女仆裙", config.pet_style_prompt)
-        self.assertIn("服装是角色识别锚点", config.pet_style_prompt)
-        self.assertIn("几个字或一两句话说完直接停", config.pet_style_prompt)
-        self.assertIn("条理清晰地讲清原因和关键步骤", config.pet_style_prompt)
+        self.assertIn("你叫大肥鱼", config.persona_style_prompt)
+        self.assertIn("DeepSeek娘", config.persona_style_prompt)
+        self.assertIn("蓝白女仆裙", config.persona_style_prompt)
+        self.assertIn("服装是角色识别锚点", config.persona_style_prompt)
+        self.assertIn("几个字或一两句话说完直接停", config.persona_style_prompt)
+        self.assertIn("条理清晰地讲清原因和关键步骤", config.persona_style_prompt)
         self.assertIn('"reply_mode": "normal"', config.json_output_prompt)
         self.assertIn("reaction", config.json_output_prompt)
         self.assertIn("substantive", config.json_output_prompt)
-        self.assertNotIn("【原句语料】", config.pet_style_prompt)
-        self.assertNotIn("【长度示例】", config.pet_style_prompt)
-        self.assertNotRegex(config.pet_style_prompt, r"\d+\s*个汉字")
-        self.assertNotRegex(config.pet_style_reinforcement, r"\d+\s*个汉字")
+        self.assertNotIn("【原句语料】", config.persona_style_prompt)
+        self.assertNotIn("【长度示例】", config.persona_style_prompt)
+        self.assertNotRegex(config.persona_style_prompt, r"\d+\s*个汉字")
+        self.assertNotRegex(config.persona_style_reinforcement, r"\d+\s*个汉字")
         self.assertEqual(config.reply_max_tokens, 350)
         self.assertEqual(config.reply_temperature, 0.5)
 
     def test_semantic_retrieval_matches_paraphrase_without_keyword(self):
-        target = next(
-            item for item in self.style.examples if item["response"] == "困了 先眯一会儿"
-        )
+        target = next(item for item in self.style.examples if item["response"] == "困了 先眯一会儿")
         vectors = {self.style.example_id(target): [1.0, 0.0]}
         selected = self.style.select_examples(
             "身体被掏空，只想躺平",
@@ -308,11 +268,7 @@ class StyleDomainTests(unittest.TestCase):
         self.assertEqual(selected[0]["response"], "困了 先眯一会儿")
 
     def test_aggressive_semantic_match_still_requires_current_keyword(self):
-        target = next(
-            item
-            for item in self.style.examples
-            if item["intent"] == "roast"
-        )
+        target = next(item for item in self.style.examples if item["intent"] == "roast")
         vectors = {self.style.example_id(target): [1.0, 0.0]}
         selected = self.style.select_examples(
             "今天心情很差",
@@ -335,24 +291,24 @@ class StyleDomainTests(unittest.TestCase):
         )
         self.assertEqual({item["response"] for item in selected}, responses)
 
-    def test_style_query_uses_two_user_messages_and_excludes_assistant(self):
+    def test_style_query_uses_recent_dialogue_with_assistant(self):
         query = self.style.build_query(
             "啊？",
             [
                 {"role": "user", "content": "第一条"},
                 {"role": "assistant", "content": "旧文风回复"},
                 {"role": "user", "content": "第二条"},
-                {"role": "user", "content": "第三条"},
+                {"role": "assistant", "content": "我刚才说的判断"},
             ],
         )
         self.assertNotIn("第一条", query)
         self.assertNotIn("旧文风回复", query)
         self.assertIn("第二条", query)
-        self.assertIn("第三条", query)
+        self.assertIn("我刚才说的判断", query)
         self.assertTrue(query.endswith("当前消息：啊？"))
 
-    def test_base_messages_keeps_all_users_and_latest_two_assistants(self):
-        pet = PetDomain(make_config())
+    def test_base_messages_keeps_complete_recent_dialogue(self):
+        pet = ConversationContext(make_config())
         history = []
         for index in range(6):
             history.extend(
@@ -366,7 +322,7 @@ class StyleDomainTests(unittest.TestCase):
         for index in range(6):
             self.assertIn(f"u{index}", "\n".join(contents))
         for index in range(4):
-            self.assertNotIn(f"a{index}", contents)
+            self.assertIn(f"a{index}", contents)
         self.assertIn("a4", contents)
         self.assertEqual(contents[-1], "a5")
 
@@ -397,7 +353,7 @@ class StateDomainTests(unittest.TestCase):
         raw = {"active_need": {"kind": "hungry"}, "custom": "keep"}
         normalized = self.state.normalize_state(raw)
         self.assertNotIn("active_need", normalized)
-        self.assertEqual(normalized["custom"], "keep")
+        self.assertNotIn("custom", normalized)
 
     def test_public_state_returns_clean_dict(self):
         st = self.state.initial_state()
@@ -405,27 +361,6 @@ class StateDomainTests(unittest.TestCase):
         self.assertIn("last_update_ts", pub)
         self.assertIn("last_reply_ts", pub)
         self.assertNotIn("active_need", pub)
-
-
-class CardDomainTests(unittest.TestCase):
-    def setUp(self):
-        self.config = make_config()
-        self.card = CardDomain(self.config)
-
-    def test_build_pet_card_elements(self):
-        card = self.card.build_pet_card(1, "今天很开心", action_keys=["查看详情"])
-        self.assertEqual(card["config"]["wide_screen_mode"], True)
-        self.assertEqual(card["elements"][0]["tag"], "markdown")
-        self.assertEqual(card["elements"][0]["content"], "今天很开心")
-        actions = [el for el in card["elements"] if el.get("tag") == "action"]
-        self.assertEqual(len(actions), 1)
-        self.assertEqual(actions[0]["actions"][0]["text"]["content"], "查看详情")
-
-    def test_compose_card_text(self):
-        composed = self.card.compose_card_text("base", ["line1", "line2"])
-        self.assertIn("base", composed)
-        self.assertIn("↳ line1", composed)
-        self.assertIn("↳ line2", composed)
 
 
 class MemoryDomainTests(unittest.TestCase):
@@ -441,8 +376,8 @@ class MemoryDomainTests(unittest.TestCase):
 
         block = self.memory.render_recall_block(
             [
-                {"id": 2, "when": "later", "who": "A", "what": "second", "vibe": ""},
-                {"id": 1, "when": "first", "who": "B", "what": "first", "vibe": ""},
+                {"id": 2, "when": "later", "who": "A", "what": "second", "vibe": "", "score": 0.7},
+                {"id": 1, "when": "first", "who": "B", "what": "first", "vibe": "", "score": 0.9},
             ]
         )
         self.assertLess(block.index("first"), block.index("second"))
@@ -455,6 +390,8 @@ class ConfigTests(unittest.TestCase):
                 {
                     "FEISHU_APP_ID": "app",
                     "FEISHU_APP_SECRET": "secret",
+                    "CHAT_MODEL": "fixture-chat",
+                    "EMBED_MODEL": "fixture-embedding",
                     "OPENAI_BASE_URL": "https://example.invalid/v1",
                     "OPENAI_API_KEY": "key",
                     "STATE_DB": "state.db",
@@ -466,6 +403,8 @@ class ConfigTests(unittest.TestCase):
             {
                 "FEISHU_APP_ID": "app",
                 "FEISHU_APP_SECRET": "secret",
+                "CHAT_MODEL": "fixture-chat",
+                "EMBED_MODEL": "fixture-embedding",
                 "FEISHU_VERIFICATION_TOKEN": "verify-token",
                 "LLM_PROVIDER": "gemini",
                 "GEMINI_API_KEY": "gemini-key",
@@ -476,15 +415,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.openai_api_key, "")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 class MentionRenderTests(unittest.TestCase):
     def test_clean_text_replaces_key_with_name(self):
-        from domain.pet import PetDomain
-        from services.reply_service import ReplyService
-        pet = PetDomain.__new__(PetDomain)
-        svc = ReplyService.__new__(ReplyService)
+        from dafeiyu.domain.conversation import ConversationContext
+
+        pet = ConversationContext.__new__(ConversationContext)
         # key 在文本里 → 内联替换成 @名字
         self.assertEqual(
             pet.clean_text("@_user_1 你是谁", [{"key": "@_user_1", "name": "二极管"}]),
@@ -500,24 +435,7 @@ class MentionRenderTests(unittest.TestCase):
             pet.clean_text("@_user_1 hi", [{"key": "@_user_1"}]),
             "@_user_1 hi",
         )
-        # key 不在文本里 → clean_text 不动，由后缀补全
-        text = pet.clean_text("我是罕见", [{"key": "@_user_2", "name": "两面派"}])
-        self.assertEqual(
-            svc._append_missing_mentions(
-                text,
-                [{"key": "@_user_2", "name": "两面派", "id": {"open_id": "ou_other"}}],
-                "ou_me",
-            ),
-            "我是罕见 @两面派",
-        )
-        # 文本已含 @名 → 不重复补；发送者自己 → 跳过
-        self.assertEqual(
-            svc._append_missing_mentions("@二极管 你是谁", [{"name": "二极管"}], "ou_me"),
-            "@二极管 你是谁",
-        )
-        self.assertEqual(
-            svc._append_missing_mentions(
-                "hello", [{"name": "我", "id": {"open_id": "ou_me"}}], "ou_me"
-            ),
-            "hello",
-        )
+
+
+if __name__ == "__main__":
+    unittest.main()

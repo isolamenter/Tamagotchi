@@ -1,722 +1,242 @@
 from __future__ import annotations
 
+import asyncio
 import json
-import typing
+import tempfile
+import time
 import unittest
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import patch
 
-from services.card_service import CardService
-from services.reply_service import ReplyService
-
-
-class ReplyRoutingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_p2p_is_direct_without_bot_lookup(self):
-        class Feishu:
-            async def get_bot_open_id(self):
-                raise AssertionError("p2p must not need bot identity")
-
-        service = ReplyService.__new__(ReplyService)
-        service.feishu = typing.cast(typing.Any, Feishu())
-        self.assertTrue(await service.is_direct_to_bot("p2p", []))
-
-    async def test_group_fails_closed_when_bot_lookup_fails(self):
-        class Feishu:
-            async def get_bot_open_id(self):
-                raise RuntimeError("temporary API error")
-
-        service = ReplyService.__new__(ReplyService)
-        service.feishu = typing.cast(typing.Any, Feishu())
-        self.assertFalse(await service.is_direct_to_bot("group", []))
+from dafeiyu.domain.reply import GeneratedReply
+from tests.helpers import container, event
 
 
-class ReplyParsingTests(unittest.TestCase):
-    def test_parses_normal_and_double_encoded_json(self):
-        normal = (
-            '{"reply_mode":"reaction","reply":"难绷",'
-            '"speaker_name":"小明","meme_tag":"smug"}'
+class ReplyContractTests(unittest.TestCase):
+    def test_valid_contract(self):
+        reply = GeneratedReply.parse('{"reply_mode":"reaction","reply":"确实","meme_tag":"smug"}')
+        self.assertEqual(reply.text, "确实")
+        self.assertEqual(reply.meme_tag, "smug")
+
+    def test_old_double_encoded_or_malformed_contract_is_rejected(self):
+        for value in [
+            '{"reply":"hello"}',
+            '"{\\"reply\\":\\"hello\\"}"',
+            '{"reply_mode":"normal","reply":""}',
+            "not json",
+        ]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                GeneratedReply.parse(value)
+
+
+class ServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.c = container(str(Path(self.tmp.name) / "new.db"))
+        self.cid = await self.c.conversation_repo.get_or_create_conversation("chat-fixture")
+
+    async def asyncTearDown(self):
+        await self.c.runtime.close()
+        self.tmp.cleanup()
+
+    async def test_p2p_needs_no_identity_lookup(self):
+        message = await self.c.services.incoming.parse(
+            event("你好", chat_type="p2p", mention=False)
         )
+        self.assertTrue(message.direct)
+        self.assertFalse(self.c.feishu.calls)
+
+    async def test_bot_address_is_not_chat_content(self):
+        message = await self.c.services.incoming.parse(event("@_bot 帮我看报错"))
+        self.assertEqual(message.text, "帮我看报错")
+        self.assertTrue(message.direct)
+
+    async def test_unknown_bot_identity_stays_observer(self):
+        self.c.feishu.fail = "identity"
+        message = await self.c.services.incoming.parse(event("@_bot 你好"))
+        self.assertFalse(message.direct)
+
+    async def test_other_mentions_and_real_teasing_are_preserved(self):
+        data = event("@_bot 你又胖了 @_other")
+        data["message"]["mentions"].append(
+            {"key": "@_other", "name": "小明", "id": {"open_id": "other"}}
+        )
+        message = await self.c.services.incoming.parse(data)
+        self.assertEqual(message.text, "你又胖了 @小明")
+
+    async def test_image_caption_and_failure_placeholder(self):
+        message = await self.c.services.incoming.parse(
+            event({"image_key": "key"}, message_type="image")
+        )
+        self.assertIn("蓝色的玩具", message.text)
+        self.c.feishu.fail = "download"
+        message = await self.c.services.incoming.parse(
+            event({"image_key": "key"}, message_type="image")
+        )
+        self.assertIn("没看清", message.text)
+
+    async def test_post_extracts_text_image_and_human_mention(self):
+        data = {
+            "title": "看看",
+            "content": [
+                [
+                    {"tag": "at", "user_id": "bot-id", "user_name": "大肥鱼"},
+                    {"tag": "text", "text": "这张图"},
+                    {"tag": "img", "image_key": "key"},
+                    {"tag": "at", "user_id": "other", "user_name": "小明"},
+                ]
+            ],
+        }
+        message = await self.c.services.incoming.parse(event(data, message_type="post"))
+        self.assertNotIn("@大肥鱼", message.text)
+        self.assertIn("@小明", message.text)
+        self.assertIn("蓝色的玩具", message.text)
+
+    async def test_observer_flush_keeps_source_and_human_identity(self):
+        await self.c.services.reply.handle_message_event(event("随便聊聊", mention=False))
+        await self.c.services.observer.flush_all()
+        rows = await self.c.message_repo.recent_messages(self.cid, 20)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["is_observer"])
+        self.assertEqual(rows[0]["source"], "observer")
+
+    async def test_direct_reply_is_persisted_after_delivery(self):
+        await self.c.services.reply.handle_message_event(event("@_bot 你好"))
+        rows = await self.c.message_repo.recent_messages(self.cid, 20)
         self.assertEqual(
-            ReplyService.parse_llm_content(normal),
-            ("难绷", "小明", "reaction", "smug", True),
+            [(r["role"], r["content"]) for r in rows],
+            [("user", "你好"), ("assistant", "在呢")],
         )
-        double_encoded = json.dumps(normal, ensure_ascii=False)
-        self.assertEqual(
-            ReplyService.parse_llm_content(double_encoded),
-            ("难绷", "小明", "reaction", "smug", True),
-        )
+        self.assertEqual(self.c.feishu.calls[-1][0], "reply")
 
-    def test_legacy_or_invalid_mode_is_kept_compatible_as_unknown(self):
-        legacy = '{"reply":"难绷","speaker_name":"小明"}'
-        self.assertEqual(
-            ReplyService.parse_llm_content(legacy),
-            ("难绷", "小明", "unknown", "", True),
-        )
-        invalid = '{"reply_mode":"long","reply":"展开说说","meme_tag":"invalid_tag"}'
-        self.assertEqual(
-            ReplyService.parse_llm_content(invalid),
-            ("展开说说", "", "unknown", "", True),
-        )
-
-    def test_recovers_reply_when_later_json_field_is_malformed(self):
-        malformed = (
-            '{"reply_mode": "substantive", '
-            '"reply": "发就发呗，反正你们开心就行。", '
-            '"speaker_name": " : ""}'
-        )
-        reply, speaker_name, reply_mode, meme_tag, structured = (
-            ReplyService.parse_llm_content(malformed)
-        )
-        self.assertEqual(reply, "发就发呗，反正你们开心就行。")
-        self.assertEqual(speaker_name, "")
-        self.assertEqual(reply_mode, "substantive")
-        self.assertFalse(structured)
-
-
-class CardPayloadTests(unittest.IsolatedAsyncioTestCase):
-    async def test_pre_v2_payload_is_a_safe_noop(self):
-        service = CardService.__new__(CardService)
-        result = await service.handle_card_action(
-            {"action": {"value": {"pet_id": 1, "action": "feed"}}}, None
-        )
-        self.assertEqual(result["toast"]["type"], "info")
-        self.assertIn("新", result["toast"]["content"])
-
-
-class ImageRoutingTests(unittest.IsolatedAsyncioTestCase):
-    def _ret(self, value):
-        async def _inner(*a, **k):
-            return value
-        return _inner()
-
-    def _service(self, **stubs):
-        import typing
-        from runtime import RuntimeState
-        from types import SimpleNamespace
-        service = ReplyService.__new__(ReplyService)
-        service.runtime = RuntimeState()
-        service.config = typing.cast(typing.Any, SimpleNamespace(
-            observer_flush_max_count=50,
-            reply_min_interval_sec=0,
-            compress_threshold=200,
-            card_enabled=False,
-            gameplay_enabled=False,
-            fallback_replies={"non_text": "NT", "empty_text": "ET",
-                              "quiet_hours": "Q", "empty_llm": "E",
-                              "llm_error_template": "ERR {error_class}"},
-        ))
-        service.feishu = typing.cast(typing.Any, stubs["feishu"])
-        service.llm = typing.cast(typing.Any, stubs.get("llm"))
-        service.pet_repo = typing.cast(typing.Any, stubs.get("pet_repo"))
-        service.message_repo = typing.cast(typing.Any, stubs.get("message_repo"))
-        service.observer_service = typing.cast(typing.Any, stubs.get("observer"))
-        service.state_domain = stubs.get("state")  # type: ignore[assignment]
-        service.pet_domain = stubs.get("pet_domain")  # type: ignore[assignment]
-        service.card_service = stubs.get("card")  # type: ignore[assignment]
-        service.resolve_user_name = lambda open_id: self._ret("阿明")
-        return service
-
-    def _observer(self, service):
-        flushed = []
-
-        class Observer:
-            async def flush_observer_buffer(self, pet_id):
-                flushed.append(pet_id)
-        service.observer_service = Observer()
-        return flushed
-
-    async def test_group_image_without_mention_goes_to_observer_buffer(self):
-        from types import SimpleNamespace
-        service = self._service(
-            feishu=SimpleNamespace(
-                download_image=lambda mid, key: self._ret(b"\xff\xd8fake"),
-                get_bot_open_id=lambda: self._ret("bot"),
+    async def test_concurrent_messages_are_not_duplicated_or_attributed_to_last_user(
+        self,
+    ):
+        self.c.services.reply.config = replace(self.c.config, reply_debounce_sec=0.01)
+        await asyncio.gather(
+            self.c.services.reply.handle_message_event(event("@_bot 第一段", sender="alice")),
+            self.c.services.reply.handle_message_event(
+                event("@_bot 第二段", sender="bob", message_id="message-2")
             ),
-            llm=SimpleNamespace(describe_image=lambda b: self._ret("一只猫")),
-            pet_repo=SimpleNamespace(find_pet=lambda chat: self._ret(7)),
         )
-        self._observer(service)
-        await service.handle_message_event({
-            "message": {"message_id": "m1", "chat_id": "c1", "chat_type": "group",
-                        "message_type": "image", "mentions": [],
-                        "content": '{"image_key": "k1"}'},
-            "sender": {"sender_id": {"open_id": "u1"}},
-        })
-        buf = service.runtime.observer_buffer[7]
-        self.assertEqual(len(buf), 1)
-        self.assertIn("一只猫", buf[0]["content"])
+        request = self.c.llm.calls[0]
+        users = [m["content"] for m in request if m["role"] == "user"]
+        self.assertEqual(sum("第一段" in m for m in users), 1)
+        self.assertEqual(sum("第二段" in m for m in users), 1)
+        self.assertTrue(any("lice" in m and "第一段" in m for m in users))
+        self.assertTrue(any("bob" in m and "第二段" in m for m in users))
+        rows = await self.c.message_repo.recent_messages(self.cid, 20)
+        self.assertEqual(sum(r["role"] == "assistant" for r in rows), 1)
 
-    async def test_group_image_caption_failure_still_recorded_as_placeholder(self):
-        from types import SimpleNamespace
-        service = self._service(
-            feishu=SimpleNamespace(
-                download_image=lambda mid, key: self._ret(None),
-            ),
-            llm=SimpleNamespace(describe_image=lambda b: self._ret(None)),
-            pet_repo=SimpleNamespace(find_pet=lambda chat: self._ret(7)),
-        )
-        service.is_direct_to_bot = lambda chat_type, mentions: self._ret(False)
-        self._observer(service)
-        await service.handle_message_event({
-            "message": {"message_id": "m1", "chat_id": "c1", "chat_type": "group",
-                        "message_type": "image",
-                        "mentions": [{"id": {"open_id": "bot"}}],
-                        "content": '{"image_key": "k1"}'},
-            "sender": {"sender_id": {"open_id": "u1"}},
-        })
-        buf = service.runtime.observer_buffer[7]
-        self.assertIn("没看清", buf[0]["content"])
+    async def test_malformed_model_output_never_leaks_to_chat(self):
+        self.c.llm.responses.append("internal malformed json")
+        await self.c.services.reply.handle_message_event(event("@_bot 你好"))
+        rows = await self.c.message_repo.recent_messages(self.cid, 20)
+        self.assertNotIn("internal", rows[-1]["content"])
 
-    async def test_post_text_is_extracted(self):
-        from types import SimpleNamespace
-        service = self._service(
-            feishu=SimpleNamespace(),
-            llm=SimpleNamespace(),
-            pet_repo=SimpleNamespace(find_pet=lambda chat: self._ret(7)),
-        )
-        from domain.pet import PetDomain
-        service.pet_domain = PetDomain.__new__(PetDomain)
-        service.is_direct_to_bot = lambda chat_type, mentions: self._ret(False)
-        self._observer(service)
-        post = (
-            '{"title": "", "content": ['
-            '[{"tag": "text", "text": "hello "}, {"tag": "at", "user_name": "bob"}, '
-            '{"tag": "text", "text": " world"}], '
-            '[{"tag": "a", "text": "link", "href": "http://x"}]]}'
-        )
-        await service.handle_message_event({
-            "message": {"message_id": "m1", "chat_id": "c1", "chat_type": "group",
-                        "message_type": "post", "mentions": [],
-                        "content": post},
-            "sender": {"sender_id": {"open_id": "u1"}},
-        })
-        buf = service.runtime.observer_buffer[7]
-        self.assertIn("hello", buf[0]["content"])
-        self.assertIn("@bob", buf[0]["content"])
-        self.assertIn("link", buf[0]["content"])
+    async def test_text_failure_never_sends_meme_or_records_assistant(self):
+        self.c.feishu.fail = "text"
+        with self.assertRaises(RuntimeError):
+            await self.c.services.delivery.send(self.cid, "chat-fixture", "hello", meme_tag="smug")
+        self.assertEqual(await self.c.message_repo.recent_messages(self.cid, 20), [])
+        self.assertFalse(self.c.feishu.calls)
 
-    async def test_post_with_image_uses_caption(self):
-        from types import SimpleNamespace
-        service = self._service(
-            feishu=SimpleNamespace(
-                download_image=lambda mid, key: self._ret(b"\xff\xd8fake"),
-            ),
-            llm=SimpleNamespace(describe_image=lambda b: self._ret("一只猫")),
-            pet_repo=SimpleNamespace(find_pet=lambda chat: self._ret(7)),
-        )
-        from domain.pet import PetDomain
-        service.pet_domain = PetDomain.__new__(PetDomain)
-        service.is_direct_to_bot = lambda chat_type, mentions: self._ret(False)
-        self._observer(service)
-        post = (
-            '{"title": "t", "content": ['
-            '[{"tag": "text", "text": "看这个 "}, '
-            '{"tag": "img", "image_key": "k1"}]]}'
-        )
-        await service.handle_message_event({
-            "message": {"message_id": "m1", "chat_id": "c1", "chat_type": "group",
-                        "message_type": "post", "mentions": [],
-                        "content": post},
-            "sender": {"sender_id": {"open_id": "u1"}},
-        })
-        buf = service.runtime.observer_buffer[7]
-        self.assertIn("看这个", buf[0]["content"])
-        self.assertIn("一只猫", buf[0]["content"])
-
-    async def test_text_mention_without_key_gets_name_suffix(self):
-        # 飞书只回传 mentions 不插 @_user_X 占位符时：@目标补到后缀，谁@的由 sender 区分
-        from types import SimpleNamespace
-        from domain.pet import PetDomain
-        service = self._service(
-            feishu=SimpleNamespace(),
-            llm=SimpleNamespace(),
-            pet_repo=SimpleNamespace(find_pet=lambda chat: self._ret(7)),
-        )
-        service.pet_domain = PetDomain.__new__(PetDomain)
-        service.is_direct_to_bot = lambda chat_type, mentions: self._ret(False)
-        service.resolve_user_name = lambda open_id: self._ret(
-            {"ou_a": "两面派"}.get(open_id, "群友-x")
-        )
-        self._observer(service)
-        await service.handle_message_event({
-            "message": {"message_id": "m1", "chat_id": "c1", "chat_type": "group",
-                        "message_type": "text",
-                        "mentions": [{"key": "@_user_1", "id": {"open_id": "ou_a"}}],
-                        "content": '{"text": "我是罕见"}'},
-            "sender": {"sender_id": {"open_id": "ou_b"}},
-        })
-        buf = service.runtime.observer_buffer[7]
-        self.assertEqual(buf[0]["content"], "我是罕见 @两面派")
-
-    async def test_text_mention_key_inline_replaces_with_name(self):
-        from types import SimpleNamespace
-        from domain.pet import PetDomain
-        service = self._service(
-            feishu=SimpleNamespace(),
-            llm=SimpleNamespace(),
-            pet_repo=SimpleNamespace(find_pet=lambda chat: self._ret(7)),
-        )
-        service.pet_domain = PetDomain.__new__(PetDomain)
-        service.is_direct_to_bot = lambda chat_type, mentions: self._ret(False)
-        self._observer(service)
-        await service.handle_message_event({
-            "message": {"message_id": "m1", "chat_id": "c1", "chat_type": "group",
-                        "message_type": "text",
-                        "mentions": [{"key": "@_user_1", "name": "二极管",
-                                      "id": {"open_id": "ou_a"}}],
-                        "content": '{"text": "@_user_1 你是谁"}'},
-            "sender": {"sender_id": {"open_id": "ou_b"}},
-        })
-        buf = service.runtime.observer_buffer[7]
-        self.assertEqual(buf[0]["content"], "@二极管 你是谁")
-
-    async def test_p2p_image_download_failure_still_replies_with_placeholder(self):
-        from types import SimpleNamespace
-        sent = []
-
-        async def boom(mid, key):
-            raise RuntimeError("403")
-        service = self._service(
-            feishu=SimpleNamespace(download_image=boom),
-            llm=SimpleNamespace(describe_image=lambda b: self._ret("x")),
-        )
-
-        async def fake_send(chat_type, chat_id, message_id, text):
-            sent.append(text)
-        service._send_response = fake_send
-        service.is_direct_to_bot = lambda chat_type, mentions: self._ret(True)
-        service.state_domain = SimpleNamespace(in_quiet_hours=lambda ts: False)  # type: ignore[assignment]
-        service.pet_domain = SimpleNamespace(  # type: ignore[assignment]
-            clean_text=lambda raw, mentions: raw,
-        )
-        service.pet_repo = typing.cast(typing.Any, SimpleNamespace(
-            get_or_create_pet=lambda chat: self._ret(9),
-            load_pet_state=lambda pet: self._ret({}),
-        ))
-        service.message_repo = SimpleNamespace(  # type: ignore[assignment]
-            append_message=lambda *a, **k: self._ret(1),
-            count_unsummarized=lambda pet: self._ret(0),
-        )
-
-        async def fake_llm(pet_id: int, user_text: str, **k):
-            self.assertIn("没看清", user_text)
-            return ("看到啦", "", {}, "")
-        service.call_llm_with_memory = fake_llm  # type: ignore[method-assign]
-        service.mark_replied = lambda pet_id: self._ret(None)
-        self._observer(service)
-        await service.handle_message_event({
-            "message": {"message_id": "m1", "chat_id": "c1", "chat_type": "p2p",
-                        "message_type": "image", "mentions": [],
-                        "content": '{"image_key": "k1"}'},
-            "sender": {"sender_id": {"open_id": "u1"}},
-        })
-        self.assertEqual(sent, ["看到啦"])
-
-    async def test_meme_delivery_order_and_failure_preserve_text_history(self):
-        from pathlib import Path
-        from types import SimpleNamespace
-        from unittest.mock import AsyncMock, Mock
-
-        # Exercise the actual event -> text -> asset upload -> image -> history path.
-        for failing_step in (None, "upload", "image", "text"):
-            with self.subTest(failing_step=failing_step):
-                calls = Mock()
-                text = AsyncMock(side_effect=RuntimeError("text failed") if failing_step == "text" else None)
-                upload = AsyncMock(return_value="image_key", side_effect=RuntimeError("upload failed") if failing_step == "upload" else None)
-                image = AsyncMock(return_value="image_message", side_effect=RuntimeError("image failed") if failing_step == "image" else None)
-                for name, mock in (("text", text), ("upload", upload), ("image", image)):
-                    calls.attach_mock(mock, name)
-                service = self._service(feishu=SimpleNamespace(upload_image=upload, send_image=image))
-                service.config.memes_dir = Path(__file__).resolve().parents[1] / "assets" / "memes"
-                service._meme_cache = {}
-                service._send_response = text
-                service.is_direct_to_bot = AsyncMock(return_value=True)
-                service.pet_domain = SimpleNamespace(clean_text=lambda raw, mentions: raw)
-                service.pet_repo = SimpleNamespace(get_or_create_pet=AsyncMock(return_value=9))
-                service.message_repo = SimpleNamespace(append_message=AsyncMock(return_value=1), count_unsummarized=AsyncMock(return_value=0))
-                service.call_llm_with_memory = AsyncMock(return_value=("基本操作", "smug", {}, ""))
-                service.mark_replied = AsyncMock()
-                self._observer(service)
-                await service.handle_message_event({
-                    "message": {"message_id": "m1", "chat_id": "c1", "chat_type": "p2p",
-                                "message_type": "text", "content": '{"text":"真厉害"}'},
-                    "sender": {"sender_id": {"open_id": "u1"}},
-                })
-                expected_order = ["text"]
-                if failing_step != "text":
-                    expected_order.append("upload")
-                    if failing_step != "upload":
-                        expected_order.append("image")
-                    service.message_repo.append_message.assert_any_await(9, "assistant", "基本操作")
-                    service.mark_replied.assert_awaited_once_with(9)
-                else:
-                    self.assertEqual(service.message_repo.append_message.await_count, 1)
-                    service.mark_replied.assert_not_awaited()
-                self.assertEqual([call[0] for call in calls.mock_calls], expected_order)
-
-
-class ProactiveEvaluationTests(unittest.IsolatedAsyncioTestCase):
-    def _ret(self, value):
-        async def _inner(*a, **k):
-            return value
-        return _inner()
-
-    async def test_skips_when_not_enough_human_messages(self):
-        from services.autonomous_service import AutonomousService
-        from types import SimpleNamespace
-        service = AutonomousService.__new__(AutonomousService)
-        service.config = SimpleNamespace(proactive_min_new_msgs=3)
-        service.message_repo = SimpleNamespace(
-            recent_messages=lambda pet, limit: self._ret([
-                {"role": "assistant", "content": "bot reply"},
-                {"role": "user", "content": "hello 1"},
-            ])
-        )
-        res = await service.evaluate_proactive_speaking(1, {})
-        self.assertIsNone(res)
-
-    async def test_returns_reason_and_topic_when_worth_speaking(self):
-        from services.autonomous_service import AutonomousService
-        from types import SimpleNamespace
-        service = AutonomousService.__new__(AutonomousService)
-        service.config = SimpleNamespace(
-            proactive_min_new_msgs=2,
-            proactive_eval_prompt="eval_prompt",
-        )
-        service.message_repo = SimpleNamespace(
-            recent_messages=lambda pet, limit: self._ret([
-                {"role": "user", "content": "大家觉得这个架构怎么样", "ts": 100},
-                {"role": "user", "content": "感觉有点过度设计", "ts": 101},
-            ])
-        )
-        service.llm = SimpleNamespace(
-            chat_json=lambda msgs, **k: self._ret(
-                json.dumps({"should_speak": True, "reason": "架构讨论值得吐槽", "topic": "架构设计"})
+    async def test_meme_failures_keep_successful_text(self):
+        for failure in ["upload", "image"]:
+            self.c.feishu.fail = failure
+            await self.c.services.delivery.send(
+                self.cid,
+                "chat-fixture",
+                "开饭！",
+                mode="reaction",
+                meme_tag="eat_rice",
+                meme_evidence="来吃饭",
+                meme_user_text="来吃饭",
             )
-        )
-        res = await service.evaluate_proactive_speaking(1, {})
-        self.assertEqual(res, ("架构讨论值得吐槽", "架构设计"))
+        rows = await self.c.message_repo.recent_messages(self.cid, 20)
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(r["meme_tag"] == "" for r in rows))
 
-    async def test_suppresses_same_unanswered_topic(self):
-        from services.autonomous_service import AutonomousService
-        from types import SimpleNamespace
-        service = AutonomousService.__new__(AutonomousService)
-        service.config = SimpleNamespace(
-            proactive_min_new_msgs=2,
-            proactive_eval_prompt="eval_prompt",
+    async def test_meme_frequency_is_limited_and_upload_is_cached(self):
+        for index in range(11):
+            with patch("dafeiyu.services.delivery.time.time", return_value=1000 + index * 301):
+                await self.c.services.delivery.send(
+                    self.cid,
+                    "chat-fixture",
+                    "开饭！",
+                    mode="reaction",
+                    meme_tag="eat_rice",
+                    meme_evidence="来吃饭",
+                    meme_user_text="来吃饭",
+                )
+        calls = self.c.feishu.calls
+        self.assertEqual(sum(c[0] == "image" for c in calls), 2)
+        self.assertEqual(sum(c[0] == "upload" for c in calls), 1)
+
+    async def test_substantive_reply_has_no_meme(self):
+        await self.c.services.delivery.send(
+            self.cid,
+            "chat-fixture",
+            "开饭！",
+            mode="substantive",
+            meme_tag="eat_rice",
+            meme_evidence="来吃饭",
+            meme_user_text="来吃饭",
         )
-        service.message_repo = SimpleNamespace(
-            recent_messages=lambda pet, limit: self._ret([
-                {"role": "user", "content": "msg 1", "ts": 100},
-                {"role": "user", "content": "msg 2", "ts": 101},
-            ])
+        self.assertEqual([call[0] for call in self.c.feishu.calls], ["text"])
+
+    async def test_content_card_has_no_old_game_actions(self):
+        await self.c.services.delivery.send(
+            self.cid, "chat-fixture", "今天记一件事", as_card=True, source="diary"
         )
-        service.llm = SimpleNamespace(
-            chat_json=lambda msgs, **k: self._ret(
-                json.dumps({"should_speak": True, "reason": "继续问", "topic": "旧话题"})
+        card = self.c.feishu.calls[0][2]
+        self.assertNotIn("action", str(card))
+        with self.c.db.connect() as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM published_cards").fetchone()[0], 1)
+
+    async def test_cooldown_and_no_new_humans_skip_interjection(self):
+        state = await self.c.conversation_repo.load_conversation_state(self.cid)
+        self.assertIsNone(
+            await self.c.services.autonomous.evaluate_proactive_speaking(self.cid, state)
+        )
+        self.assertFalse(self.c.llm.calls)
+        state["last_reply_ts"] = time.time()
+        self.assertTrue(self.c.services.autonomous._cooling_down(state, time.time()))
+
+    async def test_evaluator_sees_own_reply_and_honors_unanswered_topic(self):
+        for role, text in [
+            ("assistant", "刚说过"),
+            ("user", "第一句"),
+            ("user", "第二句"),
+        ]:
+            await self.c.message_repo.append_message(self.cid, role, text)
+        state = await self.c.conversation_repo.load_conversation_state(self.cid)
+        self.c.llm.responses.append(
+            json.dumps({"should_speak": True, "reason": "能接梗", "topic": "同一话题"})
+        )
+        result = await self.c.services.autonomous.evaluate_proactive_speaking(self.cid, state)
+        self.assertEqual(result, ("能接梗", "同一话题"))
+        self.assertIn("刚说过", self.c.llm.calls[-1][-1]["content"])
+        state.update(last_proactive_topic="同一话题", last_proactive_answered=False)
+        self.c.llm.responses.append(
+            json.dumps({"should_speak": True, "reason": "接着说", "topic": "同一话题"})
+        )
+        self.assertIsNone(
+            await self.c.services.autonomous.evaluate_proactive_speaking(self.cid, state)
+        )
+
+    async def test_locked_conversation_skips_autonomous_work(self):
+        async with self.c.runtime.chat_lock(self.cid):
+            self.assertFalse(
+                await self.c.services.autonomous.maybe_interject(self.cid, "chat-fixture")
             )
-        )
-        state = {
-            "last_proactive_ts": 50,
-            "last_proactive_answered": False,
-            "last_proactive_topic": "旧话题",
-        }
-        res = await service.evaluate_proactive_speaking(1, state)
-        self.assertIsNone(res)
+            self.assertFalse(
+                await self.c.services.autonomous.tick_conversation(self.cid, "chat-fixture")
+            )
+        self.assertFalse(self.c.llm.calls)
 
-    async def test_includes_assistant_replies_in_context(self):
-        from services.autonomous_service import AutonomousService
-        from types import SimpleNamespace
-        service = AutonomousService.__new__(AutonomousService)
-        service.config = SimpleNamespace(
-            proactive_min_new_msgs=2,
-            proactive_eval_prompt="eval_prompt",
-        )
-        service.message_repo = SimpleNamespace(
-            recent_messages=lambda pet, limit: self._ret([
-                {"role": "user", "content": "问题 1", "ts": 100, "sender_name": "张三"},
-                {"role": "assistant", "content": "回答 1", "ts": 101},
-                {"role": "user", "content": "新消息 1", "ts": 102, "sender_name": "李四"},
-                {"role": "user", "content": "新消息 2", "ts": 103, "sender_name": "王五"},
-            ])
-        )
-        captured_dialogue = []
-        async def _mock_chat(msgs, **k):
-            captured_dialogue.append(msgs[1]["content"])
-            return json.dumps({"should_speak": True, "reason": "接梗", "topic": "新话题"})
-        service.llm = SimpleNamespace(chat_json=_mock_chat)
-        # 上次直接回复发生在 ts=101
-        state = {"last_reply_ts": 101, "last_proactive_ts": 0}
-        res = await service.evaluate_proactive_speaking(1, state)
-        self.assertEqual(res, ("接梗", "新话题"))
-        self.assertTrue(len(captured_dialogue) > 0)
-        self.assertIn("[大肥鱼]: 回答 1", captured_dialogue[0])
-        self.assertIn("[张三]: 问题 1", captured_dialogue[0])
-        self.assertIn("[李四]: 新消息 1", captured_dialogue[0])
-
-    async def test_skips_when_no_new_msgs_after_reply(self):
-        from services.autonomous_service import AutonomousService
-        from types import SimpleNamespace
-        service = AutonomousService.__new__(AutonomousService)
-        service.config = SimpleNamespace(
-            proactive_min_new_msgs=2,
-            proactive_eval_prompt="eval_prompt",
-        )
-        service.message_repo = SimpleNamespace(
-            recent_messages=lambda pet, limit: self._ret([
-                {"role": "user", "content": "提问", "ts": 100},
-                {"role": "assistant", "content": "回答", "ts": 101},
-            ])
-        )
-        # 上次直接回复发生在 ts=101，之后没有任何新人类消息
-        state = {"last_reply_ts": 101, "last_proactive_ts": 0}
-        res = await service.evaluate_proactive_speaking(1, state)
-        self.assertIsNone(res)
-
-
-class EventInterjectTests(unittest.IsolatedAsyncioTestCase):
-    def _ret(self, value):
-        async def _inner(*a, **k):
-            return value
-        return _inner()
-
-    async def test_event_interject_triggers_proactive_speak(self):
-        from runtime import RuntimeState
-        from types import SimpleNamespace
-        service = ReplyService.__new__(ReplyService)
-        service.runtime = RuntimeState()
-        service.config = SimpleNamespace(
-            event_interject_debounce_sec=0.0,
-            proactive_cooldown_sec=600,
-            unanswered_cooldown_sec=1800,
-        )
-        service.state_domain = SimpleNamespace(in_quiet_hours=lambda ts: False)
-        service.pet_repo = SimpleNamespace(
-            load_pet_state=lambda pet: self._ret({
-                "last_proactive_ts": 0.0,
-                "last_reply_ts": 0.0,
-                "last_proactive_answered": True,
-            })
-        )
-        service.observer_service = SimpleNamespace(
-            flush_observer_buffer=lambda pet: self._ret(0)
-        )
-        spoken = []
-        async def _speak(pet, chat, reason, topic=""):
-            spoken.append((reason, topic))
-            return ("reply", {})
-        service.autonomous_service = SimpleNamespace(
-            evaluate_proactive_speaking=lambda pet, state: self._ret(("群友暴论", "暴论话题")),
-            proactive_speak=_speak,
-        )
-        await service.maybe_event_interject(1, "c1")
-        self.assertEqual(spoken, [("群友暴论", "暴论话题")])
-
-    async def test_event_interject_suppressed_when_under_unanswered_cooldown(self):
-        import time
-        from runtime import RuntimeState
-        from types import SimpleNamespace
-        service = ReplyService.__new__(ReplyService)
-        service.runtime = RuntimeState()
-        now = time.time()
-        service.config = SimpleNamespace(
-            event_interject_debounce_sec=0.0,
-            proactive_cooldown_sec=600,
-            unanswered_cooldown_sec=1800,
-        )
-        service.state_domain = SimpleNamespace(in_quiet_hours=lambda ts: False)
-        # 上次主动发言才过去 1000 秒，但因为无人回应需要 1800 秒
-        service.pet_repo = SimpleNamespace(
-            load_pet_state=lambda pet: self._ret({
-                "last_proactive_ts": now - 1000,
-                "last_reply_ts": 0.0,
-                "last_proactive_answered": False,
-            })
-        )
-        spoken = []
-        service.autonomous_service = SimpleNamespace(
-            evaluate_proactive_speaking=lambda pet, state: self._ret(("理由", "话题")),
-            proactive_speak=lambda pet, chat, reason, topic="": spoken.append((reason, topic)),
-        )
-        await service.maybe_event_interject(1, "c1")
-        self.assertEqual(spoken, [])
-
-    async def test_event_interject_suppressed_when_recently_replied(self):
-        import time
-        from runtime import RuntimeState
-        from types import SimpleNamespace
-        service = ReplyService.__new__(ReplyService)
-        service.runtime = RuntimeState()
-        now = time.time()
-        service.config = SimpleNamespace(
-            event_interject_debounce_sec=0.0,
-            proactive_cooldown_sec=600,
-            unanswered_cooldown_sec=1800,
-            proactive_reply_cooldown_sec=60.0,
-        )
-        service.state_domain = SimpleNamespace(in_quiet_hours=lambda ts: False)
-        # 刚直接回复过（20 秒前），处于 60 秒冷静期内
-        service.pet_repo = SimpleNamespace(
-            load_pet_state=lambda pet: self._ret({
-                "last_proactive_ts": 0.0,
-                "last_reply_ts": now - 20,
-                "last_proactive_answered": True,
-            })
-        )
-        spoken = []
-        service.autonomous_service = SimpleNamespace(
-            evaluate_proactive_speaking=lambda pet, state: self._ret(("理由", "话题")),
-            proactive_speak=lambda pet, chat, reason, topic="": spoken.append((reason, topic)),
-        )
-        await service.maybe_event_interject(1, "c1")
-        self.assertEqual(spoken, [])
-
-    async def test_event_interject_allowed_after_reply_cooldown_expires(self):
-        import time
-        from runtime import RuntimeState
-        from types import SimpleNamespace
-        service = ReplyService.__new__(ReplyService)
-        service.runtime = RuntimeState()
-        now = time.time()
-        service.config = SimpleNamespace(
-            event_interject_debounce_sec=0.0,
-            proactive_cooldown_sec=600,
-            unanswered_cooldown_sec=1800,
-            proactive_reply_cooldown_sec=60.0,
-        )
-        service.state_domain = SimpleNamespace(in_quiet_hours=lambda ts: False)
-        service.pet_repo = SimpleNamespace(
-            load_pet_state=lambda pet: self._ret({
-                "last_proactive_ts": 0.0,
-                "last_reply_ts": now - 70,  # 已经过了 60 秒冷静期
-                "last_proactive_answered": True,
-            })
-        )
-        service.observer_service = SimpleNamespace(
-            flush_observer_buffer=lambda pet: self._ret(0)
-        )
-        spoken = []
-        async def _mock_speak(pet, chat, reason, topic=""):
-            spoken.append((reason, topic))
-        service.autonomous_service = SimpleNamespace(
-            evaluate_proactive_speaking=lambda pet, state: self._ret(("群友暴论", "话题")),
-            proactive_speak=_mock_speak,
-        )
-        await service.maybe_event_interject(1, "c1")
-        self.assertEqual(spoken, [("群友暴论", "话题")])
-
-
-class AutonomousTickTests(unittest.IsolatedAsyncioTestCase):
-    def _ret(self, value):
-        async def _inner(*a, **k):
-            return value
-        return _inner()
-
-    async def test_tick_suppressed_when_recently_replied(self):
-        import time
-        from services.autonomous_service import AutonomousService
-        from types import SimpleNamespace
-        service = AutonomousService.__new__(AutonomousService)
-        now = time.time()
-        service.config = SimpleNamespace(
-            proactive_cooldown_sec=600,
-            unanswered_cooldown_sec=1800,
-            proactive_reply_cooldown_sec=60.0,
-            scheduled_events=(),
-        )
-        service.pick_scheduled_event = lambda pet, cur, t: None
-        service.state_domain = SimpleNamespace(in_quiet_hours=lambda ts: False)
-        service.runtime = None
-        spoken = []
-        service.evaluate_proactive_speaking = lambda pet, cur: self._ret(("理由", "话题"))
-        service.proactive_speak = lambda pet, chat, reason, topic="": spoken.append((reason, topic))
-
-        # 刚回复过（10 秒前），处于 60 秒冷却内
-        state = {
-            "last_proactive_ts": 0.0,
-            "last_reply_ts": now - 10,
-            "last_proactive_answered": True,
-        }
-        res = await service.tick_pet(1, "c1", current=state, now=now)
-        self.assertFalse(res)
-        self.assertEqual(spoken, [])
-
-    async def test_tick_suppressed_when_chat_locked(self):
-        import asyncio
-        import time
-        from runtime import RuntimeState
-        from services.autonomous_service import AutonomousService
-        from types import SimpleNamespace
-        service = AutonomousService.__new__(AutonomousService)
-        now = time.time()
-        service.config = SimpleNamespace(
-            proactive_cooldown_sec=600,
-            unanswered_cooldown_sec=1800,
-            proactive_reply_cooldown_sec=60.0,
-            scheduled_events=(),
-        )
-        service.pick_scheduled_event = lambda pet, cur, t: None
-        service.state_domain = SimpleNamespace(in_quiet_hours=lambda ts: False)
-        service.runtime = RuntimeState()
-        # 模拟当前 pet 正在回复锁定中
-        lock = service.runtime.chat_locks.setdefault(1, asyncio.Lock())
-        await lock.acquire()
-
-        state = {
-            "last_proactive_ts": 0.0,
-            "last_reply_ts": 0.0,
-            "last_proactive_answered": True,
-        }
-        res = await service.tick_pet(1, "c1", current=state, now=now)
-        self.assertFalse(res)
-
-
-class MemeSendingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_send_meme_uploads_and_caches_key(self):
-        from pathlib import Path
-        import tempfile
-        from types import SimpleNamespace
-        from services.reply_service import ReplyService
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            (tmp_path / "eat_rice.png").write_bytes(b"dummy_png_bytes")
-
-            service = ReplyService.__new__(ReplyService)
-            service.config = typing.cast(typing.Any, SimpleNamespace(memes_dir=tmp_path))
-            service._meme_cache = {}
-
-            uploaded = []
-            sent_images = []
-
-            async def fake_upload(image_bytes: bytes):
-                uploaded.append(image_bytes)
-                return "key_123"
-
-            async def fake_send_image(chat_id: str, image_key: str):
-                sent_images.append((chat_id, image_key))
-                return "msg_id_1"
-
-            service.feishu = typing.cast(typing.Any, SimpleNamespace(
-                upload_image=fake_upload,
-                send_image=fake_send_image,
-            ))
-
-            # 首次发送：应触发 upload 和 send
-            await service._send_meme_if_any("chat_001", "eat_rice")
-            self.assertEqual(len(uploaded), 1)
-            self.assertEqual(uploaded[0], b"dummy_png_bytes")
-            self.assertEqual(sent_images, [("chat_001", "key_123")])
-            self.assertEqual(service._meme_cache.get("eat_rice"), "key_123")
-
-            # 第二次发送：应走内存缓存，不重复 upload
-            await service._send_meme_if_any("chat_001", "eat_rice")
-            self.assertEqual(len(uploaded), 1)  # 仍为 1
-            self.assertEqual(len(sent_images), 2)
-            self.assertEqual(sent_images[1], ("chat_001", "key_123"))
-
-            # 无效 tag：忽略
-            await service._send_meme_if_any("chat_001", "invalid_tag")
-            self.assertEqual(len(sent_images), 2)
-
-
-if __name__ == "__main__":
-    unittest.main()
+    async def test_background_tasks_are_cancelled_on_close(self):
+        task = self.c.runtime.spawn(asyncio.sleep(100))
+        await self.c.runtime.close()
+        self.assertTrue(task.cancelled())

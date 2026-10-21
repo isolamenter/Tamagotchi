@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="theme-color" content="#1769e0" />
+    <title>大肥鱼 · 群聊工作台</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/static/workspace.css" />
+    <script src="/static/workspace.js" defer></script>
+  </head>
+  <body>
+    <section id="login" class="login-screen">
+      <div class="login-panel">
+        <div class="brand">
+          <span class="brand-symbol">🐋</span
+          ><span>大肥鱼 <small>2.0</small></span>
+        </div>
+        <h1>群里那条，<br />有点脾气的鱼。</h1>
+        <p class="login-copy">
+          在这里看看聊了什么、记住了什么，<br />偶尔帮她递句话。
+        </p>
+        <form id="login-form">
+          <label for="access-token">管理口令</label>
+          <input
+            id="access-token"
+            type="password"
+            required
+            autocomplete="current-password"
+            placeholder="输入管理口令"
+            aria-describedby="login-error"
+          />
+          <button class="primary" type="submit" id="login-button">
+            进入工作台 <span aria-hidden="true">↗</span>
+          </button>
+          <p id="login-error" class="error-text" role="alert"></p>
+        </form>
+        <p class="login-note">口令仅在当前标签页保存。</p>
+      </div>
+      <figure class="login-character">
+        <img
+          src="/static/character.png"
+          alt="蓝白女仆装的大肥鱼，正得意地叉着腰"
+        />
+        <figcaption>有实力的好吧。</figcaption>
+      </figure>
+    </section>
+
+    <div id="workspace" class="workspace" hidden>
+      <aside class="sidebar" aria-label="会话导航">
+        <div class="brand">
+          <span class="brand-symbol">🐋</span
+          ><span>大肥鱼 <small id="version">2.0</small></span>
+        </div>
+        <div class="sidebar-heading">
+          <h2>我的群聊</h2>
+          <span id="room-count" class="count">0</span>
+        </div>
+        <label class="search-box"
+          ><span aria-hidden="true">⌕</span
+          ><input
+            id="room-search"
+            type="search"
+            aria-label="搜索会话"
+            placeholder="搜索群聊或标识"
+        /></label>
+        <div id="rooms" class="rooms" aria-label="选择会话"></div>
+        <div class="sidebar-footer">
+          <span id="connection-status" class="status-pill">正在连接</span
+          ><button id="logout" class="text-button">退出</button>
+        </div>
+      </aside>
+
+      <div class="workspace-body">
+        <header class="workspace-header">
+          <div>
+            <div class="breadcrumb">
+              群聊工作台 <span>/</span>
+              <span id="breadcrumb-room">选择一个群聊</span>
+            </div>
+            <h1 id="room-title">今天，群里聊什么？</h1>
+          </div>
+          <div class="header-actions">
+            <button
+              id="toggle-info"
+              class="outline mobile-info"
+              aria-expanded="false"
+            >
+              会话操作</button
+            ><span id="last-refresh" class="subtle"></span
+            ><button id="refresh" class="outline" title="刷新当前会话">
+              ↻ <span>刷新</span>
+            </button>
+          </div>
+        </header>
+        <div
+          id="workspace-error"
+          class="error-banner"
+          role="alert"
+          hidden
+        ></div>
+        <div id="no-rooms" class="empty-workspace" hidden>
+          <span class="empty-whale">🐋</span>
+          <h2>还没加入聊天。</h2>
+          <p>在飞书群里 @ 大肥鱼一次，<br />这里就会出现这个群聊。</p>
+        </div>
+        <div id="room-workspace" class="room-workspace" hidden>
+          <main class="conversation-main">
+            <nav class="tabs" aria-label="会话内容">
+              <button
+                data-view="messages"
+                class="tab active"
+                aria-current="page"
+              >
+                消息</button
+              ><button data-view="memories" class="tab">记忆</button
+              ><button data-view="send" class="tab">发言台</button>
+            </nav>
+
+            <section
+              id="view-messages"
+              class="view message-view"
+              aria-label="消息时间线"
+            >
+              <div class="view-toolbar">
+                <div class="segmented" aria-label="消息筛选">
+                  <button data-filter="all" class="selected">全部</button
+                  ><button data-filter="assistant">大肥鱼</button
+                  ><button data-filter="direct">对话</button
+                  ><button data-filter="observer">旁听</button>
+                </div>
+                <span id="message-summary" class="subtle"></span>
+              </div>
+              <div class="timeline-container">
+                <div
+                  id="messages"
+                  class="timeline"
+                  tabindex="0"
+                  aria-label="消息列表"
+                ></div>
+                <button id="new-messages" class="new-messages" hidden>
+                  查看新消息 ↓
+                </button>
+              </div>
+            </section>
+
+            <section
+              id="view-memories"
+              class="view memory-view"
+              aria-label="长期记忆"
+              hidden
+            >
+              <div class="view-toolbar memory-toolbar">
+                <label class="search-box"
+                  ><span aria-hidden="true">⌕</span
+                  ><input
+                    id="memory-search"
+                    type="search"
+                    placeholder="筛选已加载的记忆"
+                    aria-label="筛选已加载的记忆" /></label
+                ><select id="memory-kind" aria-label="记忆类型">
+                  <option value="all">所有类型</option>
+                  <option value="reality">真实互动</option>
+                  <option value="hearsay">群友转述</option>
+                  <option value="imagination">梦境想象</option>
+                </select>
+              </div>
+              <div class="memory-intro">
+                <h2>她记得的那些事。</h2>
+                <p>事实、转述和想象，分别记清楚。</p>
+              </div>
+              <div id="memories" class="memories"></div>
+              <button id="older-memories" class="load-more" hidden>
+                加载更早的记忆
+              </button>
+            </section>
+
+            <section
+              id="view-send"
+              class="view send-view"
+              aria-label="手动发送"
+              hidden
+            >
+              <div class="send-heading">
+                <span class="paper-icon" aria-hidden="true">✎</span>
+                <h2>帮她递句话。</h2>
+                <p>发送的内容会以大肥鱼的身份出现在当前群聊中。</p>
+              </div>
+              <div class="send-target">
+                <span class="target-dot"></span>发送到
+                <strong id="send-target"></strong>
+              </div>
+              <form id="send-form">
+                <label for="message-draft">想说什么</label
+                ><textarea
+                  id="message-draft"
+                  rows="6"
+                  maxlength="10000"
+                  placeholder="写点什么……"
+                ></textarea>
+                <div class="composer-bottom">
+                  <span class="subtle">Ctrl / ⌘ + Enter 发送</span
+                  ><button type="submit" class="primary" id="send-text">
+                    发送文字 <span aria-hidden="true">↗</span>
+                  </button>
+                </div>
+              </form>
+              <div class="image-composer">
+                <div class="section-label">或者，发张图片</div>
+                <label id="image-drop" class="image-drop" tabindex="0"
+                  ><input
+                    id="image-file"
+                    type="file"
+                    accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"
+                    hidden
+                  /><span aria-hidden="true">▧</span
+                  ><strong>选择、拖入或粘贴图片</strong
+                  ><span>PNG / JPEG / GIF / WebP / BMP，最大 10 MB</span></label
+                >
+                <div id="image-preview" class="image-preview" hidden>
+                  <img id="preview-image" alt="待发送的图片预览" />
+                  <div>
+                    <strong id="image-name"></strong
+                    ><span id="image-size" class="subtle"></span
+                    ><button type="button" id="clear-image" class="text-button">
+                      移除图片
+                    </button>
+                  </div>
+                </div>
+                <button id="send-image" class="outline" disabled>
+                  发送图片 ↗
+                </button>
+              </div>
+            </section>
+          </main>
+
+          <aside class="inspector" aria-label="当前会话状态和操作">
+            <button
+              id="close-inspector"
+              class="icon-button mobile-info"
+              aria-label="关闭会话操作"
+            >
+              ×
+            </button>
+            <div class="character-note">
+              <div class="portrait">
+                <img src="/static/character.png" alt="大肥鱼" />
+              </div>
+              <div>
+                <strong>大肥鱼</strong><span>平级群友，嘴硬心软。</span>
+              </div>
+            </div>
+            <section class="room-info">
+              <div class="section-heading">
+                <h2>这间群聊</h2>
+                <button id="rename-room" class="text-button">命名</button>
+              </div>
+              <p id="chat-id" class="chat-id"></p>
+              <div class="room-totals">
+                <div>
+                  <strong id="total-messages">—</strong><span>条消息</span>
+                </div>
+                <div>
+                  <strong id="total-memories">—</strong><span>段记忆</span>
+                </div>
+              </div>
+              <dl class="state-list">
+                <div>
+                  <dt>最近回复</dt>
+                  <dd id="last-reply">—</dd>
+                </div>
+                <div>
+                  <dt>主动开口</dt>
+                  <dd id="last-proactive">—</dd>
+                </div>
+                <div>
+                  <dt>前次话题</dt>
+                  <dd id="last-topic">还没主动开过口</dd>
+                </div>
+              </dl>
+            </section>
+            <section>
+              <h2 class="section-title">让她开口</h2>
+              <p class="section-description">这些操作会向当前群聊发消息。</p>
+              <div class="action-list">
+                <button data-action="speak">
+                  <span>♧</span>
+                  <div>
+                    <strong>主动接一句</strong
+                    ><small>给个情境，让她自由发挥</small>
+                  </div>
+                  <span>›</span></button
+                ><button data-action="dream">
+                  <span>☾</span>
+                  <div>
+                    <strong>讲个梦</strong
+                    ><small id="dream-schedule">梦里的事，梦里说</small>
+                  </div>
+                  <span>›</span></button
+                ><button data-action="diary">
+                  <span>▤</span>
+                  <div>
+                    <strong>写今天的日记</strong
+                    ><small id="diary-schedule">挑一件真聊过的事</small>
+                  </div>
+                  <span>›</span>
+                </button>
+              </div>
+              <button data-action="tick" class="check-timing">
+                ◷ 检查开口时机
+              </button>
+            </section>
+            <details class="runtime-details">
+              <summary>运行状态</summary>
+              <dl class="state-list">
+                <div>
+                  <dt>风格索引</dt>
+                  <dd id="style-state">准备中</dd>
+                </div>
+                <div>
+                  <dt>长期记忆索引</dt>
+                  <dd id="memory-index-state">准备中</dd>
+                </div>
+                <div>
+                  <dt>安静时段</dt>
+                  <dd id="quiet-state">—</dd>
+                </div>
+              </dl>
+              <button data-action="tick-all" class="text-button">
+                检查所有会话
+              </button>
+            </details>
+            <button id="mobile-logout" class="text-button mobile-info">
+              退出工作台
+            </button>
+          </aside>
+        </div>
+      </div>
+    </div>
+    <dialog id="action-dialog">
+      <form id="action-form">
+        <div class="dialog-top">
+          <span class="dialog-symbol">🐋</span
+          ><button
+            type="button"
+            id="close-dialog"
+            class="icon-button"
+            aria-label="关闭"
+          >
+            ×
+          </button>
+        </div>
+        <h2 id="action-title"></h2>
+        <p id="action-description"></p>
+        <div class="dialog-target" id="action-target"></div>
+        <div id="trigger-field">
+          <label for="action-trigger">发言情境（可选）</label
+          ><textarea
+            id="action-trigger"
+            rows="3"
+            maxlength="2000"
+            placeholder="比如：大家正在讨论一个离谱的 bug"
+          ></textarea>
+        </div>
+        <div id="rename-field" hidden>
+          <label for="room-name">会话名称</label
+          ><input
+            id="room-name"
+            maxlength="80"
+            placeholder="给这个群聊起个好认的名字"
+          />
+        </div>
+        <label id="mark-field" class="checkbox-label" hidden
+          ><input
+            type="checkbox"
+            id="mark-date"
+          />计入今天的定时发送，避免稍后再次发送</label
+        >
+        <div class="dialog-buttons">
+          <button type="button" id="cancel-dialog" class="outline">取消</button
+          ><button type="submit" id="confirm-action" class="primary">
+            确认发送
+          </button>
+        </div>
+        <p id="action-error" class="error-text" role="alert"></p>
+      </form>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </body>
+</html>

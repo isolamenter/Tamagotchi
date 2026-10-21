@@ -1,2 +1,0 @@
-"""Pure domain logic."""
-

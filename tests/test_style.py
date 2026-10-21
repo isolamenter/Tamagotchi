@@ -3,13 +3,14 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
-from domain.style import StyleDomain
-from repositories.sqlite import Database
-from repositories.style_repo import StyleEmbeddingRepository
-from services.style_service import StyleService
-from tests.test_domain import make_config
+from dafeiyu.domain.style import StyleDomain
+from dafeiyu.repositories.sqlite import Database
+from dafeiyu.repositories.style_repo import StyleEmbeddingRepository
+from dafeiyu.services.style_service import StyleService
+from tests.helpers import make_config
 
 
 class BatchLLM:
@@ -37,7 +38,7 @@ class StyleCacheTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.config = make_config(str(Path(self.tmp.name) / "state.db"))
-        self.db = Database(self.config)
+        self.db = Database(self.config.db_path)
         self.db.init_db()
         self.repo = StyleEmbeddingRepository(self.db)
 
@@ -46,18 +47,12 @@ class StyleCacheTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_initializes_in_batches_and_reuses_complete_cache(self):
         llm = BatchLLM()
-        service = StyleService(
-            self.config, StyleDomain(self.config), self.repo, llm
-        )
+        service = StyleService(self.config, StyleDomain(self.config), self.repo, llm)
         await service.initialize()
         self.assertTrue(service.ready)
-        self.assertEqual(
-            [size for _purpose, size in llm.calls], [50, 50, 50, 10]
-        )
+        self.assertEqual([size for _purpose, size in llm.calls], [50, 50, 50, 10])
         with self.db.connect() as conn:
-            count = conn.execute(
-                "SELECT COUNT(*) FROM style_embeddings"
-            ).fetchone()[0]
+            count = conn.execute("SELECT COUNT(*) FROM style_embeddings").fetchone()[0]
             dimensions = {
                 row[0]
                 for row in conn.execute(
@@ -69,55 +64,40 @@ class StyleCacheTests(unittest.IsolatedAsyncioTestCase):
         with self.db.connect() as conn:
             type_counts = dict(
                 conn.execute(
-                    "SELECT embedding_type, COUNT(*) FROM style_embeddings "
-                    "GROUP BY embedding_type"
+                    "SELECT embedding_type, COUNT(*) FROM style_embeddings GROUP BY embedding_type"
                 ).fetchall()
             )
-        self.assertEqual(
-            type_counts, {"catchphrase": 100, "example_card": 60}
-        )
-        block = await service.render_examples_block("你懂吗")
+        self.assertEqual(type_counts, {"catchphrase": 100, "example_card": 60})
+        block, _ = await service.render_examples_block("你懂吗")
         self.assertIn("第一环节", block)
         self.assertIn("第二环节", block)
         self.assertLess(block.index("第一环节"), block.index("第二环节"))
 
         cached_llm = BatchLLM(fail=True)
-        cached_service = StyleService(
-            self.config, StyleDomain(self.config), self.repo, cached_llm
-        )
+        cached_service = StyleService(self.config, StyleDomain(self.config), self.repo, cached_llm)
         await cached_service.initialize()
         self.assertTrue(cached_service.ready)
         self.assertEqual(cached_llm.calls, [])
 
     async def test_failed_refresh_keeps_last_known_good_cache_and_other_data(self):
-        service = StyleService(
-            self.config, StyleDomain(self.config), self.repo, BatchLLM()
-        )
+        service = StyleService(self.config, StyleDomain(self.config), self.repo, BatchLLM())
         await service.initialize()
         with self.db.connect() as conn:
-            conn.execute(
-                "INSERT INTO sys_cache(key, val, expires_at) VALUES ('keep', 'yes', 0)"
-            )
+            conn.execute("INSERT INTO sys_cache(key, val, expires_at) VALUES ('keep', 'yes', 0)")
             before = conn.execute(
-                "SELECT example_id, content_hash FROM style_embeddings "
-                "ORDER BY example_id"
+                "SELECT example_id, content_hash FROM style_embeddings ORDER BY example_id"
             ).fetchall()
 
         self.config.style_corpus["examples"][0]["context"] += "（已修改）"
-        failed = StyleService(
-            self.config, StyleDomain(self.config), self.repo, BatchLLM(fail=True)
-        )
+        failed = StyleService(self.config, StyleDomain(self.config), self.repo, BatchLLM(fail=True))
         with self.assertRaises(RuntimeError):
             await failed.initialize()
 
         with self.db.connect() as conn:
             after = conn.execute(
-                "SELECT example_id, content_hash FROM style_embeddings "
-                "ORDER BY example_id"
+                "SELECT example_id, content_hash FROM style_embeddings ORDER BY example_id"
             ).fetchall()
-            keep = conn.execute(
-                "SELECT val FROM sys_cache WHERE key = 'keep'"
-            ).fetchone()[0]
+            keep = conn.execute("SELECT val FROM sys_cache WHERE key = 'keep'").fetchone()[0]
         self.assertEqual([tuple(row) for row in after], [tuple(row) for row in before])
         self.assertEqual(keep, "yes")
 
@@ -131,9 +111,7 @@ class StyleCacheTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError):
             await service.initialize()
         with self.db.connect() as conn:
-            count = conn.execute(
-                "SELECT COUNT(*) FROM style_embeddings"
-            ).fetchone()[0]
+            count = conn.execute("SELECT COUNT(*) FROM style_embeddings").fetchone()[0]
         self.assertEqual(count, 0)
 
     async def test_uninitialized_service_uses_lexical_fallback(self):
@@ -143,41 +121,20 @@ class StyleCacheTests(unittest.IsolatedAsyncioTestCase):
             self.repo,
             BatchLLM(fail=True),
         )
-        block = await service.render_examples_block("你懂吗")
+        block, _ = await service.render_examples_block("你懂吗")
         self.assertTrue(
-            any(
-                response in block
-                for response in ("这块我不懂 不装懂", "不熟 先别让我瞎指挥")
-            )
+            any(response in block for response in ("这块我不懂 不装懂", "不熟 先别让我瞎指挥"))
         )
 
 
-class StyleSchemaMigrationTests(unittest.TestCase):
-    def test_adds_embedding_type_to_legacy_style_cache(self):
+class SchemaVersionTests(unittest.TestCase):
+    def test_legacy_style_cache_is_rejected_without_modification(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "state.db"
-            with sqlite3.connect(path) as conn:
-                conn.execute(
-                    "CREATE TABLE style_embeddings ("
-                    "example_id TEXT NOT NULL, provider TEXT NOT NULL, "
-                    "model TEXT NOT NULL, content_hash TEXT NOT NULL, "
-                    "dimension INTEGER NOT NULL, vec BLOB NOT NULL, "
-                    "updated_at REAL NOT NULL, "
-                    "PRIMARY KEY (example_id, provider, model))"
-                )
-                conn.execute(
-                    "INSERT INTO style_embeddings VALUES "
-                    "('legacy', 'gemini', 'embed', 'hash', 1, X'00000000', 1)"
-                )
-            db = Database(make_config(str(path)))
-            db.init_db()
-            with db.connect() as conn:
-                row = conn.execute(
-                    "SELECT embedding_type FROM style_embeddings "
-                    "WHERE example_id = 'legacy'"
-                ).fetchone()
-            self.assertEqual(row[0], "catchphrase")
-
-
-if __name__ == "__main__":
-    unittest.main()
+            path = Path(tmp) / "legacy.db"
+            with closing(sqlite3.connect(path)) as conn, conn:
+                conn.execute("CREATE TABLE style_embeddings (example_id TEXT PRIMARY KEY)")
+                conn.execute("INSERT INTO style_embeddings VALUES ('legacy')")
+            before = path.read_bytes()
+            with self.assertRaisesRegex(RuntimeError, "not schema 2"):
+                Database(path).init_db()
+            self.assertEqual(path.read_bytes(), before)
