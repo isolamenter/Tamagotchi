@@ -178,7 +178,12 @@ class MemoryRepository:
         return await asyncio.to_thread(self._get_compress_context, conversation_id)
 
     def _save_compressed_cards(
-        self, conversation_id: int, cards_raw: list[dict], new_until_id: int
+        self,
+        conversation_id: int,
+        cards_raw: list[dict],
+        new_until_id: int,
+        *,
+        allow_empty: bool = False,
     ) -> list[tuple[int, dict]]:
         inserted = []
         now = time.time()
@@ -209,9 +214,10 @@ class MemoryRepository:
                     ),
                 ).fetchone()
                 inserted.append((row["id"], card))
-            # 只有真正存进卡片时才推进 summary_until_id；0 张卡时不推进，
-            # 否则这批消息会从 verbatim 窗口和卡片索引里同时消失（静默丢失）。
-            if inserted:
+            # The service may explicitly acknowledge a valid "nothing to remember"
+            # response. Never infer that from a nonempty batch filtered to zero cards.
+            # This only moves the prompt checkpoint; raw messages remain in SQLite.
+            if inserted or (allow_empty and not cards_raw):
                 conn.execute(
                     "UPDATE conversations SET summary_until_id = ?, compress_fail_count = 0, "
                     "last_compress_attempt = ? WHERE id = ?",
@@ -220,10 +226,19 @@ class MemoryRepository:
         return inserted
 
     async def save_compressed_cards(
-        self, conversation_id: int, cards_raw: list[dict], new_until_id: int
+        self,
+        conversation_id: int,
+        cards_raw: list[dict],
+        new_until_id: int,
+        *,
+        allow_empty: bool = False,
     ) -> list[tuple[int, dict]]:
         return await asyncio.to_thread(
-            self._save_compressed_cards, conversation_id, cards_raw, new_until_id
+            self._save_compressed_cards,
+            conversation_id,
+            cards_raw,
+            new_until_id,
+            allow_empty=allow_empty,
         )
 
     def _handle_compress_failure(
