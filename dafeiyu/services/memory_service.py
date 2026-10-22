@@ -179,9 +179,26 @@ class MemoryService:
 
             try:
                 data = json.loads(content)
-                cards_raw = data.get("cards") or []
-                if not isinstance(cards_raw, list):
-                    raise ValueError("cards is not a list")
+                if not isinstance(data, dict) or not isinstance(data.get("cards"), list):
+                    raise ValueError("expected an object with a cards list")
+                cards_raw = data["cards"]
+                # Validate the whole batch before saving. A malformed/nonempty batch
+                # must never masquerade as an intentional empty result, or advance
+                # the checkpoint after silently dropping only its invalid entries.
+                for card in cards_raw:
+                    if not isinstance(card, dict):
+                        raise ValueError("memory card is not an object")
+                    if not isinstance(card.get("what"), str) or not card["what"].strip():
+                        raise ValueError("memory card needs nonempty what")
+                    for key in ("kind", "when", "who", "vibe", "hooks"):
+                        if key in card and not isinstance(card[key], str):
+                            raise ValueError(f"memory card {key} is not text")
+                    if card.get("kind", "reality").strip() not in {
+                        "reality",
+                        "hearsay",
+                        "imagination",
+                    }:
+                        raise ValueError("invalid memory kind")
             except Exception as exc:
                 log.warning(
                     "compress parse/json error for conversation %d: %s",
@@ -195,7 +212,7 @@ class MemoryService:
 
             try:
                 inserted = await self.memory_repo.save_compressed_cards(
-                    conversation_id, cards_raw, new_until_id
+                    conversation_id, cards_raw, new_until_id, allow_empty=not cards_raw
                 )
             except Exception:
                 log.exception(
@@ -207,9 +224,9 @@ class MemoryService:
                 )
                 return
 
-            if not inserted:
-                # 解析成功但 0 张可用卡片：不推进 summary_until_id，失败五次后
-                # 改用逐条确定性记忆卡，绝不丢弃原始历史。
+            if cards_raw and not inserted:
+                # Only an explicit, validated empty list is successful without cards.
+                # Nonempty input with no durable cards must retain history for retry.
                 log.warning(
                     "compress produced no usable cards for conversation %d (raw=%d)",
                     conversation_id,
