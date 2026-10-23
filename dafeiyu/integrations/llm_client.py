@@ -82,6 +82,7 @@ class LLMClient:
         try:
             if self.provider == "gemini":
                 config = None
+                contents = normalized
                 if self.config.embed_model.rstrip("/").endswith("gemini-embedding-001"):
                     task_types = {
                         "retrieval_document": "RETRIEVAL_DOCUMENT",
@@ -90,9 +91,17 @@ class LLMClient:
                     task_type = task_types.get(purpose)
                     if task_type:
                         config = self._types.EmbedContentConfig(task_type=task_type)
+                elif self.config.embed_model.rstrip("/").endswith("gemini-embedding-2"):
+                    if purpose == "retrieval_query":
+                        normalized = [f"task: search result | query: {text}" for text in normalized]
+                    elif purpose == "retrieval_document":
+                        normalized = [f"title: none | text: {text}" for text in normalized]
+                    contents = [
+                        self._types.Content(parts=[self._types.Part(text=text)]) for text in normalized
+                    ]
                 resp = await self._genai.aio.models.embed_content(
                     model=self.config.embed_model,
-                    contents=normalized,
+                    contents=contents,
                     config=config,
                 )
                 vectors = [list(item.values) for item in (resp.embeddings or [])]
@@ -139,13 +148,17 @@ class LLMClient:
         *,
         max_tokens: int,
         temperature: float,
+        web_search: bool = False,
     ) -> str:
+        if web_search and self.provider != "gemini":
+            raise ValueError("Web search requires the Gemini provider")
         if self.provider == "gemini":
             return await self._gemini_chat(
                 messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 json_mode=True,
+                web_search=web_search,
             )
         resp = await self.client.chat.completions.create(
             model=self.config.model_name,
@@ -165,6 +178,7 @@ class LLMClient:
         max_tokens: int,
         temperature: float,
         json_mode: bool,
+        web_search: bool = False,
     ) -> str:
         system_instruction, contents = _to_gemini_contents(messages)
         config_kwargs = {
@@ -175,6 +189,8 @@ class LLMClient:
             config_kwargs["system_instruction"] = system_instruction
         if json_mode:
             config_kwargs["response_mime_type"] = "application/json"
+        if web_search:
+            config_kwargs["tools"] = [self._types.Tool(google_search=self._types.GoogleSearch())]
         resp = await self._genai.aio.models.generate_content(
             model=self.config.model_name,
             contents=contents,

@@ -7,7 +7,7 @@ import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from dafeiyu.domain.reply import GeneratedReply
 from tests.helpers import container, event
@@ -109,6 +109,21 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             [("user", "你好"), ("assistant", "在呢")],
         )
         self.assertEqual(self.c.feishu.calls[-1][0], "reply")
+
+    async def test_direct_reply_enables_search_only_for_gemini(self):
+        for provider in ("gemini", "openai"):
+            with self.subTest(provider=provider):
+                self.c.services.reply.config = replace(self.c.config, llm_provider=provider)
+                with patch.object(
+                    self.c.llm, "chat_json", AsyncMock(wraps=self.c.llm.chat_json)
+                ) as chat:
+                    await self.c.services.reply.handle_message_event(event("@_bot 你好"))
+                    self.assertEqual(chat.await_count, 1)
+                    self.assertEqual(chat.call_args.kwargs["web_search"], provider == "gemini")
+                    system = "\n".join(
+                        m["content"] for m in chat.call_args.args[0] if m["role"] == "system"
+                    )
+                    self.assertEqual(self.c.config.web_search_prompt in system, provider == "gemini")
 
     async def test_concurrent_messages_are_not_duplicated_or_attributed_to_last_user(
         self,

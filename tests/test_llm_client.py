@@ -3,6 +3,7 @@ from __future__ import annotations
 import typing
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from dafeiyu.integrations.llm_client import LLMClient, _to_gemini_contents
 
@@ -36,6 +37,47 @@ class GeminiContentsTests(unittest.TestCase):
         system, contents = _to_gemini_contents([{"role": "user"}])
         self.assertEqual(system, "")
         self.assertEqual(contents, [{"role": "user", "parts": [{"text": ""}]}])
+
+
+class GeminiSearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_search_is_opt_in_and_preserves_json_output(self):
+        response = '{"reply_mode":"normal","reply":"查到了"}'
+        generate = AsyncMock(return_value=SimpleNamespace(text=response))
+        llm = LLMClient.__new__(LLMClient)
+        llm.provider = "gemini"
+        llm.config = typing.cast(typing.Any, SimpleNamespace(model_name="gemini-3.1-flash-lite"))
+        llm._types = SimpleNamespace(
+            GenerateContentConfig=SimpleNamespace,
+            Tool=SimpleNamespace,
+            GoogleSearch=SimpleNamespace,
+        )
+        llm._genai = SimpleNamespace(
+            aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate))
+        )
+        messages = [
+            {"role": "system", "content": "输出 JSON"},
+            {"role": "user", "content": "今天有什么新闻？"},
+        ]
+
+        result = await llm.chat_json(messages, max_tokens=350, temperature=0.5, web_search=True)
+        self.assertEqual(result, response)
+        request = generate.call_args.kwargs
+        self.assertEqual(request["model"], "gemini-3.1-flash-lite")
+        config = request["config"]
+        self.assertEqual(config.response_mime_type, "application/json")
+        self.assertEqual(config.system_instruction, "输出 JSON")
+        self.assertEqual(config.max_output_tokens, 350)
+        self.assertEqual(len(config.tools), 1)
+        self.assertIsNotNone(config.tools[0].google_search)
+
+        await llm.chat_json(messages, max_tokens=128, temperature=0)
+        self.assertFalse(hasattr(generate.call_args.kwargs["config"], "tools"))
+
+    async def test_search_on_unsupported_provider_is_rejected(self):
+        llm = LLMClient.__new__(LLMClient)
+        llm.provider = "openai"
+        with self.assertRaisesRegex(ValueError, "Gemini"):
+            await llm.chat_json([], max_tokens=350, temperature=0.5, web_search=True)
 
 
 class EmbeddingBatchTests(unittest.IsolatedAsyncioTestCase):
@@ -93,6 +135,32 @@ class EmbeddingBatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(vectors, [[1.0], [2.0]])
         self.assertEqual(calls[0]["contents"], ["doc one", "doc two"])
         self.assertEqual(calls[0]["config"].task_type, "RETRIEVAL_DOCUMENT")
+
+    async def test_embedding2_keeps_documents_separate_and_formats_retrieval_inputs(self):
+        embed = AsyncMock(return_value=SimpleNamespace(embeddings=[
+            SimpleNamespace(values=[1.0, 0.0]), SimpleNamespace(values=[0.0, 1.0])
+        ]))
+        llm = LLMClient.__new__(LLMClient)
+        llm.provider = "gemini"
+        llm.config = typing.cast(typing.Any, SimpleNamespace(embed_model="gemini-embedding-2"))
+        llm._types = SimpleNamespace(Content=SimpleNamespace, Part=SimpleNamespace)
+        llm._genai = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(embed_content=embed)))
+        vectors = await llm.embed_texts(["doc one", "doc two"], purpose="retrieval_document")
+        self.assertEqual(vectors, [[1.0, 0.0], [0.0, 1.0]])
+        request = embed.call_args.kwargs
+        self.assertIsNone(request["config"])
+        self.assertEqual(
+            [content.parts[0].text for content in request["contents"]],
+            ["title: none | text: doc one", "title: none | text: doc two"],
+        )
+        embed.return_value = SimpleNamespace(embeddings=[SimpleNamespace(values=[1.0, 0.0])])
+        self.assertEqual(
+            await llm.embed_text("find this", purpose="retrieval_query"), [1.0, 0.0]
+        )
+        self.assertEqual(
+            embed.call_args.kwargs["contents"][0].parts[0].text,
+            "task: search result | query: find this",
+        )
 
     async def test_empty_and_count_mismatch_fail_closed(self):
         llm = LLMClient.__new__(LLMClient)

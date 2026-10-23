@@ -53,6 +53,7 @@ class ReplyService:
     async def generate(
         self, conversation_id: int, items: list[IncomingMessage], current_ids: set[int]
     ) -> GeneratedReply:
+        web_search = self.config.llm_provider == "gemini"
         history, _ = await self.conversations.load_conversation_context(conversation_id)
         history = [row for row in history if row["id"] not in current_ids]
         query = "\n".join(item.text for item in items)
@@ -72,6 +73,7 @@ class ReplyService:
                         self.config.json_output_prompt,
                         style_text,
                         self.config.persona_reinforcement,
+                        self.config.web_search_prompt if web_search else "",
                     )
                 ),
             }
@@ -87,6 +89,7 @@ class ReplyService:
             messages,
             max_tokens=self.config.reply_max_tokens,
             temperature=self.config.reply_temperature,
+            web_search=web_search,
         )
         reply = replace(GeneratedReply.parse(content), example_ids=frozenset(example_ids))
         if reply.meme_tag:

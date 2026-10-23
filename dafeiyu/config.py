@@ -54,6 +54,7 @@ class AppConfig:
     recall_header: str
     recall_card_template: str
     json_output_prompt: str
+    web_search_prompt: str
     proactive_eval_prompt: str
     proactive_prompt: str
     scheduled_event_prompt: str
@@ -207,6 +208,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         recall_header=prompts["recall"]["header"],
         recall_card_template=prompts["recall"]["card_template"],
         json_output_prompt=prompts["json_output"]["prompt"] + "\n" + meme_catalog.render_prompt(),
+        web_search_prompt=prompts["web_search"]["prompt"],
         proactive_eval_prompt=prompts.get("proactive_eval", {}).get("prompt", ""),
         proactive_prompt=prompts["proactive"]["prompt"],
         scheduled_event_prompt=prompts["scheduled_event"]["prompt"],
