@@ -146,7 +146,13 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_malformed_model_output_never_leaks_to_chat(self):
         self.c.llm.responses.append("internal malformed json")
-        await self.c.services.reply.handle_message_event(event("@_bot 你好"))
+        with self.assertLogs("dafeiyu", level="WARNING") as captured:
+            await self.c.services.reply.handle_message_event(event("@_bot 你好"))
+        logs = "\n".join(captured.output)
+        self.assertIn("JSONDecodeError", logs)
+        self.assertIn("Expecting value", logs)
+        self.assertIn("line=1 column=1 position=0 chars=23", logs)
+        self.assertNotIn("internal malformed json", logs)
         rows = await self.c.message_repo.recent_messages(self.cid, 20)
         self.assertNotIn("internal", rows[-1]["content"])
 

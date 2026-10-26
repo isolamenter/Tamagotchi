@@ -254,7 +254,7 @@ class StyleDomainTests(unittest.TestCase):
         self.assertNotIn("【长度示例】", config.persona_style_prompt)
         self.assertNotRegex(config.persona_style_prompt, r"\d+\s*个汉字")
         self.assertNotRegex(config.persona_style_reinforcement, r"\d+\s*个汉字")
-        self.assertEqual(config.reply_max_tokens, 350)
+        self.assertEqual(config.reply_max_tokens, 1200)
         self.assertEqual(config.reply_temperature, 0.5)
 
     def test_semantic_retrieval_matches_paraphrase_without_keyword(self):

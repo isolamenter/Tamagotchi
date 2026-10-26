@@ -23,7 +23,7 @@ flush_max_count = 50
 
 [llm]
 # 普通回复 / 主动发言的 JSON 输出 token 上限。
-reply_max_tokens = 350
+reply_max_tokens = 1200
 # 采样温度
 reply_temperature = 0.5
 autonomous_temperature = 0.5

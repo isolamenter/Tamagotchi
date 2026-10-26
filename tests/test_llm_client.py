@@ -40,12 +40,13 @@ class GeminiContentsTests(unittest.TestCase):
 
 
 class GeminiSearchTests(unittest.IsolatedAsyncioTestCase):
-    async def test_search_is_opt_in_and_preserves_json_output(self):
-        response = '{"reply_mode":"normal","reply":"查到了"}'
-        generate = AsyncMock(return_value=SimpleNamespace(text=response))
+    def make_client(self, response):
+        generate = AsyncMock(return_value=response)
         llm = LLMClient.__new__(LLMClient)
         llm.provider = "gemini"
-        llm.config = typing.cast(typing.Any, SimpleNamespace(model_name="gemini-3.1-flash-lite"))
+        llm.config = typing.cast(typing.Any, SimpleNamespace(
+            model_name="gemini-3.1-flash-lite", gemini_api_key="fixture-secret"
+        ))
         llm._types = SimpleNamespace(
             GenerateContentConfig=SimpleNamespace,
             Tool=SimpleNamespace,
@@ -54,6 +55,14 @@ class GeminiSearchTests(unittest.IsolatedAsyncioTestCase):
         llm._genai = SimpleNamespace(
             aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate))
         )
+        return llm, generate
+
+    async def test_search_is_opt_in_and_preserves_json_output(self):
+        response = '{"reply_mode":"normal","reply":"查到了"}'
+        llm, generate = self.make_client(SimpleNamespace(
+            text=response, candidates=[SimpleNamespace(finish_reason="STOP")],
+            usage_metadata=None, prompt_feedback=None, response_id="fixture-response",
+        ))
         messages = [
             {"role": "system", "content": "输出 JSON"},
             {"role": "user", "content": "今天有什么新闻？"},
@@ -72,6 +81,60 @@ class GeminiSearchTests(unittest.IsolatedAsyncioTestCase):
 
         await llm.chat_json(messages, max_tokens=128, temperature=0)
         self.assertFalse(hasattr(generate.call_args.kwargs["config"], "tools"))
+
+    async def test_truncation_logs_finish_usage_and_json_error_without_content(self):
+        response = '{"reply":"private response'
+        llm, _ = self.make_client(SimpleNamespace(
+            text=response, candidates=[SimpleNamespace(finish_reason="MAX_TOKENS")],
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=900, candidates_token_count=350,
+                thoughts_token_count=0, total_token_count=1250,
+            ),
+            prompt_feedback=None, response_id="fixture-truncated",
+        ))
+        with self.assertLogs("dafeiyu", level="WARNING") as captured:
+            result = await llm.chat_json(
+                [{"role": "user", "content": "private request"}],
+                max_tokens=350, temperature=0.5,
+            )
+        self.assertEqual(result, response)
+        logs = "\n".join(captured.output)
+        for value in ["MAX_TOKENS", "output_tokens=350", "max_output_tokens=350",
+                      "prompt_tokens=900", "thought_tokens=0", "total_tokens=1250",
+                      "Unterminated string", "position=", "fixture-truncated"]:
+            self.assertIn(value, logs)
+        self.assertNotIn("private response", logs)
+        self.assertNotIn("private request", logs)
+
+    async def test_blocked_empty_response_logs_block_reason(self):
+        llm, _ = self.make_client(SimpleNamespace(
+            text=None, candidates=None, usage_metadata=None,
+            prompt_feedback=SimpleNamespace(block_reason="SAFETY"), response_id=None,
+        ))
+        with self.assertLogs("dafeiyu", level="WARNING") as captured:
+            self.assertEqual(await llm.chat_json([], max_tokens=1200, temperature=0.5), "")
+        logs = "\n".join(captured.output)
+        self.assertIn("block_reason=SAFETY", logs)
+        self.assertIn("chars=0", logs)
+        self.assertIn("Expecting value", logs)
+
+    async def test_api_error_logs_status_and_redacts_key_then_propagates(self):
+        llm, generate = self.make_client(None)
+        error = RuntimeError("fixture error")
+        error.code = 429
+        error.status = "RESOURCE_EXHAUSTED"
+        error.message = "Quota exceeded for fixture-secret"
+        generate.side_effect = error
+        with self.assertLogs("dafeiyu", level="WARNING") as captured:
+            with self.assertRaises(RuntimeError) as raised:
+                await llm.chat_json([], max_tokens=1200, temperature=0.5)
+        self.assertIs(raised.exception, error)
+        logs = "\n".join(captured.output)
+        self.assertIn("code=429", logs)
+        self.assertIn("RESOURCE_EXHAUSTED", logs)
+        self.assertIn("Quota exceeded", logs)
+        self.assertIn("[REDACTED]", logs)
+        self.assertNotIn("fixture-secret", logs)
 
     async def test_search_on_unsupported_provider_is_rejected(self):
         llm = LLMClient.__new__(LLMClient)

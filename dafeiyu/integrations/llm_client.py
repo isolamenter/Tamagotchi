@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import math
 
@@ -191,12 +192,61 @@ class LLMClient:
             config_kwargs["response_mime_type"] = "application/json"
         if web_search:
             config_kwargs["tools"] = [self._types.Tool(google_search=self._types.GoogleSearch())]
-        resp = await self._genai.aio.models.generate_content(
-            model=self.config.model_name,
-            contents=contents,
-            config=self._types.GenerateContentConfig(**config_kwargs),
+        try:
+            resp = await self._genai.aio.models.generate_content(
+                model=self.config.model_name,
+                contents=contents,
+                config=self._types.GenerateContentConfig(**config_kwargs),
+            )
+        except Exception as exc:
+            message = getattr(exc, "message", "") or ""
+            if self.config.gemini_api_key:
+                message = message.replace(self.config.gemini_api_key, "[REDACTED]")
+            log.warning(
+                "gemini request failed model=%s error=%s code=%s status=%s message=%r",
+                self.config.model_name,
+                type(exc).__name__,
+                getattr(exc, "code", None),
+                getattr(exc, "status", None),
+                message,
+            )
+            raise
+        content = (resp.text or "").strip()
+        json_error = ""
+        if json_mode:
+            try:
+                json.loads(content)
+            except json.JSONDecodeError as exc:
+                json_error = f"{exc.msg}; line={exc.lineno} column={exc.colno} position={exc.pos}"
+        candidates = resp.candidates or []
+        finish_reasons = [candidate.finish_reason for candidate in candidates]
+        usage = resp.usage_metadata
+        block_reason = resp.prompt_feedback.block_reason if resp.prompt_feedback else None
+        abnormal = (
+            not content
+            or bool(json_error)
+            or bool(block_reason)
+            or any(reason != "STOP" for reason in finish_reasons)
         )
-        return (resp.text or "").strip()
+        log.log(
+            logging.WARNING if abnormal else logging.INFO,
+            "gemini response model=%s response_id=%s web_search=%s finish_reasons=%s "
+            "block_reason=%s max_output_tokens=%d prompt_tokens=%s output_tokens=%s "
+            "thought_tokens=%s total_tokens=%s chars=%d json_error=%r",
+            self.config.model_name,
+            resp.response_id,
+            web_search,
+            finish_reasons,
+            block_reason,
+            max_tokens,
+            usage.prompt_token_count if usage else None,
+            usage.candidates_token_count if usage else None,
+            usage.thoughts_token_count if usage else None,
+            usage.total_token_count if usage else None,
+            len(content),
+            json_error,
+        )
+        return content
 
     # 图片描述（读图）上限：caption 是给主对话看的摘要，不是正文，短而够用。
     caption_max_tokens = 150

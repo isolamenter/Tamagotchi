@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import replace
@@ -178,10 +179,17 @@ class ReplyService:
             try:
                 reply = await self.generate(conversation_id, valid, current_ids)
             except Exception as exc:
+                reason = ""
+                if isinstance(exc, json.JSONDecodeError):
+                    reason = (
+                        f"{exc.msg}; line={exc.lineno} column={exc.colno} "
+                        f"position={exc.pos} chars={len(exc.doc)}"
+                    )
                 log.warning(
-                    "reply generation failed conversation=%d error=%s",
+                    "reply generation failed conversation=%d error=%s reason=%r",
                     conversation_id,
                     type(exc).__name__,
+                    reason,
                 )
                 reply = GeneratedReply(self.config.fallback_replies["empty_llm"], "reaction")
         else:
