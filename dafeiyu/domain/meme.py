@@ -6,8 +6,6 @@ import json
 import re
 from pathlib import Path
 
-from dafeiyu.domain.scene import scene_for
-
 _OPT_OUT = re.compile(
     r"(?:别|不要|不想|不用|禁止|不准|无需|不许|停止|不).{0,6}(?:发|配|贴).{0,6}"
     r"(?:图|表情|meme)|只(?:用|要|发)?(?:文字|文本)",
@@ -55,8 +53,9 @@ class MemeCatalog:
             return "missing_evidence"
         if _OPT_OUT.search(user):
             return "opt_out"
-        if scene_for(user) not in scene["allowed_contexts"]:
-            return "scene_mismatch"
+        # Context/target/tone are checked by the existing independent semantic
+        # review. Lexical scene labels must not veto natural paraphrases first.
+        # Delivery still excludes substantive replies before reaching review.
         if not reply.strip():
             return "reply_mismatch"
         return ""

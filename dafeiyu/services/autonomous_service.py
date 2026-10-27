@@ -46,6 +46,8 @@ class AutonomousService:
         )
         self.system, self.memory, self.observer = system, memory, observer
         self.llm, self.style, self.delivery = llm, style, delivery
+        self.consolidation = None
+        self.consolidation_tasks = {}
 
     def scheduled_event_due(self, state: dict, now: float) -> tuple[dict, str] | None:
         if self.state_domain.is_weekend_rest(now):
@@ -154,15 +156,35 @@ class AutonomousService:
     ) -> tuple[str, str] | None:
         rows = await self.messages.recent_messages(conversation_id, limit=15)
         last_activity = max(state["last_reply_ts"], state["last_proactive_ts"])
-        if (
-            sum(r["role"] == "user" and r["ts"] > last_activity for r in rows)
-            < self.config.proactive_min_new_msgs
-        ):
+        status = await self.conversations.evaluation_status(conversation_id)
+        now = time.time()
+        if now - status["last_attempt"] < 60:
+            return None
+        fresh = [
+            r
+            for r in rows
+            if r["role"] == "user"
+            and r["id"] > status["until_id"]
+            and r["ts"] > last_activity
+            and 0
+            <= now - r["ts"]
+            <= float(self.config.settings.get("autonomous", {}).get("fresh_activity_sec", 180))
+        ]
+        if len(fresh) < self.config.proactive_min_new_msgs:
             return None
         lines = [
-            f"[{self.config.character_name if r['role'] == 'assistant' else r['sender_name'] or '群友'}]: {r['content']}"
+            self.context.wrap_user(
+                r["content"],
+                r["sender_name"],
+                sender_open_id=r.get("sender_open_id", ""),
+                mentions=r.get("mentions", ()),
+                ts=r["ts"],
+            )
+            if r["role"] == "user"
+            else self.config.character_name + ": " + r["content"]
             for r in rows[-8:]
         ]
+        await self.conversations.record_evaluation(conversation_id, None, now)
         try:
             data = json.loads(
                 await self.llm.chat_json(
@@ -176,25 +198,32 @@ class AutonomousService:
                             "content": "最近群聊：\n"
                             + "\n".join(lines)
                             + "\n上次主动话题："
-                            + state["last_proactive_topic"],
+                            + state["last_proactive_topic"]
+                            + "\n上次主动话题是否已被人回应："
+                            + str(state["last_proactive_answered"])
+                            + "\n若上次未获回应，避免语义重复；不要只比话题字面。只有新消息提供自然参与价值才说话。",
                         },
                     ],
                     max_tokens=250,
                     temperature=0.3,
                 )
             )
-            if not isinstance(data, dict) or data.get("should_speak") is not True:
+            if not isinstance(data, dict) or type(data.get("should_speak")) is not bool:
+                raise ValueError("invalid participation decision")
+            if data["should_speak"] and (
+                not isinstance(data.get("reason"), str) or not isinstance(data.get("topic"), str)
+            ):
+                raise ValueError("invalid participation reason/topic")
+            await self.conversations.record_evaluation(
+                conversation_id, max(r["id"] for r in fresh), now
+            )
+            if data["should_speak"] is not True:
                 return None
             reason, topic = (
                 str(data.get("reason") or "").strip(),
                 str(data.get("topic") or "").strip(),
             )
-            if (
-                not reason
-                or not topic
-                or not state["last_proactive_answered"]
-                and topic == state["last_proactive_topic"]
-            ):
+            if not reason or not topic:
                 return None
             return reason, topic
         except Exception as exc:
@@ -290,9 +319,16 @@ class AutonomousService:
             return await self._maybe_interject_locked(conversation_id, chat_id, state, time.time())
 
     async def tick_conversation(
-        self, conversation_id: int, chat_id: str, now: float | None = None
+        self,
+        conversation_id: int,
+        chat_id: str,
+        now: float | None = None,
+        *,
+        run_internal: bool = True,
     ) -> bool:
         now = time.time() if now is None else now
+        if run_internal and self.consolidation is not None:
+            await self.consolidation.maybe_consolidate(conversation_id, now)
         if (
             self.runtime.chat_pending_messages.get(conversation_id)
             or self.runtime.chat_lock(conversation_id).locked()
@@ -304,11 +340,11 @@ class AutonomousService:
             due = self.scheduled_event_due(state, now)
             if due:
                 event, date = due
-                recent = await self.messages.recent_messages(conversation_id, 20)
-                if not any(r["role"] == "user" and now - r["ts"] <= 86400 for r in recent):
-                    await self.conversations.mutate_state(
-                        conversation_id, lambda s: {**s, event["state_key"]: date}
-                    )
+                if (
+                    self._cooling_down(state, now)
+                    or await self.evaluate_proactive_speaking(conversation_id, state) is None
+                ):
+                    # Skipped is not sent: fresh activity may qualify later inside the grace window.
                     return False
                 await self._scheduled_locked(conversation_id, chat_id, event, date, True)
                 return True
@@ -319,7 +355,13 @@ class AutonomousService:
         await self.observer.flush_all()
         for row in await self.conversations.load_all_conversations():
             try:
-                await self.tick_conversation(row["id"], row["chat_id"])
+                cid = row["id"]
+                task = self.consolidation_tasks.get(cid)
+                if self.consolidation is not None and (task is None or task.done()):
+                    self.consolidation_tasks[cid] = self.runtime.spawn(
+                        self.consolidation.maybe_consolidate(cid)
+                    )
+                await self.tick_conversation(cid, row["chat_id"], run_internal=False)
             except Exception as exc:
                 log.error(
                     "autonomous task failed conversation=%d error=%s",

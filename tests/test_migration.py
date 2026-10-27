@@ -76,7 +76,7 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(report["memory_vectors_to_rebuild"], 3)
         self.assertNotIn("fixture-secret", json.dumps(report))
         with Database(self.target).connect() as conn:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
             self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
             self.assertFalse(conn.execute("PRAGMA foreign_key_check").fetchall())
             row = conn.execute("SELECT * FROM conversations WHERE id=4").fetchone()
@@ -116,7 +116,7 @@ class MigrationTests(unittest.TestCase):
             migrate(self.source, self.target)
         with Database(self.target).connect() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0], 0)
-        with self.assertRaisesRegex(RuntimeError, "not schema 2"):
+        with self.assertRaisesRegex(RuntimeError, "not schema 3"):
             Database(self.target).init_db()
 
     def test_unknown_memory_kind_is_not_silently_reclassified(self):

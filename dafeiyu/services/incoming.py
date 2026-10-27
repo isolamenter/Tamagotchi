@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import time
 from dataclasses import dataclass
 
 from dafeiyu.domain.conversation import ConversationContext
@@ -20,6 +22,10 @@ class IncomingMessage:
     text: str
     direct: bool
     fallback: str = ""
+    sent_at: float = 0.0
+    mentions: tuple[dict, ...] = ()
+    content_kind: str = "text"
+    evidence_text: str | None = None
 
 
 class IncomingService:
@@ -37,7 +43,8 @@ class IncomingService:
     async def user_name(self, open_id: str) -> str:
         if not open_id:
             return "群友"
-        return await self.system.get_cached_user_name(open_id) or f"群友-{open_id[-4:]}"
+        # Global legacy name guesses are audit-only, never cross-chat identity facts.
+        return f"群友-{open_id[-4:]}"
 
     async def caption(self, message_id: str, key: str) -> str:
         try:
@@ -78,12 +85,26 @@ class IncomingService:
             return None
         if not isinstance(data, dict):
             return None
+        try:
+            sent_at = float(message.get("create_time", "")) / 1000
+            if not math.isfinite(sent_at) or sent_at <= 0:
+                raise ValueError("invalid event time")
+        except (ValueError, TypeError):
+            sent_at = time.time()
+        people = {
+            ((m.get("id") or {}).get("open_id") or ""): m.get("name") or ""
+            for m in mentions
+            if (m.get("id") or {}).get("open_id") not in {"", None, bot_id}
+        }
         kind = message.get("message_type")
         fallback = ""
+        evidence_text = None
         if kind == "image":
+            evidence_text = ""
             text = await self.caption(message_id, data.get("image_key") or "")
         elif kind == "post":
             parts = [data.get("title") or ""]
+            human_parts = parts.copy()
             for paragraph in data.get("content") or []:
                 if not isinstance(paragraph, list):
                     continue
@@ -93,7 +114,13 @@ class IncomingService:
                     tag = element.get("tag")
                     if tag in {"text", "a"}:
                         parts.append(element.get("text") or "")
+                        human_parts.append(element.get("text") or "")
                     elif tag == "at" and element.get("user_id") != bot_id:
+                        if element.get("user_id"):
+                            people[element["user_id"]] = element.get("user_name") or ""
+                        human_parts.append(
+                            "@" + (element.get("user_name") or element.get("text") or "群友")
+                        )
                         parts.append(
                             "@" + (element.get("user_name") or element.get("text") or "群友")
                         )
@@ -101,6 +128,7 @@ class IncomingService:
                         parts.append(await self.caption(message_id, element.get("image_key") or ""))
                 parts.append("\n")
             text = " ".join(parts).strip()
+            evidence_text = self.context.clean_text(" ".join(human_parts).strip(), mentions, bot_id)
         elif kind == "text":
             text = data.get("text") or ""
         else:
@@ -126,4 +154,8 @@ class IncomingService:
             text,
             direct,
             fallback,
+            sent_at,
+            tuple({"open_id": oid, "name": name} for oid, name in people.items()),
+            kind or "unknown",
+            text if evidence_text is None else evidence_text,
         )

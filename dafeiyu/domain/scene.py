@@ -1,4 +1,4 @@
-"""Small, conservative gates for known mismatches; no model-based intent router."""
+"""Conservative boundaries, not keyword prerequisites for semantic retrieval."""
 
 from __future__ import annotations
 
@@ -67,22 +67,36 @@ def body_teasing(text: str) -> bool:
     )
 
 
+def advice_refused(text: str) -> bool:
+    """Respect an explicit boundary without treating all distress as refusal."""
+    return bool(
+        re.search(
+            r"(?:不想|不要|别|不用|不需要|无需).{0,6}(?:建议|说教|讲道理)"
+            r"|(?:只想|只是想).{0,4}(?:吐槽|倾诉)",
+            text,
+        )
+    )
+
+
 def example_allowed(example: dict, text: str, *, card: bool = False) -> bool:
     scene = scene_for(text)
+    no_advice = advice_refused(text)
     if card:
         mode, name = example.get("mode"), example.get("scene")
-        if mode == "reasoning" and scene != "substantive":
-            return False
-        if mode == "correction" and scene != "correction":
+        # Relevance is ranked by embeddings in StyleDomain. A request or
+        # correction need not use one of scene_for's illustrative phrases.
+        if mode == "reasoning" and no_advice:
             return False
         if name in {"body_defense", "fat_name", "refuse_weight"} and not body_teasing(text):
             return False
-        return not (scene in {"care", "substantive"} and mode == "teasing")
+        return not ((scene in {"care", "substantive"} or no_advice) and mode == "teasing")
     intent = example.get("intent")
     if intent == "body_defense" and (scene != "casual" or not body_teasing(text)):
         return False
-    if intent in {"debug", "reasoning"} and scene != "substantive":
+    if intent in {"debug", "reasoning"} and no_advice:
         return False
-    if scene == "care" and intent not in {"care", "blessing", "boundary", "farewell"}:
+    if (scene == "care" or no_advice) and intent not in {
+        "care", "blessing", "boundary", "farewell", "debug", "reasoning"
+    }:
         return False
     return True

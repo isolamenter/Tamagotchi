@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 from dataclasses import replace
 
 from dafeiyu.config import AppConfig
@@ -58,7 +57,33 @@ class ReplyService:
         history, _ = await self.conversations.load_conversation_context(conversation_id)
         history = [row for row in history if row["id"] not in current_ids]
         query = "\n".join(item.text for item in items)
-        recall = await self.memory.build_recall_block(conversation_id, query=query)
+        subjects = {item.sender_open_id for item in items if item.sender_open_id}
+        subjects.update(m["open_id"] for item in items for m in item.mentions)
+        resolution = ""
+        if self.memory.identities is not None and self.config.settings.get("memory", {}).get(
+            "identity_resolve_enabled", True
+        ):
+            subjects, resolution = await self.memory.identities.resolve_subjects(
+                conversation_id,
+                self.llm,
+                [
+                    {
+                        "sender_open_id": item.sender_open_id,
+                        "text": item.text[:1000],
+                        "mentions": item.mentions,
+                    }
+                    for item in items
+                ],
+                history,
+                subjects,
+                timeout=float(
+                    self.config.settings.get("memory", {}).get("identity_resolve_timeout_sec", 8)
+                ),
+            )
+        recall = await self.memory.build_recall_block(
+            conversation_id, query=query, subject_ids=subjects
+        )
+        recall += resolution
         style_text, example_ids = await self.style.render_examples_block(
             query,
             scope="reply",
@@ -82,7 +107,14 @@ class ReplyService:
         messages.extend(
             {
                 "role": "user",
-                "content": self.context.wrap_user(item.text, item.sender_name),
+                "content": self.context.wrap_user(
+                    item.text,
+                    item.sender_name,
+                    sender_open_id=item.sender_open_id,
+                    mentions=item.mentions,
+                    source_message_id=item.message_id,
+                    ts=item.sent_at,
+                ),
             }
             for item in items
         )
@@ -136,7 +168,11 @@ class ReplyService:
                     "content": message.text,
                     "sender_name": message.sender_name,
                     "open_id": message.sender_open_id,
-                    "ts": time.time(),
+                    "ts": message.sent_at,
+                    "source_message_id": message.message_id,
+                    "mentions": message.mentions,
+                    "content_kind": message.content_kind,
+                    "evidence_text": message.evidence_text,
                 }
             )
             if (
@@ -171,6 +207,11 @@ class ReplyService:
                         item.text,
                         sender_name=item.sender_name,
                         sender_open_id=item.sender_open_id,
+                        source_message_id=item.message_id,
+                        mentions=item.mentions,
+                        ts=item.sent_at or None,
+                        content_kind=item.content_kind,
+                        evidence_text=item.evidence_text,
                     )
                 )
         last = items[-1]
@@ -220,14 +261,6 @@ class ReplyService:
                 type(exc).__name__,
             )
             return
-        if (
-            len(valid) == 1
-            and reply.speaker_name
-            and valid[0].sender_open_id
-            and reply.speaker_name in valid[0].text
-            and not reply.speaker_name.startswith("群友")
-        ):
-            await self.system.set_cached_user_name(valid[0].sender_open_id, reply.speaker_name)
         if await self.messages.count_unsummarized(conversation_id) > self.config.compress_threshold:
             self.runtime.spawn(self.memory.compress_conversation_memory(conversation_id))
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Callable
 
@@ -45,8 +46,7 @@ class ConversationRepository:
                 raise ValueError("conversation not found")
             messages = conn.execute(
                 """
-                SELECT m.*, COALESCE(u.name, NULLIF(m.sender_name,''), '群友-' || substr(m.sender_open_id,-4)) AS resolved_name
-                FROM messages m LEFT JOIN user_names u ON u.open_id=m.sender_open_id
+                SELECT m.* FROM messages m
                 WHERE m.conversation_id=? AND m.id>? ORDER BY m.id
             """,
                 (conversation_id, row["summary_until_id"]),
@@ -54,7 +54,7 @@ class ConversationRepository:
         history = [
             {
                 **dict(m),
-                "sender_name": m["resolved_name"],
+                "mentions": json.loads(m["mentions_json"]),
                 "is_observer": bool(m["is_observer"]),
             }
             for m in messages
@@ -150,3 +150,25 @@ class ConversationRepository:
             return dict(row) if row else None
 
         return await asyncio.to_thread(read), []
+
+    async def evaluation_status(self, conversation_id: int) -> dict:
+        def read():
+            with self.db.connect() as conn:
+                row = conn.execute(
+                    "SELECT * FROM proactive_evaluations WHERE conversation_id=?",
+                    (conversation_id,),
+                ).fetchone()
+                return dict(row) if row else {"until_id": 0, "last_attempt": 0}
+
+        return await asyncio.to_thread(read)
+
+    async def record_evaluation(self, conversation_id: int, until_id: int | None, now: float):
+        def write():
+            with self.db.connect() as conn:
+                conn.execute(
+                    "INSERT INTO proactive_evaluations(conversation_id,until_id,last_attempt) VALUES(?,?,?) "
+                    "ON CONFLICT(conversation_id) DO UPDATE SET until_id=MAX(until_id,excluded.until_id),last_attempt=excluded.last_attempt",
+                    (conversation_id, until_id or 0, now),
+                )
+
+        await asyncio.to_thread(write)

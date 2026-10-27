@@ -8,6 +8,9 @@ buffer_keep = 80
 compress_threshold = 200
 # RAG 召回时按相关性打分最多扫描这么多张最近卡片。
 recall_scan_max = 2000
+# 有其他人物候选时，用一次小型语义路由理解无@称呼/代词；失败安全降级。
+identity_resolve_enabled = true
+identity_resolve_timeout_sec = 8
 
 [reply]
 # 连续 @ 消息合并窗口（秒）。在该窗口内到达的同一群连续 @ 消息会合并处理，不漏答。
@@ -62,7 +65,9 @@ quiet_weekends = false
 # 梦境/日记窗口补发宽限（秒）
 scheduled_grace_sec = 3600
 # 触发主动发言评估所需的最少新人类旁听消息数
-proactive_min_new_msgs = 2
+proactive_min_new_msgs = 1
+# 对外发言只考虑仍在进行的讨论，不把维护心跳长度当活跃证据。
+fresh_activity_sec = 180
 # 事件驱动主动插嘴开关与防抖（群友发消息时轻量快速判定并现场接梗）
 event_interject_enabled = true
 event_interject_debounce_sec = 2.0
@@ -74,3 +79,14 @@ reply_cooldown_sec = 60.0
 enabled = true
 # 梦境插图生成超时（秒）
 image_timeout_sec = 120
+
+[consolidation]
+# 内部每日整理，独立于对外日记/梦境；无新消息不调用，不发群消息。
+enabled = true
+hour = 19
+max_messages = 300
+max_context_chars = 64000
+max_output_tokens = 6000
+max_calls_per_day = 4
+retry_sec = 900
+timeout_sec = 90

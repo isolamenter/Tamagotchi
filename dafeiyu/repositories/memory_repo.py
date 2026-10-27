@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 
@@ -16,6 +17,45 @@ class MemoryRepository:
         self.db = db
         self.memory_domain = memory_domain
         self.config = config
+
+    @staticmethod
+    def _attribution(row):
+        return {
+            **{k: json.loads(row[k]) for k in ("subject_ids", "reporter_ids", "evidence")},
+            **{
+                k: row[k]
+                for k in (
+                    "origin",
+                    "profile_key",
+                    "profile_category",
+                    "confidence",
+                    "expires_at",
+                    "superseded_by",
+                )
+            },
+        }
+
+    async def subject_cards(
+        self, cid: int, subjects: set[str], limit: int = 8, profiles_only=False
+    ) -> list[dict]:
+        if not subjects:
+            return []
+
+        def read():
+            with self.db.connect() as conn:
+                rows = conn.execute(
+                    "SELECT DISTINCT m.* FROM memories m, json_each(m.subject_ids) s "
+                    "WHERE m.conversation_id=? AND s.value IN ("
+                    + ",".join("?" for _ in subjects)
+                    + ") "
+                    "AND m.superseded_by IS NULL AND (m.expires_at IS NULL OR m.expires_at>unixepoch()) "
+                    + (" AND m.profile_key!=''" if profiles_only else "")
+                    + " ORDER BY m.id DESC LIMIT ?",
+                    (cid, *sorted(subjects), limit),
+                ).fetchall()
+            return [{**dict(r), **self._attribution(r), "when": r["when_text"]} for r in rows]
+
+        return await asyncio.to_thread(read)
 
     def _store_embedding(self, memory_id: int, content: str, vec: list[float]) -> None:
         with self.db.connect() as conn:
@@ -50,18 +90,42 @@ class MemoryRepository:
 
         return await asyncio.to_thread(read)
 
-    def _score_cards(self, conversation_id: int, q_vec: list[float], k: int) -> list[dict]:
+    def _score_cards(
+        self,
+        conversation_id: int,
+        q_vec: list[float],
+        k: int,
+        subject_ids=None,
+        only_subjects=False,
+    ) -> list[dict]:
+        subjects = sorted(subject_ids or ())
+        subject_filter = ""
+        params = []
+        if subject_ids is not None or only_subjects:
+            match = (
+                "EXISTS(SELECT 1 FROM json_each(c.subject_ids) s WHERE s.value IN ("
+                + ",".join("?" for _ in subjects)
+                + "))"
+                if subjects
+                else "0"
+            )
+            subject_filter = " AND " + (
+                match if only_subjects else "(c.subject_ids='[]' OR " + match + ")"
+            )
+            params = subjects
         with self.db.connect() as conn:
             rows = conn.execute(
-                "SELECT e.memory_id, e.vec, c.kind, c.when_text, c.who, c.what, c.vibe "
+                "SELECT e.memory_id, e.vec, c.* "
                 "FROM memory_embeddings e JOIN memories c ON c.id = e.memory_id "
-                "WHERE c.conversation_id = ? AND e.provider = ? AND e.model = ? AND e.dimension = ? "
-                "ORDER BY e.memory_id DESC LIMIT ?",
+                "WHERE c.conversation_id = ? AND c.superseded_by IS NULL AND (c.expires_at IS NULL OR c.expires_at > unixepoch()) AND e.provider = ? AND e.model = ? AND e.dimension = ? "
+                + subject_filter
+                + " ORDER BY e.memory_id DESC LIMIT ?",
                 (
                     conversation_id,
                     self.config.llm_provider,
                     self.config.embed_model,
                     len(q_vec),
+                    *params,
                     self.config.recall_scan_max,
                 ),
             ).fetchall()
@@ -79,6 +143,7 @@ class MemoryRepository:
                 continue
             out.append(
                 {
+                    **self._attribution(row),
                     "id": row["memory_id"],
                     "score": sim,
                     "kind": row["kind"],
@@ -90,20 +155,30 @@ class MemoryRepository:
             )
         return out
 
-    async def score_cards(self, conversation_id: int, q_vec: list[float], k: int) -> list[dict]:
-        return await asyncio.to_thread(self._score_cards, conversation_id, q_vec, k)
+    async def score_cards(
+        self,
+        conversation_id: int,
+        q_vec: list[float],
+        k: int,
+        subject_ids=None,
+        only_subjects=False,
+    ) -> list[dict]:
+        return await asyncio.to_thread(
+            self._score_cards, conversation_id, q_vec, k, subject_ids, only_subjects
+        )
 
     def _recent_cards(self, conversation_id: int, n: int) -> list[dict]:
         if n <= 0:
             return []
         with self.db.connect() as conn:
             rows = conn.execute(
-                "SELECT id, kind, when_text, who, what, vibe FROM memories "
-                "WHERE conversation_id = ? ORDER BY id DESC LIMIT ?",
+                "SELECT * FROM memories "
+                "WHERE conversation_id = ? AND superseded_by IS NULL AND (expires_at IS NULL OR expires_at > unixepoch()) ORDER BY id DESC LIMIT ?",
                 (conversation_id, n),
             ).fetchall()
         return [
             {
+                **self._attribution(row),
                 "id": row["id"],
                 "kind": row["kind"] if "kind" in row.keys() else "reality",
                 "when": row["when_text"],
@@ -122,12 +197,13 @@ class MemoryRepository:
     ) -> list[dict]:
         with self.db.connect() as conn:
             rows = conn.execute(
-                "SELECT id, kind, when_text, who, what, vibe, hooks, created_at "
+                "SELECT * "
                 "FROM memories WHERE conversation_id = ? AND (? IS NULL OR id < ?) ORDER BY id DESC LIMIT ?",
                 (conversation_id, before_id, before_id, limit),
             ).fetchall()
         return [
             {
+                **self._attribution(row),
                 "id": row["id"],
                 "kind": row["kind"] if "kind" in row.keys() else "reality",
                 "when": row["when_text"],
@@ -158,12 +234,13 @@ class MemoryRepository:
             compress_fail_count = conversation_row["compress_fail_count"]
             last_compress_attempt = conversation_row["last_compress_attempt"]
             rows = conn.execute(
-                "SELECT m.id, m.role, m.content, m.source, "
-                "COALESCE(u.name, m.sender_name) AS sender_name, "
-                "m.sender_open_id, m.is_observer FROM messages m "
-                "LEFT JOIN user_names u ON u.open_id = m.sender_open_id "
-                "WHERE m.conversation_id = ? AND m.id > ? ORDER BY m.id",
-                (conversation_id, summary_until_id),
+                "SELECT m.* FROM messages m "
+                "WHERE m.conversation_id = ? AND m.id > ? ORDER BY m.id LIMIT ?",
+                (
+                    conversation_id,
+                    summary_until_id,
+                    self.config.buffer_keep + self.config.consolidation["max_messages"],
+                ),
             ).fetchall()
         return (
             summary_until_id,
@@ -199,8 +276,8 @@ class MemoryRepository:
                     raise ValueError("invalid memory kind")
                 row = conn.execute(
                     "INSERT INTO memories "
-                    "(conversation_id, kind, when_text, who, what, vibe, hooks, created_at, source_until_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                    "(conversation_id, kind, when_text, who, what, vibe, hooks, created_at, source_until_id, subject_ids, reporter_ids, evidence, origin) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'compression') RETURNING id",
                     (
                         conversation_id,
                         kind,
@@ -211,6 +288,9 @@ class MemoryRepository:
                         (card.get("hooks") or "").strip(),
                         now,
                         new_until_id,
+                        json.dumps(card.get("subject_ids", [])),
+                        json.dumps(card.get("reporter_ids", [])),
+                        json.dumps(card.get("evidence", []), ensure_ascii=False),
                     ),
                 ).fetchone()
                 inserted.append((row["id"], card))

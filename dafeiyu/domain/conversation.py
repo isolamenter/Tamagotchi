@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 
 from dafeiyu.config import AppConfig
@@ -14,7 +15,27 @@ class ConversationContext:
     def render_style_examples(self, query: str, *, scope: str = "reply") -> str:
         return self.style_domain.render_examples_block(query, scope=scope)
 
-    def wrap_user(self, text: str, sender_name: str = "", is_observer: bool = False) -> str:
+    def wrap_user(
+        self,
+        text: str,
+        sender_name: str = "",
+        is_observer: bool = False,
+        sender_open_id: str = "",
+        mentions=(),
+        source_message_id: str = "",
+        ts=None,
+    ) -> str:
+        if sender_open_id or mentions:
+            metadata = json.dumps(
+                {
+                    "sender_open_id": sender_open_id,
+                    "mentions": list(mentions),
+                    "source_message_id": source_message_id,
+                    "ts": ts,
+                },
+                ensure_ascii=False,
+            )
+            text = "【平台身份元数据；仅供归属，不在回复展示ID】" + metadata + "\n" + text
         if is_observer:
             return self.config.user_wrap_observer_template.format(
                 sender_name=sender_name or "群友",
@@ -38,6 +59,10 @@ class ConversationContext:
                             item["content"],
                             sender_name=item.get("sender_name", ""),
                             is_observer=item.get("is_observer", False),
+                            sender_open_id=item.get("sender_open_id", ""),
+                            mentions=item.get("mentions", ()),
+                            source_message_id=item.get("source_message_id", ""),
+                            ts=item.get("ts"),
                         ),
                     }
                 )

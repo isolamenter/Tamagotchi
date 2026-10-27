@@ -24,7 +24,7 @@ cp .env.example .env
 
 按 [`.env.example`](.env.example) 填写 `.env`：飞书的 App ID、Secret、Verification Token，选择 `LLM_PROVIDER` 并填写对应 API Key，以及 `CHAT_MODEL`、`EMBED_MODEL`。`IMAGE_MODEL` 可空；独立的 `GM_TOKEN` 为空时管理 API 禁用。飞书启用加密回调时还须填写 `FEISHU_ENCRYPT_KEY`。生产仅需安装 `requirements.txt`。
 
-`STATE_DB` 指向新文件或已完成迁移的 schema-2 数据库，父目录须存在。不要直接指向旧版数据库。
+`STATE_DB` 指向新文件或已完成迁移的 schema-3 数据库，父目录须存在。不要直接指向 schema 1/2 旧库；运行时不会自动升级。
 
 ```sh
 python -m uvicorn dafeiyu.app:create_app --factory --env-file .env --host 127.0.0.1 --port 8000
@@ -75,6 +75,16 @@ python -m dafeiyu.tools.reembed --help
 ```
 
 重建向量会调用真实模型并修改目标库；不要把它当作普通测试。
+
+## 每日人物整理与个人信息
+
+已建立的会话会在本地 19:00 后，独立整理新增人类聊天（包括旁听），不需要群友说“记住我”或成功收到回复。平台 sender/mention ID 是人物键，别名不是；身份与个人信息按会话隔离。偏好、兴趣、沟通习惯和近期事件使用带原文证据、报告人、置信度和版本历史的记忆卡，不从梦境生成事实。
+
+默认每会话每天最多 4 次整理调用，每次最多 300 条、64,000 字符上下文、6,000 输出 tokens、90 秒超时；积压逐批处理，长消息分段续读。无新增不调用。对话中需要理解不带 @ 的称呼/代词时，最多增加一次 300-token、8 秒的人物路由调用；不向路由模型提供全群个人事实。两者明确复用现有 `CHAT_MODEL`（不另选 provider/付费模型），可分别用 `consolidation.enabled` 和 `memory.identity_resolve_enabled` 关闭；没有其他人物候选时不做路由；有其他候选时仍做语义判断，因为 @ 对象可能只是收话人而不是问题主体。64,000 是输入字符预算，不是已验证的供应商 token 窗口保证。具体参数在 `settings.toml`；这些是运行时额外模型成本，不包含在离线测试中。
+
+内部整理不会向群聊发送消息，也不受普通插话静默时段限制。日记/梦境发布仍使用原配置窗口，但必须有人刚在说话（默认 180 秒内）、通过语义参与判断与冷却；没人说话不会仅因到点而发言。详见[记忆规格](docs/specs/memory.md)与[聊天规格](docs/specs/conversation.md)。
+
+schema 1/2 升级使用离线迁移写新文件，旧库和旧代码必须保留作回退；不能让旧代码读取 schema 3，也不能把新库直接降版本。见[迁移决策](docs/decisions/0002-grounded-identity-schema3.md)。
 
 ## 项目结构与文档
 

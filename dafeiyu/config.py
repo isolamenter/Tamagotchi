@@ -61,6 +61,8 @@ class AppConfig:
     fallback_replies: dict
     gm_default_speak_trigger: str
 
+    consolidation: dict
+
     buffer_keep: int
     compress_threshold: int
     recall_scan_max: int
@@ -214,6 +216,16 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         scheduled_event_prompt=prompts["scheduled_event"]["prompt"],
         fallback_replies=prompts["fallback_reply"],
         gm_default_speak_trigger=prompts["gm"]["default_speak_trigger"],
+        consolidation={
+            "enabled": bool(settings.get("consolidation", {}).get("enabled", True)),
+            "hour": int(settings.get("consolidation", {}).get("hour", 19)),
+            "max_messages": int(settings.get("consolidation", {}).get("max_messages", 300)),
+            "max_context_chars": int(settings.get("consolidation", {}).get("max_context_chars", 64000)),
+            "max_output_tokens": int(settings.get("consolidation", {}).get("max_output_tokens", 6000)),
+            "max_calls_per_day": int(settings.get("consolidation", {}).get("max_calls_per_day", 4)),
+            "retry_sec": float(settings.get("consolidation", {}).get("retry_sec", 900)),
+            "timeout_sec": float(settings.get("consolidation", {}).get("timeout_sec", 90)),
+        },
         buffer_keep=int(memory_config.get("buffer_keep", 80)),
         compress_threshold=int(memory_config.get("compress_threshold", 200)),
         recall_scan_max=int(memory_config.get("recall_scan_max", 2000)),
@@ -233,7 +245,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         quiet_weekends=bool(autonomous_config.get("quiet_weekends", False)),
         scheduled_events=tuple(scheduled_events),
         scheduled_grace_sec=int(autonomous_config.get("scheduled_grace_sec", 3600)),
-        proactive_min_new_msgs=int(autonomous_config.get("proactive_min_new_msgs", 2)),
+        proactive_min_new_msgs=int(autonomous_config.get("proactive_min_new_msgs", 1)),
         event_interject_enabled=bool(autonomous_config.get("event_interject_enabled", True)),
         event_interject_debounce_sec=float(
             autonomous_config.get("event_interject_debounce_sec", 2.0)
@@ -280,4 +292,13 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         raise ValueError("Quiet hours must be between 0 and 23")
     if any(event["kind"] not in {"dream", "diary"} for event in config.scheduled_events):
         raise ValueError("Unknown scheduled event")
+    if (not 0 <= config.consolidation["hour"] < 24
+            or not 16000 <= config.consolidation["max_context_chars"] <= 500000
+            or any(config.consolidation[k] <= 0 for k in
+                   ("max_messages", "max_output_tokens", "max_calls_per_day", "retry_sec", "timeout_sec"))):
+        raise ValueError("Invalid consolidation bounds")
+    if not 0 < float(memory_config.get("identity_resolve_timeout_sec", 8)) <= 30:
+        raise ValueError("Identity routing timeout must be in (0,30]")
+    if not 0 < float(autonomous_config.get("fresh_activity_sec", 180)) <= 3600:
+        raise ValueError("Fresh activity window must be in (0,3600]")
     return config

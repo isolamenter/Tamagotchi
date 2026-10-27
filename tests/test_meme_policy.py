@@ -66,7 +66,7 @@ class MemeCatalogTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 MemeCatalog(corpus, self.config.memes_dir)
 
-    def test_evidence_opt_out_and_serious_contexts_are_hard_gates(self):
+    def test_evidence_and_opt_out_are_hard_gates_context_defers_to_semantic_review(self):
         for tag, evidence, user, reason in [
             ("hello", "", "你好", "missing_evidence"),
             ("hello", "伪造证据", "你好", "missing_evidence"),
@@ -74,8 +74,8 @@ class MemeCatalogTests(unittest.TestCase):
             ("hello", "你好", "你好，别发图", "opt_out"),
             ("hello", "你好", "你好，只要文字", "opt_out"),
             ("hello", "你好", "你好，不要给我发送表情包", "opt_out"),
-            ("hello", "你好", "你好，帮我分析数据库报错", "scene_mismatch"),
-            ("hello", "你好", "你好，我很难过", "scene_mismatch"),
+            ("hello", "你好", "你好，帮我分析数据库报错", ""),
+            ("hello", "你好", "你好，我很难过", ""),
         ]:
             with self.subTest(user=user, tag=tag):
                 self.assertEqual(self.catalog.rejection_reason(tag, evidence, user, "在呢"), reason)

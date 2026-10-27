@@ -1,4 +1,4 @@
-"""Read an old database snapshot and backfill a separate schema-2 file.
+"""Read a schema-1 or schema-2 snapshot and backfill a separate current-schema file.
 
 Never overwrites a destination, switches the service, or copies credential caches.
 """
@@ -14,7 +14,7 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from dafeiyu.repositories.sqlite import Database
+from dafeiyu.repositories.sqlite import SCHEMA_VERSION, Database
 
 STATE_DEFAULTS = {
     "last_update_ts": 0.0,
@@ -30,7 +30,10 @@ STATE_DEFAULTS = {
 
 def _digest(records: list[dict]) -> str:
     return hashlib.sha256(
-        json.dumps(records, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+        json.dumps(
+            records, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+            default=lambda value: {"blob_hex": value.hex()} if isinstance(value, bytes) else value,
+        ).encode()
     ).hexdigest()
 
 
@@ -44,6 +47,142 @@ def _insert(conn: sqlite3.Connection, table: str, records: list[dict]) -> None:
     )
 
 
+def _write_destination(
+    source: Path,
+    destination: Path,
+    groups: list[tuple[str, list[dict], str]],
+    *,
+    source_version: int,
+    extra_report: dict,
+    sequences: dict[str, int],
+) -> dict:
+    # Initialize with a sentinel version, not Database.init_db(): even a crash
+    # between schema creation and backfill must not leave a runtime-ready empty DB.
+    schema = Path(__file__).resolve().parents[1].joinpath("repositories/schema.sql").read_text()
+    version_line = f"PRAGMA user_version = {SCHEMA_VERSION};"
+    if schema.count(version_line) != 1:
+        raise RuntimeError("Cannot prepare migration schema version")
+    fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(fd)
+    database = Database(destination)
+    with database.connect() as new:
+        # Persist the sentinel before the schema transaction too: an interrupted
+        # schema script must not be mistaken for a pristine runtime database.
+        new.execute("PRAGMA user_version = 300")
+        new.executescript(schema.replace(version_line, "PRAGMA user_version = 300;"))
+    report = {
+        "schema_version": SCHEMA_VERSION,
+        "source_schema_version": source_version,
+        "source": str(source),
+        "destination": str(destination),
+        "tables": {},
+    }
+    with database.connect() as new:
+        new.execute("BEGIN IMMEDIATE")
+        for table, records, order in groups:
+            _insert(new, table, records)
+            columns = list(records[0]) if records else order.split(",")
+            actual = [
+                dict(r)
+                for r in new.execute(f"SELECT {','.join(columns)} FROM {table} ORDER BY {order}")
+            ]
+            if len(actual) != len(records) or _digest(actual) != _digest(records):
+                raise RuntimeError(f"Backfill verification failed: {table}")
+            report["tables"][table] = {
+                "source_count": len(records),
+                "target_count": len(actual),
+                "sha256": _digest(actual),
+            }
+        for table, sequence in sequences.items():
+            current = new.execute("SELECT seq FROM sqlite_sequence WHERE name=?", (table,)).fetchone()
+            next_sequence = max(sequence, current[0] if current else 0)
+            new.execute("DELETE FROM sqlite_sequence WHERE name=?", (table,))
+            new.execute("INSERT INTO sqlite_sequence(name,seq) VALUES(?,?)", (table, next_sequence))
+        if new.execute("PRAGMA foreign_key_check").fetchall():
+            raise RuntimeError("Foreign-key verification failed")
+        if new.execute("""
+            SELECT id FROM conversations c WHERE summary_until_id != 0 AND NOT EXISTS
+            (SELECT 1 FROM messages m WHERE m.id=c.summary_until_id AND m.conversation_id=c.id)
+        """).fetchall():
+            raise RuntimeError("Compression marker refers to a missing or different conversation message")
+        if new.execute("""
+            SELECT id FROM memories c WHERE source_until_id != 0 AND NOT EXISTS
+            (SELECT 1 FROM messages m WHERE m.id=c.source_until_id AND m.conversation_id=c.conversation_id)
+        """).fetchall():
+            raise RuntimeError("Memory source marker refers to a missing or different conversation message")
+        if new.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise RuntimeError("Target integrity check failed")
+        new.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    report.update({
+        "integrity_check": "ok",
+        "foreign_key_check": "ok",
+        "credential_caches": "not imported",
+        "autoincrement_high_water_marks": sequences,
+        "identity_policy": "legacy names retained for audit only; no aliases inferred; memory subjects unresolved",
+        "rollback": "keep the source snapshot; do not point older runtime at the new file",
+        **extra_report,
+    })
+    return report
+
+
+# Explicit source columns: additive target defaults must not manufacture source
+# evidence or reinterpret global legacy names as scoped identities.
+SCHEMA2_COLUMNS = {
+    "conversations": "id,chat_id,title,created_at,summary_until_id,compress_fail_count,last_compress_attempt,last_update_ts,last_social_ts,last_reply_ts,last_proactive_ts,last_dream_date,last_diary_date,last_proactive_topic,last_proactive_answered",
+    "messages": "id,conversation_id,role,content,ts,sender_name,sender_open_id,is_observer,source,reply_mode,meme_tag",
+    "memories": "id,conversation_id,kind,when_text,who,what,vibe,hooks,created_at,source_until_id",
+    "user_names": "open_id,name,updated_at",
+    "event_dedup": "event_id,created_at",
+    "published_cards": "card_id,conversation_id,message_id,content,image_key,created_at",
+    "memory_embeddings": "memory_id,provider,model,dimension,content,vec,updated_at",
+    "style_embeddings": "example_id,embedding_type,provider,model,content_hash,dimension,vec,updated_at",
+}
+
+
+
+def _sequences(old: sqlite3.Connection, table_map: dict[str, str]) -> dict[str, int]:
+    if not old.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_sequence'").fetchone():
+        return {}
+    result = {}
+    for name, sequence in old.execute("SELECT name,seq FROM sqlite_sequence"):
+        if name in table_map:
+            if type(sequence) is not int or sequence < 0:
+                raise ValueError("Source has an invalid autoincrement sequence")
+            result[table_map[name]] = sequence
+    return result
+
+
+def _migrate_schema2(old: sqlite3.Connection, source: Path, destination: Path) -> dict:
+    tables = {r[0] for r in old.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not (set(SCHEMA2_COLUMNS) | {"sys_cache"}) <= tables:
+        raise ValueError("Source is not the expected schema-2 database")
+    if old.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+        raise ValueError("Source integrity check failed")
+    if old.execute("PRAGMA foreign_key_check").fetchall():
+        raise ValueError("Source foreign-key check failed")
+    groups = []
+    for table, columns in SCHEMA2_COLUMNS.items():
+        present = {r[1] for r in old.execute(f"PRAGMA table_info({table})")}
+        if not set(columns.split(",")) <= present:
+            raise ValueError(f"Source has an unsupported table definition: {table}")
+        order = "example_id,provider,model" if table == "style_embeddings" else columns.split(",")[0]
+        rows = [dict(r) for r in old.execute(f"SELECT {columns} FROM {table} ORDER BY {order}")]
+        groups.append((table, rows, order))
+    memories = next(rows for table, rows, _ in groups if table == "memories")
+    embeddings = next(rows for table, rows, _ in groups if table == "memory_embeddings")
+    return _write_destination(
+        source, destination, groups, source_version=2,
+        sequences=_sequences(old, {name: name for name in ("conversations", "messages", "memories")}),
+        extra_report={
+            "excluded_non_content_or_unpublished_cards": 0,
+            "excluded_state_fields": [],
+            "memory_vectors_to_rebuild": len(memories) - len(embeddings),
+            "style_vectors": "preserved; active provider/model/content hash matching still required",
+            "memory_vectors": "preserved; active provider/model/dimension matching still required",
+        },
+    )
+
+
 def migrate(source: Path, destination: Path) -> dict:
     source, destination = source.resolve(), destination.resolve()
     if source == destination or not source.is_file():
@@ -53,6 +192,11 @@ def migrate(source: Path, destination: Path) -> dict:
     with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as old:
         old.row_factory = sqlite3.Row
         old.execute("BEGIN")
+        source_version = old.execute("PRAGMA user_version").fetchone()[0]
+        if source_version == 2:
+            return _migrate_schema2(old, source, destination)
+        if source_version not in {0, 1}:
+            raise ValueError("Source must be a schema-1 or schema-2 database")
         tables = {r[0] for r in old.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         required = {
             "pets",
@@ -212,75 +356,27 @@ def migrate(source: Path, destination: Path) -> dict:
         excluded_cards = old.execute("SELECT COUNT(*) FROM card_instances").fetchone()[0] - len(
             cards
         )
-        fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        os.close(fd)
-        database = Database(destination)
-        database.init_db()
-        report = {
-            "schema_version": 2,
-            "source": str(source),
-            "destination": str(destination),
-            "tables": {},
-        }
-        with database.connect() as new:
-            new.execute("PRAGMA user_version = 200")
-            new.execute("BEGIN IMMEDIATE")
-            groups = [
+        return _write_destination(
+            source, destination,
+            [
                 ("conversations", conversations, "id"),
                 ("messages", messages, "id"),
                 ("memories", memories, "id"),
                 ("user_names", names, "open_id"),
                 ("event_dedup", events, "event_id"),
                 ("published_cards", cards, "card_id"),
-            ]
-            for table, records, order in groups:
-                _insert(new, table, records)
-                columns = list(records[0]) if records else [order]
-                actual = [
-                    dict(r)
-                    for r in new.execute(
-                        f"SELECT {','.join(columns)} FROM {table} ORDER BY {order}"
-                    )
-                ]
-                if len(actual) != len(records) or _digest(actual) != _digest(records):
-                    raise RuntimeError(f"Backfill verification failed: {table}")
-                report["tables"][table] = {
-                    "source_count": len(records),
-                    "target_count": len(actual),
-                    "sha256": _digest(actual),
-                }
-            if new.execute("PRAGMA foreign_key_check").fetchall():
-                raise RuntimeError("Foreign-key verification failed")
-            bad_markers = new.execute("""
-                SELECT id FROM conversations c WHERE summary_until_id != 0 AND NOT EXISTS
-                (SELECT 1 FROM messages m WHERE m.id=c.summary_until_id AND m.conversation_id=c.id)
-            """).fetchall()
-            if bad_markers:
-                raise RuntimeError(
-                    "Compression marker refers to a missing or different conversation message"
-                )
-            if new.execute("""
-                SELECT id FROM memories c WHERE source_until_id != 0 AND NOT EXISTS
-                (SELECT 1 FROM messages m WHERE m.id=c.source_until_id AND m.conversation_id=c.conversation_id)
-            """).fetchall():
-                raise RuntimeError(
-                    "Memory source marker refers to a missing or different conversation message"
-                )
-            if new.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise RuntimeError("Target integrity check failed")
-            new.execute("PRAGMA user_version = 2")
-        report.update(
-            {
-                "integrity_check": "ok",
-                "foreign_key_check": "ok",
+            ],
+            source_version=source_version,
+            sequences=_sequences(old, {
+                "pets": "conversations", "messages": "messages", "memory_cards": "memories",
+            }),
+            extra_report={
                 "excluded_non_content_or_unpublished_cards": excluded_cards,
                 "excluded_state_fields": sorted(removed_state_keys),
                 "memory_vectors_to_rebuild": len(memories),
                 "style_vectors": "rebuild using the active corpus",
-                "credential_caches": "not imported",
-            }
+            },
         )
-        return report
 
 
 def main() -> None:
@@ -302,7 +398,7 @@ def main() -> None:
     print(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": SCHEMA_VERSION,
                 "verified": True,
                 "counts": {k: v["target_count"] for k, v in report["tables"].items()},
                 "memory_vectors_to_rebuild": report["memory_vectors_to_rebuild"],

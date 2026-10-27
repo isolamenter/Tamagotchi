@@ -43,7 +43,7 @@ class ConversationPolicyTests(unittest.TestCase):
         vectors = {self.style.example_card_id(card): [1.0, 0.0]}
         self.assertEqual(
             self.style.select_example_cards(
-                "今天被这个超时 bug 搞累了", query_vector=[1.0, 0.0], vectors=vectors
+                "今天被这个超时 bug 搞累了，不想听建议", query_vector=[1.0, 0.0], vectors=vectors
             ),
             [],
         )

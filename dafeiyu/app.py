@@ -18,6 +18,7 @@ from dafeiyu.domain.state import StateDomain
 from dafeiyu.integrations.feishu_client import FeishuClient
 from dafeiyu.integrations.llm_client import LLMClient
 from dafeiyu.repositories.conversation_repo import ConversationRepository
+from dafeiyu.repositories.identity_repo import IdentityRepository
 from dafeiyu.repositories.memory_repo import MemoryRepository
 from dafeiyu.repositories.message_repo import MessageRepository
 from dafeiyu.repositories.sqlite import Database
@@ -26,6 +27,7 @@ from dafeiyu.repositories.system_repo import SystemRepository
 from dafeiyu.routes import feishu, gm, health, web
 from dafeiyu.runtime import RuntimeState
 from dafeiyu.services.autonomous_service import AutonomousService
+from dafeiyu.services.consolidation_service import ConsolidationService
 from dafeiyu.services.delivery import DeliveryService
 from dafeiyu.services.incoming import IncomingService
 from dafeiyu.services.memory_service import MemoryService
@@ -45,6 +47,7 @@ class AppServices:
     style: StyleService
     incoming: IncomingService
     delivery: DeliveryService
+    consolidation: ConsolidationService
 
 
 @dataclass
@@ -84,6 +87,9 @@ def build_container(config: AppConfig) -> AppContainer:
     llm, feishu_client = LLMClient(config), FeishuClient(config, system, runtime)
     style = StyleService(config, context.style_domain, styles, llm)
     memory = MemoryService(config, runtime, memory_domain, context, memories, llm)
+    identities = IdentityRepository(db)
+    memory.identities = identities
+    consolidation = ConsolidationService(config, runtime, state, identities, memory, llm)
     observer = ObserverService(config, runtime, messages, memory, conversations)
     incoming = IncomingService(context, system, feishu_client, llm)
     delivery = DeliveryService(config, runtime, conversations, messages, feishu_client, llm)
@@ -101,6 +107,7 @@ def build_container(config: AppConfig) -> AppContainer:
         style,
         delivery,
     )
+    autonomous.consolidation = consolidation
     reply = ReplyService(
         config,
         runtime,
@@ -116,7 +123,7 @@ def build_container(config: AppConfig) -> AppContainer:
         style,
         autonomous,
     )
-    services = AppServices(reply, observer, autonomous, memory, style, incoming, delivery)
+    services = AppServices(reply, observer, autonomous, memory, style, incoming, delivery, consolidation)
     return AppContainer(
         config,
         runtime,

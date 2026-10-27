@@ -138,6 +138,6 @@ class SchemaVersionTests(unittest.TestCase):
                 conn.execute("CREATE TABLE style_embeddings (example_id TEXT PRIMARY KEY)")
                 conn.execute("INSERT INTO style_embeddings VALUES ('legacy')")
             before = path.read_bytes()
-            with self.assertRaisesRegex(RuntimeError, "not schema 2"):
+            with self.assertRaisesRegex(RuntimeError, "not schema 3"):
                 Database(path).init_db()
             self.assertEqual(path.read_bytes(), before)

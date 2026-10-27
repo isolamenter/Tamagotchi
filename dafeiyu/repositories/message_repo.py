@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 from dafeiyu.repositories.sqlite import Database
@@ -20,22 +21,31 @@ class MessageRepository:
         sender_open_id: str = "",
         source: str = "direct",
         reply_mode: str = "",
+        source_message_id: str = "",
+        mentions: tuple[dict, ...] = (),
+        ts: float | None = None,
+        content_kind: str = "text",
+        evidence_text: str | None = None,
     ) -> int:
         with self.db.connect() as conn:
             cur = conn.execute(
                 "INSERT INTO messages "
-                "(conversation_id, role, content, ts, sender_name, sender_open_id, is_observer, source, reply_mode) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(conversation_id, role, content, ts, sender_name, sender_open_id, is_observer, source, reply_mode, source_message_id, mentions_json, content_kind, evidence_text) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     conversation_id,
                     role,
                     content,
-                    time.time(),
+                    time.time() if ts is None else ts,
                     sender_name,
                     sender_open_id,
                     1 if is_observer else 0,
                     source,
                     reply_mode,
+                    source_message_id,
+                    json.dumps(mentions, ensure_ascii=False),
+                    content_kind,
+                    content if evidence_text is None and content_kind == "text" else evidence_text,
                 ),
             )
             return int(cur.lastrowid)
@@ -50,6 +60,11 @@ class MessageRepository:
         sender_open_id: str = "",
         source: str = "direct",
         reply_mode: str = "",
+        source_message_id: str = "",
+        mentions: tuple[dict, ...] = (),
+        ts: float | None = None,
+        content_kind: str = "text",
+        evidence_text: str | None = None,
     ) -> int:
         return await asyncio.to_thread(
             self._append_message,
@@ -61,14 +76,19 @@ class MessageRepository:
             sender_open_id,
             source,
             reply_mode,
+            source_message_id,
+            mentions,
+            ts,
+            content_kind,
+            evidence_text,
         )
 
     def _append_observer_batch(self, conversation_id: int, items: list[dict]) -> None:
         with self.db.connect() as conn:
             conn.executemany(
                 "INSERT INTO messages "
-                "(conversation_id, role, content, ts, sender_name, sender_open_id, is_observer, source) "
-                "VALUES (?, 'user', ?, ?, ?, ?, 1, 'observer')",
+                "(conversation_id, role, content, ts, sender_name, sender_open_id, is_observer, source, source_message_id, mentions_json, content_kind, evidence_text) "
+                "VALUES (?, 'user', ?, ?, ?, ?, 1, 'observer', ?, ?, ?, ?)",
                 [
                     (
                         conversation_id,
@@ -76,6 +96,10 @@ class MessageRepository:
                         item["ts"],
                         item["sender_name"],
                         item.get("open_id", ""),
+                        item.get("source_message_id", ""),
+                        json.dumps(item.get("mentions", []), ensure_ascii=False),
+                        item.get("content_kind", "text"),
+                        item.get("evidence_text", item["content"]),
                     )
                     for item in items
                 ],
@@ -89,21 +113,13 @@ class MessageRepository:
     ) -> list[dict]:
         with self.db.connect() as conn:
             rows = conn.execute(
-                "SELECT m.id, m.role, m.content, m.ts, m.is_observer, m.source, m.reply_mode, m.meme_tag, "
-                "COALESCE("
-                "  u.name,"
-                "  CASE WHEN m.sender_open_id != ''"
-                "       THEN '群友-' || substr(m.sender_open_id, -4)"
-                "       ELSE m.sender_name END"
-                ") AS sender_name "
-                "FROM messages m "
-                "LEFT JOIN user_names u "
-                "  ON u.open_id = m.sender_open_id AND m.sender_open_id != '' "
-                "WHERE m.conversation_id = ? AND (? IS NULL OR m.id < ?) ORDER BY m.id DESC LIMIT ?",
+                "SELECT * FROM messages WHERE conversation_id = ? AND (? IS NULL OR id < ?) ORDER BY id DESC LIMIT ?",
                 (conversation_id, before_id, before_id, limit),
             ).fetchall()
         items = [
             {
+                **dict(row),
+                "mentions": json.loads(row["mentions_json"]),
                 "id": row["id"],
                 "role": row["role"],
                 "content": row["content"],

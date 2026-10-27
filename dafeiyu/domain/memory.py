@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import struct
 
@@ -31,12 +32,30 @@ class MemoryDomain:
         lines = []
         for card in sorted_cards:
             kind_str = card.get("kind") or "事实"
+            if not card.get("subject_ids") and kind_str != "imagination":
+                kind_str = "未归属历史线索（非当前个人事实）"
             line = self.config.recall_card_template.format(
                 kind=kind_str,
                 when=card.get("when") or "某时",
                 who=card.get("who") or "群里",
                 what=(card.get("what") or "").strip(),
                 vibe=(card.get("vibe") or "").strip(),
+            )
+            subjects = card.get("subject_ids", [])
+            meta = {
+                "subject_ids": subjects,
+                "reporter_ids": card.get("reporter_ids", []),
+                "confidence": card.get("confidence", "uncertain"),
+                "original_kind": card.get("kind", ""),
+                "profile_key": card.get("profile_key", ""),
+                "expires_at": card.get("expires_at"),
+                "sources": [
+                    {"id": e.get("source_message_id", ""), "ts": e.get("ts")}
+                    for e in card.get("evidence", [])
+                ],
+            }
+            line += " 【归属元数据；无主体ID的旧记忆不得按同名认领】" + json.dumps(
+                meta, ensure_ascii=False
             )
             lines.append(line)
         return self.config.recall_header + "\n".join(lines)
