@@ -9,6 +9,33 @@ from dafeiyu.app import build_container
 from dafeiyu.config import load_config
 
 
+def evidence(mid, quote, relation="self"):
+    return {"message_id": mid, "quote": quote, "relation": relation}
+
+
+def alias(subject, name, mid, quote, relation="self", status="confirmed"):
+    return {
+        "subject_id": subject,
+        "alias": name,
+        "status": status,
+        "evidence": [evidence(mid, quote, relation)],
+    }
+
+
+def fact(subject, mid, quote, what, *, key="", supersedes=(), relation="self"):
+    return {
+        "kind": "reality",
+        "subject_ids": [subject],
+        "who": "小林",
+        "what": what,
+        "evidence": [evidence(mid, quote, relation)],
+        "profile_key": key,
+        "profile_category": "preference" if key else "",
+        "confidence": "confirmed",
+        "supersedes": list(supersedes),
+    }
+
+
 def make_config(db_path: str = "unused-fixture.db"):
     return load_config(
         {

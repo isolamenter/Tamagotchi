@@ -27,12 +27,25 @@ class ConsolidationService:
         if lock.locked():
             return False
         async with lock, self.model_limit:  # Not chat_lock: human replies remain available.
+            if self.runtime.observer_buffer.get(cid):
+                # Received human messages must be stored before freezing the snapshot.
+                return False
             state = await self.identities.begin_attempt(
                 cid, date, now, options["max_calls_per_day"], options["retry_sec"]
             )
             if state is None:
                 return False
             try:
+                diary_event = next(
+                    (e for e in self.config.scheduled_events if e["kind"] == "diary"), None
+                )
+                prompt = (
+                    PROMPT
+                    + "\n【仅用于 diary.text 的角色口吻，不改变记忆事实判断和输出结构】\n"
+                    + self.config.persona["style"]["prompt"]
+                )
+                if diary_event:
+                    prompt += "\n【日记写作要求】\n" + diary_event["instruction"]
                 rows = await self.identities.pending(cid, state, options["max_messages"])
                 if not rows:
                     raise ValueError("missing snapshot events")
@@ -42,7 +55,7 @@ class ConsolidationService:
                 known = [{k: r[k] for k in ("subject_open_id", "alias", "status")} for r in known]
                 # Bound context independently of backlog or individual message size.
                 known_json = json.dumps(known, ensure_ascii=False)
-                side_budget = max(512, (options["max_context_chars"] - len(PROMPT) - 2000) // 5)
+                side_budget = max(512, (options["max_context_chars"] - len(prompt) - 2000) // 5)
                 while len(known_json) > side_budget:
                     known.pop()
                     known_json = json.dumps(known, ensure_ascii=False)
@@ -59,7 +72,7 @@ class ConsolidationService:
                 remaining = (
                     options["max_context_chars"]
                     - len(json.dumps(profiles, ensure_ascii=False))
-                    - len(PROMPT)
+                    - len(prompt)
                     - len(known_json)
                     - 2000
                 )
@@ -82,6 +95,11 @@ class ConsolidationService:
                         mentions=json.loads(row["mentions_json"]),
                         start_offset=start,
                         legacy_unverified=row["evidence_text"] is None,
+                        diary_eligible=bool(
+                            diary_event
+                            and row["evidence_text"] is not None
+                            and self.state_domain.local_date_hour(row["ts"])[0] == date
+                        ),
                         content="",
                         content_complete=False,
                     )
@@ -114,15 +132,21 @@ class ConsolidationService:
                 if not events:
                     raise ValueError("context budget cannot fit event metadata")
                 request = json.dumps(
-                    {"known_aliases": known, "known_profiles": profiles, "events": events},
+                    {
+                        "known_aliases": known,
+                        "known_profiles": profiles,
+                        "events": events,
+                        "diary_date": date,
+                        "diary_enabled": diary_event is not None,
+                    },
                     ensure_ascii=False,
                 )
-                if len(PROMPT) + len(request) > options["max_context_chars"]:
+                if len(prompt) + len(request) > options["max_context_chars"]:
                     raise ValueError("context budget exceeded")
                 content = await asyncio.wait_for(
                     self.llm.chat_json(
                         [
-                            {"role": "system", "content": PROMPT},
+                            {"role": "system", "content": prompt},
                             {"role": "user", "content": request},
                         ],
                         max_tokens=options["max_output_tokens"],
@@ -130,9 +154,9 @@ class ConsolidationService:
                     ),
                     timeout=options["timeout_sec"],
                 )
-                aliases, cards = validate_result(content, events, profiles)
+                aliases, cards, diary = validate_result(content, events, profiles)
                 inserted = await self.identities.commit(
-                    cid, state, until, offset, aliases, cards, now
+                    cid, state, until, offset, aliases, cards, now, diary=diary
                 )
             except Exception as exc:
                 log.warning(

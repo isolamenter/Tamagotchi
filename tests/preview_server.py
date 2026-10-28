@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 from pathlib import Path
@@ -24,6 +25,21 @@ def create_preview():
             conn.execute(
                 "INSERT INTO conversations(id,chat_id,title,created_at,last_reply_ts,last_proactive_topic) VALUES(?,?,?,?,?,?)",
                 (cid, f"chat-demo-{cid}", title, now - 86400 * 7, now - 120, "今天的摸鱼计划"),
+            )
+            conn.execute(
+                "INSERT INTO sys_cache(key,val) VALUES(?,?)",
+                (
+                    f"daily_diary:{cid}",
+                    json.dumps(
+                        {
+                            "date": c.state_domain.local_date_hour(now)[0],
+                            "ready": cid == 1,
+                            "text": "今天听到测试终于跑通了，我也跟着松了口气。",
+                            "evidence": [],
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
             )
             count = 90 if cid == 1 else 5
             for index in range(count):

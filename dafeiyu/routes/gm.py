@@ -19,6 +19,7 @@ from fastapi import (
 from pydantic import BaseModel, ConfigDict, Field
 
 from dafeiyu import __version__
+from dafeiyu.domain.consolidation import DiaryNotReady
 
 log = logging.getLogger("dafeiyu")
 
@@ -77,7 +78,6 @@ async def overview(req: Request):
             {"kind": e["kind"], "name": e["name"], "hour": e["hour"]}
             for e in c.config.scheduled_events
         ],
-        "quiet_hours": c.config.quiet_hours,
         "timezone_offset_hours": c.config.proactive_tz_offset_hours,
         "image_generation_enabled": bool(c.config.image_model),
     }
@@ -199,9 +199,12 @@ async def scheduled(req: Request, body: ScheduledRequest, kind: str):
     if event is None:
         raise HTTPException(404, "没有配置这项定时内容")
     date, _ = c.state_domain.local_date_hour(time.time())
-    reply, _ = await c.services.autonomous.scheduled_speak(
-        conversation_id, chat_id, event, date, mark_date=body.mark
-    )
+    try:
+        reply, _ = await c.services.autonomous.scheduled_speak(
+            conversation_id, chat_id, event, date, mark_date=body.mark
+        )
+    except DiaryNotReady as exc:
+        raise HTTPException(409, str(exc)) from exc
     return {
         "ok": True,
         "message": event["name"] + "已发送",

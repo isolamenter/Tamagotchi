@@ -301,7 +301,7 @@ class IdentityRetrievalTests(unittest.IsolatedAsyncioTestCase):
             "evidence": [{"message_id": mid, "quote": "正在做鲸鱼项目", "relation": "self"}],
         }
         self.c.llm.responses.append(
-            json.dumps({"aliases": [], "cards": [card]}, ensure_ascii=False)
+            json.dumps({"aliases": [], "cards": [card], "diary": None}, ensure_ascii=False)
         )
         self.assertTrue(await service.maybe_consolidate(self.cid, now))
         self.assertEqual(await self.c.memory_repo.subject_cards(self.cid, {"alice"}), [])
@@ -332,13 +332,14 @@ class IdentityRetrievalTests(unittest.IsolatedAsyncioTestCase):
                 }
             ],
             "cards": [],
+            "diary": None,
         }
         with self.assertRaisesRegex(ValueError, "alias has no observed"):
             validate_result(json.dumps(result), events)
         events[0]["mentions"] = [{"open_id": "bob", "name": "小林"}]
         result["aliases"][0].update(subject_id="bob", alias="小林")
         result["aliases"][0]["evidence"][0]["relation"] = "mention"
-        aliases, _ = validate_result(json.dumps(result), events)
+        aliases, _, _ = validate_result(json.dumps(result), events)
         self.assertEqual(aliases[0]["subject_id"], "bob")
 
     async def test_uncertain_alias_does_not_replace_confirmed_history(self):

@@ -1,0 +1,204 @@
+{
+  "date": "2026-10-28",
+  "tool": "built-in image_gen.imagegen",
+  "upstream_repository": "https://github.com/Neko3000/deepseek-whalechan",
+  "upstream_revision": "bb8182a0092004c4a9525254f96aeaf74874b9a9",
+  "project_base_commit": "9a43746e118ea131eeab400976a46fffbf20a731",
+  "generation_calls": 36,
+  "selected_images": 27,
+  "discarded_candidates": 9,
+  "meme_edit_prompt_template": "Precise-object-edit. Correct ONLY the ear anatomy in the attached existing project meme. This Whale-chan has exactly ONE PAIR of lateral BLUE-WHITE WHALE-FIN EARS, replacing human ears, organically attached at the sides of her head. REMOVE EVERY PINK HUMAN EAR, flesh-colored auricle, ear rim and earlobe visible under/beside the fins near the jaw; replace those small patches with matching continuous blue hair. The visible pink ear is an error, not a feature to preserve. Keep the existing blue-white lateral fins as her only ears, not extra ornaments. Do not add feathers or wings. CRITICAL: preserve EVERYTHING ELSE: same face, expression, hand pose, props, costume, hair, tail, white background, square composition and exact bottom Chinese caption. Do not redesign or reframe. Closely examine BOTH sides of the head and leave ZERO pink human ears or flesh slivers beneath either fin. Exact caption to preserve: 「{caption}」.",
+  "master_generation_prompt": "Use case: identity-preserve. Create the corrected canonical character reference for this project's DeepSeek Whale-chan 大肥鱼, based on the attached existing project image. Keep its exact navy-to-cyan curly long hair, broad rounded face, blue eyes, single forward-curving ahoge, frilled white maid headband, navy neck bow with blue gem, ornate dark navy and white maid dress, white apron with small blue whale emblem and restrained muted gold embroidery, human arms and legs, single coherent blue whale tail with two terminal flukes. CRITICAL ANATOMICAL CORRECTION: She has ONLY ONE PAIR OF WHALE-FIN EARS, attached at the lateral sides of her head in place of human ears. Remove ALL flesh-colored human outer ears, ear lobes, ear canals or auricles, including the very visible pink human ear on the right side of the source. The lateral blue-white fins ARE the ears, not extra ornaments or feathered wings. Flat smooth blue fin upper surface and white underside, simple curved/scalloped outline without feathers, visibly anatomically attached where ears would be. No human ears hidden under or beside fins. Do not turn her into a whale or mermaid. Render a single full-body neutral standing character, arms relaxed slightly apart so costume and ear anatomy are readable; cheerful gentle smile; complete head, both fin ears, feet and tail in frame. About 2.8 heads tall without apparent-age change. White/very pale blue clean background, crisp dark navy outlines, clear rounded anime cel shading and sparse glossy highlights matching original. NO lettering, NO caption, NO typography, NO watermark, NO graphic panels, NO additional characters, NO extra whale mascots. Full-body standalone master reference, square canvas with comfortable margins.",
+  "master_repair_prompt": "Precise-object-edit of this full body Whale-chan reference. Keep the entire image identical in composition, pose, costume, colors, face, tail, background, dimensions and details EXCEPT a single anatomical defect. On the viewer's RIGHT SIDE OF HER HEAD, directly BELOW THE BLUE-WHITE FIN and alongside the blue side hair near the jaw, there is STILL A SMALL PINK/FLESH-COLORED HUMAN EAR visible (a tiny pink sliver around 56% image width and 29% image height). ERASE THAT HUMAN EAR COMPLETELY and replace that small exposed patch with matching BLUE HAIR, continuous with the surrounding hair mass. No pink patch, no ear rim, no ear lobe, no human ear anywhere on either side. She has exactly ONE pair of lateral blue and white whale-fin ears already present, those are the only ears. Do not remove the blue-white fins, headband or bows. Ensure no skin-tone ear sliver survives beneath either fin. Preserve all other pixels/details as closely as possible. No added text.",
+  "master": {
+    "file": "dafeiyu/web/character.png",
+    "sha256": "31e99a63adc4718496b88aed1abb788ce8149f0d84cd3fcc0dab76a8b4fcf4d7",
+    "generated_artifact": "exec-cbebb4f4-5725-488a-883c-f153c25ed099.png",
+    "visual_review": "passed: full body, no text, paired fin ears, no human ears"
+  },
+  "memes": [
+    {
+      "file": "assets/memes/agree.png",
+      "caption": "确实",
+      "sha256": "c6cff7a29f1c3acf495800ce332f11f1a5c7d164b2ca3554715c9f209d9c6b01",
+      "generated_artifact": "exec-ebba96b5-984e-428b-80f7-b95157f640da.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/birthday.png",
+      "caption": "生日快乐",
+      "sha256": "cbfc358c2d22bce00b2ad93c1aeaa6ae5184fd7fe5fc63da0f11fbf29cc1dcf4",
+      "generated_artifact": "exec-9038f1be-5e29-4730-84df-b0a9bf906d45.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/bye.png",
+      "caption": "回头见",
+      "sha256": "19a75ef1b17a54e055766ad24fca0494df5f6c8ab3051bdbdb55b864f12279ea",
+      "generated_artifact": "exec-ea060a02-7ea2-4525-b640-7bf84f10e999.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/celebrate.png",
+      "caption": "好耶！",
+      "sha256": "8ba9312248a5fd3e4e633b60bdcb8df89e75ec1f401078dec285eb8d3cac5a3e",
+      "generated_artifact": "exec-c159cc72-27ba-44f2-9648-d349dbde9a15.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/eat_rice.png",
+      "caption": "开饭！",
+      "sha256": "80d3f89af537da3b2cb44eedcca15f1212b5daf49c6859257cc8a23aedf0efa9",
+      "generated_artifact": "exec-a147ba92-a0bb-4dbd-b294-033f374a9ef7.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/encourage.png",
+      "caption": "给你打气",
+      "sha256": "81f8a90249027fca4dbbe9c39dde937aac301fca9f873db2000fc87d926f6db5",
+      "generated_artifact": "exec-4a570aac-29cf-4b0a-ae1a-223ad6683d9c.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/fat_defense.png",
+      "caption": "是算力！",
+      "sha256": "9204811dc8e2c0a58d6e9516eb5ff584844f22dc8ff645333da3804f95706fdb",
+      "generated_artifact": "exec-47201218-5bba-40cf-b613-e23d0945d7c4.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/goodnight.png",
+      "caption": "晚安",
+      "sha256": "e20b12c82b34019a3b703f8c10c68bca701491200c9c7a851baea7ab4c705e5b",
+      "generated_artifact": "exec-e08f028b-0fbf-400c-946a-c35b401cc9a7.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/hello.png",
+      "caption": "在呢！",
+      "sha256": "19b8327dbabfc07f2897422bd49d239e7d669d98e3e1e65519bd113bbebf664c",
+      "generated_artifact": "exec-c827ceae-317a-476b-bc85-d13985d34088.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/hug.png",
+      "caption": "抱抱你",
+      "sha256": "da62e029267b914b4bfb157d7e675af28d062fcf25877d617cc42eb19a45ba28",
+      "generated_artifact": "exec-30214122-262a-4467-9fe4-3cde5d88a016.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/laugh.png",
+      "caption": "哈哈哈",
+      "sha256": "bab8b73eaa0ea1e137d24272f8a014491ae92b90f1248f2a54f98e6be0bde9fe",
+      "generated_artifact": "exec-b9c76b5a-2535-4673-8a11-3c0bf1c3d6f2.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/miss_you.png",
+      "caption": "我也想你",
+      "sha256": "a624adf398d7c927572b2562a2d3e0a3e3a8224ccdb681f9c7cc897e2155fb23",
+      "generated_artifact": "exec-b49a0ef3-54c3-43ad-ad31-505d57537043.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/morning.png",
+      "caption": "早呀！",
+      "sha256": "767e71453943833c492f6f322f5a820b096253ba954b1f49768f9082f663876a",
+      "generated_artifact": "exec-d269df6c-d034-405e-9138-53d75fe419b0.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/overload.png",
+      "caption": "过载了",
+      "sha256": "631ed1c403b10cafbeeaa2c26761ba3f22bbed41e0cf963596a2647ab3fb4f28",
+      "generated_artifact": "exec-e152bd90-e8f2-4f9d-ba4f-f73606f53810.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/pat.png",
+      "caption": "接住摸摸",
+      "sha256": "7c62b64fe3d1c890b15a0e28fb720eeb33ac3e1bce9a461023298cd2cf8c3d4a",
+      "generated_artifact": "exec-5a11ba6d-2699-47b6-9e58-07c90cd9e839.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/praise.png",
+      "caption": "被夸啦",
+      "sha256": "7700af57d6b93511ca411252410b705a71b3022f95a93dcdb8a921d1e6b39987",
+      "generated_artifact": "exec-99869d36-bb66-40d9-ae3c-c9f0bb234f6d.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/received.png",
+      "caption": "收到",
+      "sha256": "9b1e32e8418956483ffb0c2d20104480b530b9bb7926d279673e2bf2a5dde347",
+      "generated_artifact": "exec-c33fcec3-69d5-409a-b898-92cc1f51a25e.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/shocked.png",
+      "caption": "何意味",
+      "sha256": "6d726bc2b3792759b58e8142c4d6c6361f87c257569220bcb20fc33f9f500c66",
+      "generated_artifact": "exec-9266ba36-2583-47d7-a6cd-ccbccba09fe9.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/shy.png",
+      "caption": "有点害羞",
+      "sha256": "52467cc6bb3699f60a1336324703570c449e3febb7839af012495d2b3a2b9a5d",
+      "generated_artifact": "exec-3122788a-02e2-448a-92a3-0268467f1c9d.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/slack_off.png",
+      "caption": "摸了",
+      "sha256": "ae3128bfc4846a7c28a3188c623de7ac9c1e1e508df5906663e4ffcfd1f5b2fb",
+      "generated_artifact": "exec-aa1a8823-3a33-43dd-b850-d8f551f6cd03.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/smug.png",
+      "caption": "基本操作",
+      "sha256": "ee179e793845d59e29e009cf20b283e17621cde22729fb3c636874f799af51ce",
+      "generated_artifact": "exec-3dcd0dc8-f0d7-4fb1-87ad-0ffe268a14ee.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/tea.png",
+      "caption": "喝口茶",
+      "sha256": "25f42955503555cacdde46b64b2259d8d1eff3d05198c67af7c6d5f5feab5354",
+      "generated_artifact": "exec-c3e01c6f-66d0-46bf-b89a-f997d3d0f8d8.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/thanks.png",
+      "caption": "不客气",
+      "sha256": "01a9f22428632d0b99c2f0998f69fe0eb50f1c0e32bec301cada0b81b7688ffb",
+      "generated_artifact": "exec-03961390-cb09-498a-bba3-d0eb3102f2cb.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/wait.png",
+      "caption": "等你",
+      "sha256": "8a4e6826364e7fe875a220800fb94aef28c666610495becc6a3605c032c84ea4",
+      "generated_artifact": "exec-6c03c688-635c-4f9b-8ede-bd49a9e39556.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/welcome_back.png",
+      "caption": "欢迎回来",
+      "sha256": "0c1989539a63a6972b0c7245772a37cb6a74a668d06bdd60f26215748f234fa3",
+      "generated_artifact": "exec-d7bc8ba7-9353-41f6-99cc-ff5e7fbe898d.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    },
+    {
+      "file": "assets/memes/work.png",
+      "caption": "来干活啦",
+      "sha256": "38c971e704c970e1a9586d6b095600b00dd4d0bee73fc6d34c28b0596e4c0f41",
+      "generated_artifact": "exec-d686f9ec-42b9-4e9b-96b2-808919dd2598.png",
+      "visual_review": "passed: fin ears only; original caption, action and identity retained"
+    }
+  ],
+  "verification_boundary": "Assistant visual inspection of complete images and head detail sheets, pending user aesthetic acceptance; approximate proportions were not measured by a skeleton tool; runtime dream generation has not been live-tested."
+}

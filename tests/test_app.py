@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,6 +34,49 @@ class AppTests(unittest.TestCase):
         self.assertIn("群聊工作台", response.text)
         self.assertNotIn("admin-fixture", response.text)
         self.assertEqual(self.client.get("/static/workspace.js").status_code, 200)
+
+    def test_diary_without_prepared_content_does_not_generate_or_send(self):
+        response = self.client.post(
+            "/gm/diary", headers=self.headers, json={"conversation_id": self.cid}
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("尚未产生日记", response.json()["detail"])
+        self.assertEqual(self.c.llm.calls, [])
+        self.assertEqual(self.c.feishu.calls, [])
+
+    def test_corrupt_diary_storage_is_not_reported_as_normal_not_ready(self):
+        asyncio.run(self.c.system_repo.set_sys_cache(f"daily_diary:{self.cid}", "invalid-json"))
+        response = self.client.post(
+            "/gm/diary", headers=self.headers, json={"conversation_id": self.cid}
+        )
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(self.c.llm.calls, [])
+        self.assertEqual(self.c.feishu.calls, [])
+
+    def test_diary_api_sends_saved_content_and_respects_manual_mark(self):
+        now = 1793012400.0
+        date, _ = self.c.state_domain.local_date_hour(now)
+        asyncio.run(
+            self.c.system_repo.set_sys_cache(
+                f"daily_diary:{self.cid}",
+                json.dumps(
+                    {
+                        "date": date,
+                        "ready": True,
+                        "text": "今天听到好消息，我也开心了。",
+                        "evidence": [],
+                    }
+                ),
+            )
+        )
+        with patch("dafeiyu.routes.gm.time.time", return_value=now):
+            response = self.client.post(
+                "/gm/diary", headers=self.headers, json={"conversation_id": self.cid, "mark": True}
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["reply"], "今天听到好消息，我也开心了。")
+        self.assertEqual(response.json()["marked_date"], date)
+        self.assertEqual(self.c.llm.calls, [])
 
     def test_auth_uses_header_not_url_and_reads_do_not_create_conversations(self):
         self.assertEqual(self.client.get("/gm/conversations").status_code, 401)

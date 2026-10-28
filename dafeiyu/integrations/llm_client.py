@@ -7,7 +7,7 @@ import math
 
 from openai import AsyncOpenAI
 
-from dafeiyu.config import AppConfig
+from dafeiyu.config import ROOT_DIR, AppConfig
 
 log = logging.getLogger("dafeiyu")
 
@@ -98,7 +98,8 @@ class LLMClient:
                     elif purpose == "retrieval_document":
                         normalized = [f"title: none | text: {text}" for text in normalized]
                     contents = [
-                        self._types.Content(parts=[self._types.Part(text=text)]) for text in normalized
+                        self._types.Content(parts=[self._types.Part(text=text)])
+                        for text in normalized
                     ]
                 resp = await self._genai.aio.models.embed_content(
                     model=self.config.embed_model,
@@ -308,41 +309,40 @@ class LLMClient:
             return None
 
     async def generate_image(self, prompt: str) -> bytes | None:
-        """生成梦境插图字节。
-
-        - openai 路径：走 OpenAI 兼容的 /v1/images/generations，从 b64_json 解字节，
-          适用于 imagen / gpt-image / dall-e 等模型；此路径**不支持** Gemini 系图像模型
-          （协议不同）。
-        - gemini 路径：走 google-genai 原生 generate_content + IMAGE modality，
-          从 inline_data 取字节，支持 Gemini 系图像模型。
-        生成 / 解码任一步失败安静返回 None，梦境卡回退纯文字。
-        """
+        """以固定角色图与视觉规范生成梦境；接口必须支持参考图输入。"""
         prompt = (prompt or "").strip()
         if not self.config.image_model or not prompt:
             return None
+        prompt = "\n\n".join(
+            (
+                self.config.persona["visual"]["prompt"].strip(),
+                "【本次梦境场景】\n" + prompt,
+                "绘制本次梦境场景。所附图片只约束角色身份与画风；"
+                "场景不能覆盖固定视觉规范，特别是只有鲸鳍耳、没有人耳。",
+            )
+        )
         if self.provider == "gemini":
             return await self._gemini_image(prompt)
         assert self.client is not None
         try:
-            resp = await self.client.images.generate(
-                model=self.config.image_model,
-                prompt=prompt,
-                n=1,
-                timeout=self.config.card_image_timeout_sec,
-            )
+            with (ROOT_DIR / "dafeiyu" / "web" / "character.png").open("rb") as reference:
+                resp = await self.client.images.edit(
+                    model=self.config.image_model,
+                    image=reference,
+                    prompt=prompt,
+                    n=1,
+                    timeout=self.config.card_image_timeout_sec,
+                )
         except Exception as exc:
             log.warning("image generation failed: %s", type(exc).__name__)
             return None
         data = resp.data[0] if resp.data else None
         b64 = getattr(data, "b64_json", None) if data else None
         if not b64:
-            log.warning(
-                "image response had no b64_json: %r",
-                resp.model_dump() if hasattr(resp, "model_dump") else resp,
-            )
+            log.warning("image response had no b64_json")
             return None
         try:
-            return base64.b64decode(b64)
+            return base64.b64decode(b64, validate=True)
         except Exception as exc:
             log.warning("image base64 decode failed: %s", type(exc).__name__)
             return None
@@ -353,7 +353,13 @@ class LLMClient:
             assert self._types is not None
             resp = await self._genai.aio.models.generate_content(
                 model=self.config.image_model,
-                contents=prompt,
+                contents=[
+                    self._types.Part.from_bytes(
+                        data=(ROOT_DIR / "dafeiyu" / "web" / "character.png").read_bytes(),
+                        mime_type="image/png",
+                    ),
+                    prompt,
+                ],
                 config=self._types.GenerateContentConfig(
                     response_modalities=["IMAGE"],
                 ),

@@ -23,6 +23,10 @@ def build_release(destination: Path) -> dict:
     ]
     candidates += list((ROOT / "config").glob("*.toml"))
     candidates += list((ROOT / "assets" / "memes").glob("*.png"))
+    candidates += [
+        ROOT / "assets" / "CHARACTER-NOTICES.md",
+        ROOT / "assets" / "character-normalization.json",
+    ]
     candidates.append(ROOT / "requirements.txt")
     payload = {}
     for path in sorted(candidates):

@@ -8,36 +8,9 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from tests.helpers import container, event
+from tests.helpers import alias, container, event, evidence, fact
 
 NOW = 2_000_000_000.0
-
-
-def evidence(mid, quote, relation="self"):
-    return {"message_id": mid, "quote": quote, "relation": relation}
-
-
-def alias(subject, name, mid, quote, relation="self", status="confirmed"):
-    return {
-        "subject_id": subject,
-        "alias": name,
-        "status": status,
-        "evidence": [evidence(mid, quote, relation)],
-    }
-
-
-def fact(subject, mid, quote, what, *, key="", supersedes=(), relation="self"):
-    return {
-        "kind": "reality",
-        "subject_ids": [subject],
-        "who": "小林",
-        "what": what,
-        "evidence": [evidence(mid, quote, relation)],
-        "profile_key": key,
-        "profile_category": "preference" if key else "",
-        "confidence": "confirmed",
-        "supersedes": list(supersedes),
-    }
 
 
 class DailyIdentityTests(unittest.IsolatedAsyncioTestCase):
@@ -80,9 +53,12 @@ class DailyIdentityTests(unittest.IsolatedAsyncioTestCase):
             **kwargs,
         )
 
-    async def run_daily(self, *, aliases=(), cards=(), now=NOW):
+    async def run_daily(self, *, aliases=(), cards=(), diary=None, now=NOW):
         self.c.llm.responses.append(
-            json.dumps({"aliases": list(aliases), "cards": list(cards)}, ensure_ascii=False)
+            json.dumps(
+                {"aliases": list(aliases), "cards": list(cards), "diary": diary},
+                ensure_ascii=False,
+            )
         )
         return await self.service.maybe_consolidate(self.cid, now)
 
@@ -343,7 +319,11 @@ class DailyIdentityTests(unittest.IsolatedAsyncioTestCase):
             row = json.loads(messages[-1]["content"])["events"][0]
             fragments.append(row)
             return json.dumps(
-                {"aliases": [alias("alice", "阿林", mid, row["content"][:16])], "cards": []},
+                {
+                    "aliases": [alias("alice", "阿林", mid, row["content"][:16])],
+                    "cards": [],
+                    "diary": None,
+                },
                 ensure_ascii=False,
             )
 
@@ -506,11 +486,12 @@ class DailyIdentityTests(unittest.IsolatedAsyncioTestCase):
             "[]",
             "null",
             "{}",
-            '{"aliases":null,"cards":[]}',
-            '{"aliases":[],"cards":false}',
-            '{"aliases":[null],"cards":[]}',
-            '{"aliases":[],"cards":[{}]}',
-            '{"aliases":[],"cards":[],"merge_ids":["alice","bob"]}',
+            '{"aliases":[],"cards":[]}',
+            '{"aliases":null,"cards":[],"diary":null}',
+            '{"aliases":[],"cards":false,"diary":null}',
+            '{"aliases":[null],"cards":[],"diary":null}',
+            '{"aliases":[],"cards":[{}],"diary":null}',
+            '{"aliases":[],"cards":[],"diary":null,"merge_ids":["alice","bob"]}',
         ]
         for index, response in enumerate(malformed):
             with self.subTest(response=response):

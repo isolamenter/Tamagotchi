@@ -8,7 +8,7 @@
 | --- | --- |
 | [`app.py`](dafeiyu/app.py)、[`config.py`](dafeiyu/config.py) | 组合根：读取环境/TOML、创建数据库与服务、注册路由、管理生命周期。导入模块本身不开库，创建应用时才初始化。 |
 | [`routes/`](dafeiyu/routes/) | 飞书回调、健康检查、管理鉴权/API、静态工作台入口；调用容器，不承担模型业务编排。 |
-| [`services/`](dafeiyu/services/) | `incoming` 归一化输入；`reply` 直接回复；`observer` 批量旁听；`autonomous` 调度；`consolidation` 独立内部整理；`memory` 压缩/人物定向召回；`style` 选例；`delivery` 对外发送与发送后记录。 |
+| [`services/`](dafeiyu/services/) | `incoming` 归一化输入；`reply` 直接回复；`observer` 批量旁听；`autonomous` 调度；`consolidation` 整理记忆并生成日记草稿；`memory` 压缩/人物定向召回；`style` 选例；`delivery` 对外发送与发送后记录。 |
 | [`domain/`](dafeiyu/domain/) | 上下文包装、回复解析、状态规则、记忆格式/向量运算、风格与梗图选择规则；不直接访问飞书或数据库。 |
 | [`repositories/`](dafeiyu/repositories/) | 会话、消息、记忆/向量、风格索引、系统缓存的 SQL 与事务；表结构见 `schema.sql`。 |
 | [`integrations/`](dafeiyu/integrations/) | `FeishuClient` 封装飞书 API；`LLMClient` 封装聊天、embedding、识图和生图的 provider 差异。 |
@@ -21,12 +21,14 @@
 
 1. **接收与回复**：`/feishu/webhook` 验 token、可选解密、登记事件去重 → 后台交给 `ReplyService` → `IncomingService` 识别私聊/@、归一化文本与图片描述 → 分会话防抖/串行处理 → 保存用户消息 → 拼装近期上下文、记忆与风格示例 → 模型生成 → `DeliveryService` 发飞书并记录成功结果。
 2. **旁听与主动发言**：未直接寻址的消息只进入已建立会话的旁听缓冲 → 批量落库 → 事件插话或周期循环评估。定时梦境/日记与普通主动插话使用不同触发门槛，详见[聊天规格](docs/specs/conversation.md)。
-3. **记忆**：较旧消息经压缩形成未归属上下文卡片；另一路每日按原始消息 ID/分段偏移整理身份别名与带主体/报告人/证据的个人卡片 → 后台生成向量 → 召回按当前/提及/语义消歧后的真实主体与主题选择。原文、处理位置、卡片和向量是不同数据层，详见[记忆规格](docs/specs/memory.md)。
+3. **记忆与日记**：较旧消息经压缩形成未归属上下文卡片；另一路每日先落库旁听缓冲，再按原始消息 ID/分段偏移整理身份别名、带主体/报告人/证据的个人卡片与日记草稿 → 同事务保存 → 后台生成记忆向量。召回按真实主体与主题选择，日记只供后续发布。原文、处理位置、卡片和向量是不同数据层，详见[记忆规格](docs/specs/memory.md)。
 4. **管理**：浏览器携带独立 `X-GM-Token` → GM 路由校验明确的 `conversation_id` → 查询 repository 或调用相同发送/主动服务。界面是管理工具，不是独立聊天后端。
 
 人物数据没有第二套事实副本：`identity_aliases` 保存按会话的别名断言历史，`memories` 保存个人信息键/证据/置信度/过期与 supersession。`consolidation_state` 管理独立固定快照水位、长消息偏移和每日调用预算；`proactive_evaluations` 记录包括“不说话”在内的评估水位。它们不混进对话状态的全量读改写。
 
-整理使用独立会话锁与全局单个整理调用并发槽，不持 `chat_lock`。周期循环并行排队内部工作与原有发言检查，因此同一刻发布的日记不保证已使用本轮新整理结果。模型结果先整批引用/类型校验，再在一个 SQLite 事务提交别名、个人事实版本和处理位置；向量异步失败不撤销事实，既有 reembed 可补建。
+整理使用独立会话锁与全局单个整理调用并发槽，不持 `chat_lock`。同一调用返回别名、记忆和可为空的日记，先整批引用/类型校验，再在一个 SQLite 事务提交别名、个人事实版本、日记草稿与处理位置；向量异步失败不撤销事实，既有 reembed 可补建。日记复用 `sys_cache` 的 `daily_diary:<conversation_id>` 保存最近一日的日期、正文、证据与快照完成标记，不改 schema。分批中有新候选就替换草稿，为空则保留同日已有候选；固定快照全部完成后才可发送。
+
+周期循环仍并行排队整理与发言检查，但日记只读取当日已完成快照的保存结果，发送阶段不重新生成。没有可发送日记时普通参与仍独立评估。日记与事实共同使用原始人类消息，日记文字不进入人物证据；旧积压可整理记忆，但不作为今日日记素材。
 
 ## 架构边界
 

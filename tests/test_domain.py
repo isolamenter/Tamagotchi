@@ -4,6 +4,7 @@ import calendar
 import random
 import unittest
 from collections import Counter
+from dataclasses import replace
 
 from dafeiyu.config import load_config
 from dafeiyu.domain.conversation import ConversationContext
@@ -275,7 +276,9 @@ class StyleDomainTests(unittest.TestCase):
             query_vector=[1.0, 0.0],
             vectors=vectors,
         )
-        self.assertNotIn("这局先记着，下一局让我找回来嘛。", [item["response"] for item in selected])
+        self.assertNotIn(
+            "这局先记着，下一局让我找回来嘛。", [item["response"] for item in selected]
+        )
 
     def test_second_example_must_share_intent_and_be_high_confidence(self):
         responses = {"笑得饭都顾不上扒了", "没绷住 碗先放下"}
@@ -335,10 +338,12 @@ class StateDomainTests(unittest.TestCase):
     def local_ts(self, year: int, month: int, day: int, hour: int) -> float:
         return float(calendar.timegm((year, month, day, hour - 8, 0, 0)))
 
-    def test_quiet_hours_cross_midnight(self):
-        self.assertTrue(self.state.in_quiet_hours(self.local_ts(2026, 1, 1, 20)))
-        self.assertTrue(self.state.in_quiet_hours(self.local_ts(2026, 1, 2, 9)))
-        self.assertFalse(self.state.in_quiet_hours(self.local_ts(2026, 1, 2, 12)))
+    def test_weekend_rest_is_optional(self):
+        saturday = self.local_ts(2026, 1, 3, 20)
+        self.assertFalse(self.state.is_weekend_rest(saturday))
+        self.state.config = replace(self.config, quiet_weekends=True)
+        self.assertTrue(self.state.is_weekend_rest(saturday))
+        self.assertFalse(self.state.is_weekend_rest(self.local_ts(2026, 1, 2, 20)))
 
     def test_initial_state_contains_expected_keys(self):
         st = self.state.initial_state()

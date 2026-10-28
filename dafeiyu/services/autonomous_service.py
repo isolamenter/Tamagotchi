@@ -6,6 +6,7 @@ import logging
 import time
 
 from dafeiyu.config import AppConfig
+from dafeiyu.domain.consolidation import DiaryNotReady
 from dafeiyu.domain.conversation import ConversationContext
 from dafeiyu.domain.reply import GeneratedReply
 from dafeiyu.domain.state import StateDomain
@@ -127,13 +128,34 @@ class AutonomousService:
                     image_key = await self.delivery.feishu.upload_image(image) or ""
             except Exception as exc:
                 log.warning("dream image generation failed: %s", type(exc).__name__)
+        return await self._send_reply(
+            conversation_id,
+            chat_id,
+            reply,
+            source=source,
+            extra_state=extra_state,
+            example_ids=frozenset(ids),
+            image_key=image_key,
+        )
+
+    async def _send_reply(
+        self,
+        conversation_id: int,
+        chat_id: str,
+        reply: GeneratedReply,
+        *,
+        source: str,
+        extra_state: dict,
+        example_ids: frozenset[str] = frozenset(),
+        image_key: str = "",
+    ) -> tuple[str, dict]:
         await self.delivery.send(
             conversation_id,
             chat_id,
             reply.text,
             source=source,
             mode=reply.mode,
-            example_ids=frozenset(ids),
+            example_ids=example_ids,
             image_key=image_key,
             as_card=source in {"dream", "diary"} and self.config.card_enabled,
         )
@@ -152,7 +174,7 @@ class AutonomousService:
         return reply.text, state
 
     async def evaluate_proactive_speaking(
-        self, conversation_id: int, state: dict
+        self, conversation_id: int, state: dict, *, scheduled_context: str = ""
     ) -> tuple[str, str] | None:
         rows = await self.messages.recent_messages(conversation_id, limit=15)
         last_activity = max(state["last_reply_ts"], state["last_proactive_ts"])
@@ -201,6 +223,13 @@ class AutonomousService:
                             + state["last_proactive_topic"]
                             + "\n上次主动话题是否已被人回应："
                             + str(state["last_proactive_answered"])
+                            + (
+                                "\n【本次拟发布的定时内容】\n"
+                                + scheduled_context
+                                + "\n只判断这项内容是否适合此刻发布；适合普通接话不代表适合发布它。"
+                                if scheduled_context
+                                else ""
+                            )
                             + "\n若上次未获回应，避免语义重复；不要只比话题字面。只有新消息提供自然参与价值才说话。",
                         },
                     ],
@@ -265,6 +294,17 @@ class AutonomousService:
         date: str,
         mark_date: bool,
     ) -> tuple[str, dict]:
+        if event["kind"] == "diary":
+            diary = await self.consolidation.identities.diary(conversation_id, date)
+            if diary is None:
+                raise DiaryNotReady("今天的每日整理尚未产生日记，或没有合适内容")
+            return await self._send_reply(
+                conversation_id,
+                chat_id,
+                GeneratedReply(diary["text"], "normal"),
+                source="diary",
+                extra_state={event["state_key"]: date} if mark_date else {},
+            )
         prompt = self.config.scheduled_event_prompt.format(
             event_name=event["name"],
             scheduled_hour=event["hour"],
@@ -300,7 +340,7 @@ class AutonomousService:
     async def _maybe_interject_locked(
         self, conversation_id: int, chat_id: str, state: dict, now: float
     ) -> bool:
-        if self.state_domain.in_quiet_hours(now) or self._cooling_down(state, now):
+        if self.state_domain.is_weekend_rest(now) or self._cooling_down(state, now):
             return False
         evaluation = await self.evaluate_proactive_speaking(conversation_id, state)
         if evaluation is None or self.runtime.chat_pending_messages.get(conversation_id):
@@ -328,6 +368,7 @@ class AutonomousService:
     ) -> bool:
         now = time.time() if now is None else now
         if run_internal and self.consolidation is not None:
+            await self.observer.flush_observer_buffer(conversation_id)
             await self.consolidation.maybe_consolidate(conversation_id, now)
         if (
             self.runtime.chat_pending_messages.get(conversation_id)
@@ -338,11 +379,23 @@ class AutonomousService:
             await self.observer.flush_observer_buffer(conversation_id)
             state = await self.conversations.load_conversation_state(conversation_id)
             due = self.scheduled_event_due(state, now)
+            scheduled_context = ""
+            if due and due[0]["kind"] == "diary":
+                diary = await self.consolidation.identities.diary(conversation_id, due[1])
+                if diary is None:
+                    due = None  # A pending/empty diary does not block ordinary conversation.
+                else:
+                    scheduled_context = "日记：" + diary["text"]
             if due:
                 event, date = due
+                if event["kind"] == "dream":
+                    scheduled_context = "梦境分享：" + event["instruction"]
                 if (
                     self._cooling_down(state, now)
-                    or await self.evaluate_proactive_speaking(conversation_id, state) is None
+                    or await self.evaluate_proactive_speaking(
+                        conversation_id, state, scheduled_context=scheduled_context
+                    )
+                    is None
                 ):
                     # Skipped is not sent: fresh activity may qualify later inside the grace window.
                     return False

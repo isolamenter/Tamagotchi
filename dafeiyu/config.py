@@ -79,7 +79,6 @@ class AppConfig:
     proactive_cooldown_sec: int
     unanswered_cooldown_sec: int
     proactive_tz_offset_hours: float
-    quiet_hours: tuple[int, int]
     quiet_weekends: bool
     scheduled_events: tuple[dict, ...]
     scheduled_grace_sec: int
@@ -128,22 +127,16 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
     card_config = settings.get("card", {})
     style_retrieval = settings.get("style_retrieval", {})
 
-    persona_style_prompt = persona["style"]["prompt"].strip()
+    persona_style_prompt = "\n\n".join(
+        (persona["style"]["prompt"].strip(), persona["visual"]["prompt"].strip())
+    )
     persona_style_reinforcement = persona["style"]["reinforcement"].strip()
     system_prompt = prompts["system"]["template"].format(style_prompt=persona_style_prompt)
     persona_reinforcement = prompts["persona_reinforcement"]["template"].format(
         style_reinforcement=persona_style_reinforcement
     )
 
-    quiet_start = int(autonomous_config.get("quiet_start_hour", 19))
-    quiet_end = int(autonomous_config.get("quiet_end_hour", 10))
-    quiet_hours = (quiet_start, quiet_end)
-
-    scheduled_hour_lock = {"diary": quiet_hours[0], "dream": quiet_hours[1]}
-    scheduled_events = tuple(
-        {**event, "hour": scheduled_hour_lock.get(event["kind"], event["hour"])}
-        for event in prompts.get("scheduled_events", [])
-    )
+    scheduled_events = tuple(prompts.get("scheduled_events", []))
 
     character_name = str(persona.get("style", {}).get("name", "大肥鱼")).strip() or "大肥鱼"
     character_icon = str(persona.get("style", {}).get("icon", "🐋")).strip() or "🐋"
@@ -220,8 +213,12 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
             "enabled": bool(settings.get("consolidation", {}).get("enabled", True)),
             "hour": int(settings.get("consolidation", {}).get("hour", 19)),
             "max_messages": int(settings.get("consolidation", {}).get("max_messages", 300)),
-            "max_context_chars": int(settings.get("consolidation", {}).get("max_context_chars", 64000)),
-            "max_output_tokens": int(settings.get("consolidation", {}).get("max_output_tokens", 6000)),
+            "max_context_chars": int(
+                settings.get("consolidation", {}).get("max_context_chars", 64000)
+            ),
+            "max_output_tokens": int(
+                settings.get("consolidation", {}).get("max_output_tokens", 6000)
+            ),
             "max_calls_per_day": int(settings.get("consolidation", {}).get("max_calls_per_day", 4)),
             "retry_sec": float(settings.get("consolidation", {}).get("retry_sec", 900)),
             "timeout_sec": float(settings.get("consolidation", {}).get("timeout_sec", 90)),
@@ -241,7 +238,6 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         proactive_cooldown_sec=int(autonomous_config.get("cooldown_sec", 600)),
         unanswered_cooldown_sec=int(autonomous_config.get("unanswered_cooldown_sec", 1800)),
         proactive_tz_offset_hours=float(autonomous_config.get("timezone_offset_hours", 8.0)),
-        quiet_hours=quiet_hours,
         quiet_weekends=bool(autonomous_config.get("quiet_weekends", False)),
         scheduled_events=tuple(scheduled_events),
         scheduled_grace_sec=int(autonomous_config.get("scheduled_grace_sec", 3600)),
@@ -288,14 +284,24 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         raise ValueError("Debounce cannot be negative")
     if not 0 < config.meme_review_timeout_sec <= 60:
         raise ValueError("meme.review_timeout_sec must be in (0, 60]")
-    if not all(0 <= hour < 24 for hour in config.quiet_hours):
-        raise ValueError("Quiet hours must be between 0 and 23")
+    if not all(0 <= event["hour"] < 24 for event in config.scheduled_events):
+        raise ValueError("Scheduled hours must be between 0 and 23")
     if any(event["kind"] not in {"dream", "diary"} for event in config.scheduled_events):
         raise ValueError("Unknown scheduled event")
-    if (not 0 <= config.consolidation["hour"] < 24
-            or not 16000 <= config.consolidation["max_context_chars"] <= 500000
-            or any(config.consolidation[k] <= 0 for k in
-                   ("max_messages", "max_output_tokens", "max_calls_per_day", "retry_sec", "timeout_sec"))):
+    if (
+        not 0 <= config.consolidation["hour"] < 24
+        or not 16000 <= config.consolidation["max_context_chars"] <= 500000
+        or any(
+            config.consolidation[k] <= 0
+            for k in (
+                "max_messages",
+                "max_output_tokens",
+                "max_calls_per_day",
+                "retry_sec",
+                "timeout_sec",
+            )
+        )
+    ):
         raise ValueError("Invalid consolidation bounds")
     if not 0 < float(memory_config.get("identity_resolve_timeout_sec", 8)) <= 30:
         raise ValueError("Identity routing timeout must be in (0,30]")

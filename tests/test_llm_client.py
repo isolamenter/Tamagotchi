@@ -1,11 +1,115 @@
 from __future__ import annotations
 
+import base64
 import typing
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from dafeiyu.config import ROOT_DIR
 from dafeiyu.integrations.llm_client import LLMClient, _to_gemini_contents
+from tests.helpers import make_config
+
+
+class CharacterImageTests(unittest.IsolatedAsyncioTestCase):
+    def make_client(self, provider):
+        llm = LLMClient.__new__(LLMClient)
+        llm.provider = provider
+        llm.config = replace(make_config(), image_model="fixture-image")
+        return llm
+
+    async def test_openai_sends_reference_and_fixed_identity_to_edit_endpoint(self):
+        llm = self.make_client("openai")
+        reference_bytes = (ROOT_DIR / "dafeiyu/web/character.png").read_bytes()
+
+        async def edit(**kwargs):
+            self.assertEqual(kwargs["image"].read(), reference_bytes)
+            return SimpleNamespace(data=[SimpleNamespace(b64_json=base64.b64encode(b"image"))])
+
+        endpoint = AsyncMock(side_effect=edit)
+        generation = AsyncMock()
+        llm.client = typing.cast(
+            typing.Any, SimpleNamespace(images=SimpleNamespace(edit=endpoint, generate=generation))
+        )
+        self.assertEqual(await llm.generate_image("在云端滑雪"), b"image")
+        prompt = endpoint.call_args.kwargs["prompt"]
+        self.assertIn(llm.config.persona["visual"]["prompt"].strip(), prompt)
+        self.assertIn("在云端滑雪", prompt)
+        generation.assert_not_awaited()
+
+    async def test_gemini_sends_reference_and_same_visual_rules(self):
+        llm = self.make_client("gemini")
+        generate = AsyncMock(
+            return_value=SimpleNamespace(
+                candidates=[
+                    SimpleNamespace(
+                        content=SimpleNamespace(
+                            parts=[SimpleNamespace(inline_data=SimpleNamespace(data=b"image"))]
+                        )
+                    )
+                ]
+            )
+        )
+        llm._types = SimpleNamespace(
+            Part=SimpleNamespace(from_bytes=lambda **kw: kw),
+            GenerateContentConfig=SimpleNamespace,
+        )
+        llm._genai = SimpleNamespace(
+            aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate))
+        )
+        self.assertEqual(await llm.generate_image("在云端滑雪"), b"image")
+        contents = generate.call_args.kwargs["contents"]
+        self.assertEqual(
+            contents[0],
+            {
+                "data": (ROOT_DIR / "dafeiyu/web/character.png").read_bytes(),
+                "mime_type": "image/png",
+            },
+        )
+        self.assertIn(llm.config.persona["visual"]["prompt"].strip(), contents[1])
+        self.assertIn("在云端滑雪", contents[1])
+
+    async def test_unsupported_edit_does_not_retry_as_text_only_generation(self):
+        llm = self.make_client("openai")
+        edit = AsyncMock(side_effect=RuntimeError("unsupported edit"))
+        generate = AsyncMock()
+        llm.client = typing.cast(
+            typing.Any, SimpleNamespace(images=SimpleNamespace(edit=edit, generate=generate))
+        )
+        with self.assertLogs("dafeiyu", level="WARNING"):
+            self.assertIsNone(await llm.generate_image("在云端滑雪"))
+        edit.assert_awaited_once()
+        generate.assert_not_awaited()
+
+    async def test_invalid_base64_image_is_rejected(self):
+        llm = self.make_client("openai")
+        llm.client = typing.cast(
+            typing.Any,
+            SimpleNamespace(
+                images=SimpleNamespace(
+                    edit=AsyncMock(
+                        return_value=SimpleNamespace(data=[SimpleNamespace(b64_json="!!!!")])
+                    )
+                )
+            ),
+        )
+        with self.assertLogs("dafeiyu", level="WARNING"):
+            self.assertIsNone(await llm.generate_image("在云端滑雪"))
+
+    async def test_missing_image_payload_logs_metadata_without_response_body(self):
+        llm = self.make_client("openai")
+        response = SimpleNamespace(
+            data=[SimpleNamespace(b64_json=None)],
+            model_dump=lambda: {"url": "private-signed-image-url"},
+        )
+        llm.client = typing.cast(
+            typing.Any,
+            SimpleNamespace(images=SimpleNamespace(edit=AsyncMock(return_value=response))),
+        )
+        with self.assertLogs("dafeiyu", level="WARNING") as captured:
+            self.assertIsNone(await llm.generate_image("在云端滑雪"))
+        self.assertNotIn("private-signed-image-url", "\n".join(captured.output))
 
 
 class GeminiContentsTests(unittest.TestCase):
@@ -44,9 +148,10 @@ class GeminiSearchTests(unittest.IsolatedAsyncioTestCase):
         generate = AsyncMock(return_value=response)
         llm = LLMClient.__new__(LLMClient)
         llm.provider = "gemini"
-        llm.config = typing.cast(typing.Any, SimpleNamespace(
-            model_name="gemini-3.1-flash-lite", gemini_api_key="fixture-secret"
-        ))
+        llm.config = typing.cast(
+            typing.Any,
+            SimpleNamespace(model_name="gemini-3.1-flash-lite", gemini_api_key="fixture-secret"),
+        )
         llm._types = SimpleNamespace(
             GenerateContentConfig=SimpleNamespace,
             Tool=SimpleNamespace,
@@ -59,10 +164,15 @@ class GeminiSearchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_search_is_opt_in_and_preserves_json_output(self):
         response = '{"reply_mode":"normal","reply":"查到了"}'
-        llm, generate = self.make_client(SimpleNamespace(
-            text=response, candidates=[SimpleNamespace(finish_reason="STOP")],
-            usage_metadata=None, prompt_feedback=None, response_id="fixture-response",
-        ))
+        llm, generate = self.make_client(
+            SimpleNamespace(
+                text=response,
+                candidates=[SimpleNamespace(finish_reason="STOP")],
+                usage_metadata=None,
+                prompt_feedback=None,
+                response_id="fixture-response",
+            )
+        )
         messages = [
             {"role": "system", "content": "输出 JSON"},
             {"role": "user", "content": "今天有什么新闻？"},
@@ -84,33 +194,53 @@ class GeminiSearchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_truncation_logs_finish_usage_and_json_error_without_content(self):
         response = '{"reply":"private response'
-        llm, _ = self.make_client(SimpleNamespace(
-            text=response, candidates=[SimpleNamespace(finish_reason="MAX_TOKENS")],
-            usage_metadata=SimpleNamespace(
-                prompt_token_count=900, candidates_token_count=350,
-                thoughts_token_count=0, total_token_count=1250,
-            ),
-            prompt_feedback=None, response_id="fixture-truncated",
-        ))
+        llm, _ = self.make_client(
+            SimpleNamespace(
+                text=response,
+                candidates=[SimpleNamespace(finish_reason="MAX_TOKENS")],
+                usage_metadata=SimpleNamespace(
+                    prompt_token_count=900,
+                    candidates_token_count=350,
+                    thoughts_token_count=0,
+                    total_token_count=1250,
+                ),
+                prompt_feedback=None,
+                response_id="fixture-truncated",
+            )
+        )
         with self.assertLogs("dafeiyu", level="WARNING") as captured:
             result = await llm.chat_json(
                 [{"role": "user", "content": "private request"}],
-                max_tokens=350, temperature=0.5,
+                max_tokens=350,
+                temperature=0.5,
             )
         self.assertEqual(result, response)
         logs = "\n".join(captured.output)
-        for value in ["MAX_TOKENS", "output_tokens=350", "max_output_tokens=350",
-                      "prompt_tokens=900", "thought_tokens=0", "total_tokens=1250",
-                      "Unterminated string", "position=", "fixture-truncated"]:
+        for value in [
+            "MAX_TOKENS",
+            "output_tokens=350",
+            "max_output_tokens=350",
+            "prompt_tokens=900",
+            "thought_tokens=0",
+            "total_tokens=1250",
+            "Unterminated string",
+            "position=",
+            "fixture-truncated",
+        ]:
             self.assertIn(value, logs)
         self.assertNotIn("private response", logs)
         self.assertNotIn("private request", logs)
 
     async def test_blocked_empty_response_logs_block_reason(self):
-        llm, _ = self.make_client(SimpleNamespace(
-            text=None, candidates=None, usage_metadata=None,
-            prompt_feedback=SimpleNamespace(block_reason="SAFETY"), response_id=None,
-        ))
+        llm, _ = self.make_client(
+            SimpleNamespace(
+                text=None,
+                candidates=None,
+                usage_metadata=None,
+                prompt_feedback=SimpleNamespace(block_reason="SAFETY"),
+                response_id=None,
+            )
+        )
         with self.assertLogs("dafeiyu", level="WARNING") as captured:
             self.assertEqual(await llm.chat_json([], max_tokens=1200, temperature=0.5), "")
         logs = "\n".join(captured.output)
@@ -200,14 +330,18 @@ class EmbeddingBatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0]["config"].task_type, "RETRIEVAL_DOCUMENT")
 
     async def test_embedding2_keeps_documents_separate_and_formats_retrieval_inputs(self):
-        embed = AsyncMock(return_value=SimpleNamespace(embeddings=[
-            SimpleNamespace(values=[1.0, 0.0]), SimpleNamespace(values=[0.0, 1.0])
-        ]))
+        embed = AsyncMock(
+            return_value=SimpleNamespace(
+                embeddings=[SimpleNamespace(values=[1.0, 0.0]), SimpleNamespace(values=[0.0, 1.0])]
+            )
+        )
         llm = LLMClient.__new__(LLMClient)
         llm.provider = "gemini"
         llm.config = typing.cast(typing.Any, SimpleNamespace(embed_model="gemini-embedding-2"))
         llm._types = SimpleNamespace(Content=SimpleNamespace, Part=SimpleNamespace)
-        llm._genai = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(embed_content=embed)))
+        llm._genai = SimpleNamespace(
+            aio=SimpleNamespace(models=SimpleNamespace(embed_content=embed))
+        )
         vectors = await llm.embed_texts(["doc one", "doc two"], purpose="retrieval_document")
         self.assertEqual(vectors, [[1.0, 0.0], [0.0, 1.0]])
         request = embed.call_args.kwargs
@@ -217,9 +351,7 @@ class EmbeddingBatchTests(unittest.IsolatedAsyncioTestCase):
             ["title: none | text: doc one", "title: none | text: doc two"],
         )
         embed.return_value = SimpleNamespace(embeddings=[SimpleNamespace(values=[1.0, 0.0])])
-        self.assertEqual(
-            await llm.embed_text("find this", purpose="retrieval_query"), [1.0, 0.0]
-        )
+        self.assertEqual(await llm.embed_text("find this", purpose="retrieval_query"), [1.0, 0.0])
         self.assertEqual(
             embed.call_args.kwargs["contents"][0].parts[0].text,
             "task: search result | query: find this",

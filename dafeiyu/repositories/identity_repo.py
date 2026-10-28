@@ -102,6 +102,22 @@ class IdentityRepository:
 
         await asyncio.to_thread(write)
 
+    async def diary(self, cid: int, date: str) -> dict | None:
+        """Only the current day's completed snapshot may be published."""
+
+        def read():
+            with self.db.connect() as conn:
+                row = conn.execute(
+                    "SELECT val FROM sys_cache WHERE key=?", (f"daily_diary:{cid}",)
+                ).fetchone()
+            if row:
+                value = json.loads(row["val"])
+                if value["date"] == date and value["ready"] and value["text"]:
+                    return value
+            return None
+
+        return await asyncio.to_thread(read)
+
     async def commit(
         self,
         cid: int,
@@ -111,6 +127,8 @@ class IdentityRepository:
         aliases: list[dict],
         cards: list[dict],
         now: float,
+        *,
+        diary: dict | None,
     ) -> list[tuple[int, dict]]:
         def write():
             with self.db.connect() as conn:
@@ -242,6 +260,18 @@ class IdentityRepository:
                 conn.execute(
                     "UPDATE consolidation_state SET until_id=?,next_offset=?,last_success=?,last_error='' WHERE conversation_id=?",
                     (until, offset, now, cid),
+                )
+                key = f"daily_diary:{cid}"
+                old = conn.execute("SELECT val FROM sys_cache WHERE key=?", (key,)).fetchone()
+                draft = json.loads(old["val"]) if old else None
+                if draft is None or draft["date"] != state["run_date"]:
+                    draft = {"date": state["run_date"], "text": "", "evidence": []}
+                if diary is not None:
+                    draft.update(diary)
+                draft.update(ready=until == state["target_id"] and offset == 0)
+                conn.execute(
+                    "INSERT OR REPLACE INTO sys_cache(key,val,expires_at) VALUES(?,?,NULL)",
+                    (key, json.dumps(draft, ensure_ascii=False)),
                 )
                 return inserted
 

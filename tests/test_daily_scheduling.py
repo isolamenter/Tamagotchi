@@ -27,6 +27,19 @@ class DailySchedulingTests(unittest.IsolatedAsyncioTestCase):
         await self.c.runtime.close()
         self.tmp.cleanup()
 
+    async def seed_diary(self):
+        await self.c.system_repo.set_sys_cache(
+            f"daily_diary:{self.cid}",
+            json.dumps(
+                {
+                    "date": "2026-10-26",
+                    "ready": True,
+                    "text": "今天一起解决了小麻烦。",
+                    "evidence": [],
+                }
+            ),
+        )
+
     async def add(self, text="今天还想一起聊", ts=None):
         return await self.c.message_repo.append_message(
             self.cid,
@@ -52,7 +65,7 @@ class DailySchedulingTests(unittest.IsolatedAsyncioTestCase):
     async def test_quiet_group_can_consolidate_old_new_events_without_publishing(self):
         self.daily.config = self.c.config
         await self.add(ts=self.now - 7200)
-        self.c.llm.responses.append('{"aliases":[],"cards":[]}')
+        self.c.llm.responses.append('{"aliases":[],"cards":[],"diary":null}')
         self.assertFalse(await self.tick())
         self.assertEqual(len(self.c.llm.calls), 1)
         self.assertEqual(self.c.feishu.calls, [])
@@ -62,14 +75,17 @@ class DailySchedulingTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_configured_diary_window_preserved_but_requires_semantic_permission(self):
+        await self.seed_diary()
         await self.add()
         self.c.llm.responses.extend(
             [
                 '{"should_speak":true,"reason":"大家在回顾今天，可自然分享","topic":"今日回顾"}',
-                '{"reply_mode":"normal","reply":"今天一起解决了小麻烦。"}',
             ]
         )
-        self.assertTrue(self.c.state_domain.in_quiet_hours(self.now))
+        self.assertEqual(
+            {e["kind"]: e["hour"] for e in self.c.config.scheduled_events},
+            {"dream": 10, "diary": 19},
+        )
         self.assertTrue(await self.tick())
         state = await self.c.conversation_repo.load_conversation_state(self.cid)
         self.assertEqual(state["last_diary_date"], "2026-10-26")
@@ -77,6 +93,7 @@ class DailySchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.tick(self.now + 600))
 
     async def test_idle_skip_does_not_pretend_sent_and_fresh_activity_can_qualify_later(self):
+        await self.seed_diary()
         self.assertFalse(await self.tick())
         state = await self.c.conversation_repo.load_conversation_state(self.cid)
         self.assertEqual(state["last_diary_date"], "")
@@ -84,7 +101,6 @@ class DailySchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.c.llm.responses.extend(
             [
                 '{"should_speak":true,"reason":"新讨论适合回顾","topic":"回顾"}',
-                '{"reply_mode":"normal","reply":"记住今天啦。"}',
             ]
         )
         self.assertTrue(await self.tick(self.now + 900))
@@ -125,16 +141,48 @@ class DailySchedulingTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertIn("语义重复", self.c.llm.calls[-1][-1]["content"])
 
-    async def test_ordinary_quiet_hours_and_cooldowns_still_prevent_outward_calls(self):
-        now = self.now + 7200
-        await self.add(ts=now)
-        self.assertFalse(await self.tick(now))
-        self.assertEqual(self.c.llm.calls, [])
-        await self.c.conversation_repo.mutate_state(
-            self.cid, lambda s: {**s, "last_reply_ts": self.now}
-        )
-        self.assertFalse(await self.tick())
-        self.assertEqual(self.c.llm.calls, [])
+    async def test_ordinary_interjection_allowed_at_night_and_early_morning(self):
+        for offset in (2, 7, 14):  # 21:00, next day 02:00 and 09:00 local
+            now = self.now + offset * 3600
+            with self.subTest(offset=offset):
+                await self.add(ts=now)
+                self.c.llm.responses.extend(
+                    [
+                        '{"should_speak":true,"reason":"有新内容可接话","topic":"新话题"}',
+                        '{"reply_mode":"normal","reply":"我也来聊一句。"}',
+                    ]
+                )
+                with patch("dafeiyu.services.autonomous_service.time.time", return_value=now):
+                    if offset == 7:
+                        self.assertTrue(await self.auto.maybe_interject(self.cid, "schedule"))
+                    else:
+                        self.assertTrue(await self.tick(now))
+                # Cooldown has elapsed, but no new human message means no further calls.
+                calls = len(self.c.llm.calls)
+                self.assertFalse(await self.tick(now + 1801))
+                self.assertEqual(len(self.c.llm.calls), calls)
+
+    async def test_cooldowns_still_prevent_ordinary_outward_calls_at_night(self):
+        now = self.now + 7200  # 21:00 local
+        for recent_state in (
+            {"last_reply_ts": now - 30},
+            {"last_proactive_ts": now - 300, "last_proactive_answered": True},
+            {"last_proactive_ts": now - 900, "last_proactive_answered": False},
+        ):
+            with self.subTest(state=recent_state):
+                await self.c.conversation_repo.mutate_state(
+                    self.cid,
+                    lambda s, values=recent_state: {
+                        **s,
+                        "last_reply_ts": 0,
+                        "last_proactive_ts": 0,
+                        **values,
+                    },
+                )
+                await self.add(ts=now)
+                self.assertFalse(await self.tick(now))
+                self.assertEqual(self.c.llm.calls, [])
+                self.assertEqual(self.c.feishu.calls, [])
 
     async def test_failed_evaluation_retries_with_backoff_not_checkpoint_advance(self):
         await self.add()
@@ -152,3 +200,14 @@ class DailySchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.tick())
         self.assertEqual(self.c.llm.calls, [])
         self.assertEqual(self.c.feishu.calls, [])
+
+    async def test_dream_window_participation_checks_intended_dream_share(self):
+        now = self.now - 9 * 3600  # 10:00 local
+        await self.add(ts=now)
+        self.c.llm.responses.append('{"should_speak":false}')
+        self.assertFalse(await self.tick(now))
+        dream = next(e for e in self.c.config.scheduled_events if e["kind"] == "dream")
+        prompt = self.c.llm.calls[-1][-1]["content"]
+        self.assertIn(dream["instruction"], prompt)
+        self.assertIn("只判断这项内容是否适合此刻发布", prompt)
+        self.assertFalse(self.c.feishu.calls)

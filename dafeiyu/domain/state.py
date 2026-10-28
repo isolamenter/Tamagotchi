@@ -48,16 +48,8 @@ class StateDomain:
     def local_hour(self, now_ts: float) -> int:
         return self.local_date_hour(now_ts)[1]
 
-    def quiet_by_hour(self, hour: int) -> bool:
-        qs, qe = self.config.quiet_hours
-        return qs <= hour < qe if qs < qe else (hour >= qs or hour < qe)
-
     def is_weekend_rest(self, now_ts: float) -> bool:
         return self.config.quiet_weekends and self.local_time(now_ts).tm_wday >= 5
-
-    def in_quiet_hours(self, now_ts: float) -> bool:
-        local = self.local_time(now_ts)
-        return self.is_weekend_rest(now_ts) or self.quiet_by_hour(local.tm_hour)
 
     def public_state(self, state: dict) -> dict:
         return {

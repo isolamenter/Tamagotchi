@@ -188,13 +188,10 @@ function renderOverview() {
   $("memory-index-state").textContent = overview.memory_index.pending
     ? `${overview.memory_index.pending} 段待构建`
     : "已就绪";
-  const [start, end] = overview.quiet_hours;
-  $("quiet-state").textContent =
-    `${start}:00 至${start > end ? "次日 " : " "}${end}:00`;
   for (const event of overview.scheduled_events) {
     const label = $(`${event.kind}-schedule`);
     if (label)
-      label.textContent = `${event.hour}:00，${event.kind === "dream" ? "讲点梦里的事" : "记下今天的一件事"}`;
+      label.textContent = `${event.hour}:00，${event.kind === "dream" ? "讲点梦里的事" : "发布每日整理的日记"}`;
   }
 }
 function renderRooms() {
@@ -485,7 +482,7 @@ function openAction(action) {
   const titles = {
     speak: "让她接一句",
     dream: "讲个梦",
-    diary: "写今天的日记",
+    diary: "发送今天的日记",
     tick: "检查开口时机",
     "tick-all": "检查所有会话",
     rename: "给群聊起个名字",
@@ -496,7 +493,9 @@ function openAction(action) {
       ? "名称只用于这个工作台，飞书群名不会改变。"
       : action === "tick" || action === "tick-all"
         ? "按当前的静默、冷却和群聊内容判断，满足条件时会向群聊发言。"
-        : "内容生成后，会直接以大肥鱼的身份发送到群聊。";
+        : action === "diary"
+          ? "发送每日整理已保存的当日日记；尚未生成或没有合适内容时不会发送。"
+          : "内容生成后，会直接以大肥鱼的身份发送到群聊。";
   $("action-target").textContent =
     action === "tick-all"
       ? `目标：全部 ${state.rooms.length} 个会话`

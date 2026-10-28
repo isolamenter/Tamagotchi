@@ -20,6 +20,10 @@ class ReleaseTests(unittest.TestCase):
                 self.assertIn("dafeiyu/repositories/schema.sql", names)
                 self.assertIn("dafeiyu/web/workspace.js", names)
                 self.assertIn("config/persona.toml", names)
+                self.assertIn("dafeiyu/web/character.png", names)
+                self.assertIn("assets/memes/hello.png", names)
+                self.assertIn("assets/CHARACTER-NOTICES.md", names)
+                self.assertIn("assets/character-normalization.json", names)
                 self.assertFalse(
                     any(
                         ".env" in n
