@@ -188,106 +188,133 @@ class MemoryService:
                 )
                 return
 
-            # Source metadata survives prompt compression; no global name rewrites.
+            # Include prompt overhead in the character budget, not only serialized rows.
+            budget = (
+                self.config.consolidation["max_context_chars"]
+                - len(self.config.compress_prompt)
+                - len(self.config.compress_user_message_template.format(chunk=""))
+            )
             chunk = json.dumps(to_compress, ensure_ascii=False)
-            if len(chunk) > self.config.consolidation["max_context_chars"]:
-                # No oversized model request. Preserve raw rows and retry smaller oldest windows.
-                while (
-                    len(to_compress) > 1
-                    and len(chunk) > self.config.consolidation["max_context_chars"]
-                ):
-                    to_compress.pop()
-                    chunk = json.dumps(to_compress, ensure_ascii=False)
-                new_until_id = to_compress[-1]["id"]
-                if len(chunk) > self.config.consolidation["max_context_chars"]:
-                    # Keep the complete oversized row pending for daily offset-aware consolidation.
-                    return
-            user_msg = self.config.compress_user_message_template.format(chunk=chunk)
+            while len(to_compress) > 1 and len(chunk) > budget:
+                to_compress.pop()
+                chunk = json.dumps(to_compress, ensure_ascii=False)
+            new_until_id = to_compress[-1]["id"]
+            chunks = [chunk]
+            if len(chunk) > budget:
+                # One source message may need several requests. Keep the checkpoint
+                # unchanged until every fragment has a validated, durable result.
+                row = to_compress[0]
+                record = {k: v for k, v in row.items() if k != "evidence_text"}
+                text, offset, chunks = row["content"], 0, []
+                while offset < len(text):
+                    take = min(len(text) - offset, budget)
+                    while take > 0:
+                        record.update(
+                            content=text[offset : offset + take],
+                            start_offset=offset,
+                            content_complete=offset + take == len(text),
+                        )
+                        fragment = json.dumps([record], ensure_ascii=False)
+                        if len(fragment) <= budget:
+                            break
+                        take //= 2
+                    if take <= 0:
+                        log.error(
+                            "compression metadata exceeds budget conversation=%d", conversation_id
+                        )
+                        return
+                    chunks.append(fragment)
+                    offset += take
+            cards_raw = []
+            for chunk in chunks:
+                user_msg = self.config.compress_user_message_template.format(chunk=chunk)
 
-            try:
-                content = await asyncio.wait_for(
-                    self.llm.chat_json(
-                        [
-                            {"role": "system", "content": self.config.compress_prompt},
-                            {"role": "user", "content": user_msg},
-                        ],
-                        max_tokens=self.config.compress_max_tokens,
-                        temperature=0.4,
-                    ),
-                    timeout=self.config.consolidation["timeout_sec"],
-                )
-            except Exception as exc:
-                log.warning(
-                    "compress llm call failed conversation=%d error=%s",
-                    conversation_id,
-                    type(exc).__name__,
-                )
-                await self._record_compress_failure(
-                    conversation_id, compress_fail_count, new_until_id, to_compress
-                )
-                return
-
-            try:
-                data = json.loads(content)
-                if not isinstance(data, dict) or not isinstance(data.get("cards"), list):
-                    raise ValueError("expected an object with a cards list")
-                cards_raw = data["cards"]
-                # Validate the whole batch before saving. A malformed/nonempty batch
-                # must never masquerade as an intentional empty result, or advance
-                # the checkpoint after silently dropping only its invalid entries.
-                for card in cards_raw:
-                    if not isinstance(card, dict):
-                        raise ValueError("memory card is not an object")
-                    if not isinstance(card.get("what"), str) or not card["what"].strip():
-                        raise ValueError("memory card needs nonempty what")
-                    for key in ("kind", "when", "who", "vibe", "hooks"):
-                        if key in card and not isinstance(card[key], str):
-                            raise ValueError(f"memory card {key} is not text")
-                    if card.get("kind", "reality").strip() not in {
-                        "reality",
-                        "hearsay",
-                        "imagination",
-                    }:
-                        raise ValueError("invalid memory kind")
-                    source_ids = card.get("source_ids", [])
-                    by_id = {r["id"]: r for r in to_compress}
-                    if not isinstance(source_ids, list) or any(
-                        type(mid) is not int or mid not in by_id for mid in source_ids
-                    ):
-                        raise ValueError("compression source outside batch")
-                    sources = [by_id[mid] for mid in source_ids] if source_ids else to_compress
-                    card[
-                        "subject_ids"
-                    ] = []  # Only evidence-validated daily analysis assigns people.
-                    card["reporter_ids"] = sorted(
-                        {r["sender_open_id"] for r in sources if r["sender_open_id"]}
+                try:
+                    content = await asyncio.wait_for(
+                        self.llm.chat_json(
+                            [
+                                {"role": "system", "content": self.config.compress_prompt},
+                                {"role": "user", "content": user_msg},
+                            ],
+                            max_tokens=self.config.compress_max_tokens,
+                            temperature=0.4,
+                        ),
+                        timeout=self.config.consolidation["timeout_sec"],
                     )
-                    card["evidence"] = [
-                        {
-                            "message_id": r["id"],
-                            "source_message_id": r["source_message_id"],
-                            "ts": r["ts"],
-                            "source": r["source"],
-                            "role": r["role"],
-                            "reporter_id": r["sender_open_id"],
-                            "relation": "compression_context",
-                        }
-                        for r in sources
-                    ]
-                    if any(r["source"] == "dream" for r in sources):
-                        card["kind"] = "imagination"
-                    elif not source_ids or any(r["role"] == "assistant" for r in sources):
-                        card["kind"] = "hearsay"
-            except Exception as exc:
-                log.warning(
-                    "compress parse/json error for conversation %d: %s",
-                    conversation_id,
-                    type(exc).__name__,
-                )
-                await self._record_compress_failure(
-                    conversation_id, compress_fail_count, new_until_id, to_compress
-                )
-                return
+                except Exception as exc:
+                    log.warning(
+                        "compress llm call failed conversation=%d error=%s",
+                        conversation_id,
+                        type(exc).__name__,
+                    )
+                    await self._record_compress_failure(
+                        conversation_id, compress_fail_count, new_until_id, to_compress
+                    )
+                    return
+
+                try:
+                    data = json.loads(content)
+                    if not isinstance(data, dict) or not isinstance(data.get("cards"), list):
+                        raise ValueError("expected an object with a cards list")
+                    batch_cards = data["cards"]
+                    # Validate the whole batch before saving. A malformed/nonempty batch
+                    # must never masquerade as an intentional empty result, or advance
+                    # the checkpoint after silently dropping only its invalid entries.
+                    for card in batch_cards:
+                        if not isinstance(card, dict):
+                            raise ValueError("memory card is not an object")
+                        if not isinstance(card.get("what"), str) or not card["what"].strip():
+                            raise ValueError("memory card needs nonempty what")
+                        for key in ("kind", "when", "who", "vibe", "hooks"):
+                            if key in card and not isinstance(card[key], str):
+                                raise ValueError(f"memory card {key} is not text")
+                        if card.get("kind", "reality").strip() not in {
+                            "reality",
+                            "hearsay",
+                            "imagination",
+                        }:
+                            raise ValueError("invalid memory kind")
+                        source_ids = card.get("source_ids", [])
+                        by_id = {r["id"]: r for r in to_compress}
+                        if not isinstance(source_ids, list) or any(
+                            type(mid) is not int or mid not in by_id for mid in source_ids
+                        ):
+                            raise ValueError("compression source outside batch")
+                        sources = [by_id[mid] for mid in source_ids] if source_ids else to_compress
+                        card[
+                            "subject_ids"
+                        ] = []  # Only evidence-validated daily analysis assigns people.
+                        card["reporter_ids"] = sorted(
+                            {r["sender_open_id"] for r in sources if r["sender_open_id"]}
+                        )
+                        card["evidence"] = [
+                            {
+                                "message_id": r["id"],
+                                "source_message_id": r["source_message_id"],
+                                "ts": r["ts"],
+                                "source": r["source"],
+                                "role": r["role"],
+                                "reporter_id": r["sender_open_id"],
+                                "relation": "compression_context",
+                            }
+                            for r in sources
+                        ]
+                        if any(r["source"] == "dream" for r in sources):
+                            card["kind"] = "imagination"
+                        elif not source_ids or any(r["role"] == "assistant" for r in sources):
+                            card["kind"] = "hearsay"
+                except Exception as exc:
+                    log.warning(
+                        "compress parse/json error for conversation %d: %s",
+                        conversation_id,
+                        type(exc).__name__,
+                    )
+                    await self._record_compress_failure(
+                        conversation_id, compress_fail_count, new_until_id, to_compress
+                    )
+                    return
+
+                cards_raw.extend(batch_cards)
 
             try:
                 inserted = await self.memory_repo.save_compressed_cards(

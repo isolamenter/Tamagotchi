@@ -751,6 +751,37 @@ class DailyIdentityTests(unittest.IsolatedAsyncioTestCase):
         with self.c.db.connect() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0], 1)
 
+    async def test_reaffirmed_current_event_renews_from_new_evidence_without_duplicate(self):
+        async def confirm(event_ts, run_ts):
+            mid = await self.c.message_repo.append_message(
+                self.cid, "user", "我还在筹备比赛", sender_open_id="alice", ts=event_ts
+            )
+            card = fact("alice", mid, "还在筹备比赛", "正在筹备比赛", key="近期比赛")
+            card["profile_category"] = "current_event"
+            self.assertTrue(await self.run_daily(cards=[card], now=run_ts))
+            return mid
+
+        first = await confirm(NOW, NOW)
+        old = (await self.c.memory_repo.subject_cards(self.cid, {"alice"}))[0]
+        second = await confirm(NOW + 29 * 86400, NOW + 29 * 86400)
+        with self.c.db.connect() as conn:
+            rows = conn.execute("SELECT * FROM memories").fetchall()
+        self.assertEqual(len(rows), 1)
+        current = rows[0]
+        self.assertEqual(current["id"], old["id"])
+        self.assertEqual(current["expires_at"], NOW + 59 * 86400)
+        self.assertEqual(current["source_until_id"], second)
+        self.assertEqual(
+            [e["message_id"] for e in json.loads(current["evidence"])], [first, second]
+        )
+        self.assertEqual(self.state()["until_id"], second)
+        # A delayed older message must not shorten or renew the current event.
+        await confirm(NOW + 10 * 86400, NOW + 30 * 86400)
+        with self.c.db.connect() as conn:
+            row = conn.execute("SELECT * FROM memories").fetchone()
+        self.assertEqual(row["expires_at"], current["expires_at"])
+        self.assertEqual(row["evidence"], current["evidence"])
+
     async def test_legacy_unverified_text_can_supply_pending_but_not_confirmed_identity(self):
         mid = await self.add("旧记录里叫我小林", source="imported")
         with self.c.db.connect() as conn:

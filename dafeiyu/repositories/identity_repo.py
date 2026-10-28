@@ -145,18 +145,45 @@ class IdentityRepository:
                     supersedes = card.get("supersedes", [])
                     if card.get("profile_key"):
                         active = conn.execute(
-                            "SELECT id,what,confidence FROM memories WHERE conversation_id=? AND subject_ids=? AND profile_key=? AND superseded_by IS NULL AND (expires_at IS NULL OR expires_at>?)",
+                            "SELECT id,what,confidence,profile_category,expires_at,evidence,reporter_ids,source_until_id FROM memories WHERE conversation_id=? AND subject_ids=? AND profile_key=? AND superseded_by IS NULL AND (expires_at IS NULL OR expires_at>?)",
                             (cid, json.dumps(card["subject_ids"]), card["profile_key"], now),
                         ).fetchall()
-                        if (
-                            any(
-                                r["what"] == card["what"]
-                                and r["confidence"] == card.get("confidence", "uncertain")
+                        identical = next(
+                            (
+                                r
                                 for r in active
-                            )
-                            and not supersedes
-                        ):
-                            continue  # Same claim is idempotent; do not manufacture a new version.
+                                if r["what"] == card["what"]
+                                and r["confidence"] == card.get("confidence", "uncertain")
+                            ),
+                            None,
+                        )
+                        if identical is not None and not supersedes:
+                            if (
+                                identical["profile_category"] == "current_event"
+                                and card.get("profile_category") == "current_event"
+                            ):
+                                expiry = max(e["ts"] for e in card["evidence"]) + 30 * 86400
+                                if expiry > identical["expires_at"]:
+                                    refs = json.loads(identical["evidence"])
+                                    refs.extend(e for e in card["evidence"] if e not in refs)
+                                    reporters = sorted(
+                                        set(json.loads(identical["reporter_ids"]))
+                                        | set(card["reporter_ids"])
+                                    )
+                                    conn.execute(
+                                        "UPDATE memories SET expires_at=?,evidence=?,reporter_ids=?,source_until_id=? WHERE id=?",
+                                        (
+                                            expiry,
+                                            json.dumps(refs, ensure_ascii=False),
+                                            json.dumps(reporters),
+                                            max(
+                                                identical["source_until_id"],
+                                                max(e["message_id"] for e in card["evidence"]),
+                                            ),
+                                            identical["id"],
+                                        ),
+                                    )
+                            continue  # Same claim retains its ID and embedding.
                         if any(r["id"] not in supersedes for r in active) and not supersedes:
                             # A hidden/conflicting key is not permission to overwrite. Keep a pending claim,
                             # with its evidence, instead of blocking unrelated events indefinitely.

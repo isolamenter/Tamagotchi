@@ -36,6 +36,63 @@ class MemoryCompressionTests(unittest.IsolatedAsyncioTestCase):
     async def state(self):
         return await self.c.memory_repo.get_compress_context(self.cid)
 
+    async def oversized_message(self):
+        self.cid = await self.c.conversation_repo.get_or_create_conversation("oversized")
+        text = ('长消息\n"引用"\\\x01' * 10000) + "末尾约定"
+        mid = await self.c.message_repo.append_message(
+            self.cid, "user", text, sender_open_id="alice", source_message_id="long-source"
+        )
+        for i in range(4):
+            await self.c.message_repo.append_message(self.cid, "user", f"后续消息{i}")
+        return mid, text
+
+    async def test_oversized_source_is_fully_compressed_then_later_messages_can_progress(self):
+        mid, text = await self.oversized_message()
+        fragments = []
+
+        async def model(messages, **kwargs):
+            self.assertLessEqual(
+                sum(len(m["content"]) for m in messages),
+                self.service.config.consolidation["max_context_chars"],
+            )
+            chunk = messages[-1]["content"].split("\n", 1)[-1]
+            # The configured template surrounds the JSON with prose.
+            rows = json.JSONDecoder().raw_decode(chunk[chunk.index("["):])[0]
+            fragments.extend(rows)
+            return json.dumps({"cards": [{"what": "保留约定", "source_ids": [mid]}]})
+
+        self.c.llm.chat_json = model
+        await self.service.compress_conversation_memory(self.cid)
+        self.assertGreater(len(fragments), 1)
+        self.assertEqual("".join(r["content"] for r in fragments), text)
+        self.assertEqual(
+            [r["start_offset"] for r in fragments],
+            [sum(len(p["content"]) for p in fragments[:i]) for i in range(len(fragments))],
+        )
+        self.assertTrue(fragments[-1]["content_complete"])
+        self.assertEqual((await self.state())[0], mid)
+        cards = await self.c.memory_repo.recent_cards(self.cid, 20)
+        self.assertTrue(cards)
+        self.assertTrue(all(c["evidence"][0]["source_message_id"] == "long-source" for c in cards))
+        self.c.llm.chat_json = AsyncMock(return_value='{"cards": []}')
+        await self.service.compress_conversation_memory(self.cid)
+        self.assertGreater((await self.state())[0], mid)
+        self.assertEqual(len(await self.c.message_repo.recent_messages(self.cid, 20)), 5)
+
+    async def test_failed_later_fragment_never_saves_partial_cards_or_advances(self):
+        mid, _ = await self.oversized_message()
+        self.c.llm.chat_json = AsyncMock(side_effect=[
+            json.dumps({"cards": [{"what": "第一段约定", "source_ids": [mid]}]}),
+            '{"cards": [null]}',
+        ])
+        await self.service.compress_conversation_memory(self.cid)
+        self.assertEqual(self.c.llm.chat_json.await_count, 2)
+        self.assertEqual((await self.state())[:2], (0, 1))
+        self.assertEqual(await self.c.memory_repo.recent_cards(self.cid, 20), [])
+        self.c.llm.chat_json = AsyncMock(return_value='{"cards": []}')
+        await self.service.compress_conversation_memory(self.cid)
+        self.assertEqual((await self.state())[:2], (mid, 0))
+
     async def test_explicit_empty_result_advances_checkpoint_without_creating_cards(self):
         await self.compress('{"cards": []}')
         until, failures, attempted, pending = await self.state()
