@@ -135,7 +135,11 @@ class ConsolidationService:
                     {
                         "known_aliases": known,
                         "known_profiles": profiles,
-                        "events": events,
+                        # Platform IDs are retained for persisted provenance, not model references.
+                        "events": [
+                            {k: v for k, v in event.items() if k != "source_message_id"}
+                            for event in events
+                        ],
                         "diary_date": date,
                         "diary_enabled": diary_event is not None,
                     },

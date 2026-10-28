@@ -91,9 +91,12 @@ class DailyIdentityTests(unittest.IsolatedAsyncioTestCase):
         request = self.request()
         self.assertEqual([r["id"] for r in request["events"]], [a, b])
         self.assertTrue(
+            all(r["ts"] == NOW - 60 and "source_message_id" not in r for r in request["events"])
+        )
+        self.assertTrue(
             all(
-                r["ts"] == NOW - 60 and r["source_message_id"].startswith("platform-")
-                for r in request["events"]
+                json.loads(r["evidence"])[0]["source_message_id"].startswith("platform-")
+                for r in rows
             )
         )
         self.assertEqual(self.state()["until_id"], b)
@@ -644,12 +647,13 @@ class DailyIdentityTests(unittest.IsolatedAsyncioTestCase):
         await self.c.services.reply.handle_message_event(post)
         self.assertTrue(await self.run_daily())
         row = self.request()["events"][0]
-        self.assertEqual(row["source_message_id"], "source-post-id")
+        self.assertNotIn("source_message_id", row)
         self.assertEqual(row["ts"], 1700000000.123)
         self.assertIn({"open_id": "bob", "name": "小林"}, row["mentions"])
         self.assertIn("小林这张图", row["content"])
         self.assertNotIn("蓝色的玩具", row["content"])
         raw = await self.c.message_repo.recent_messages(self.cid, 10)
+        self.assertEqual(raw[0]["source_message_id"], "source-post-id")
         self.assertIn("蓝色的玩具", raw[0]["content"])
 
     async def test_single_successful_reply_speaker_name_does_not_mutate_identity(self):

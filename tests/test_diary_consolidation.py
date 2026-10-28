@@ -60,6 +60,17 @@ class DiaryConsolidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["text"], self.draft(mid)["text"])
         self.assertFalse(self.c.feishu.calls)
 
+    async def test_model_references_database_id_while_storage_keeps_platform_id(self):
+        mid = await self.add(source_message_id="synthetic-message-1")
+        self.assertTrue(
+            await self.consolidate(self.draft(mid), [fact("alice", mid, "我喜欢红茶", "喜欢红茶")])
+        )
+        event = json.loads(self.c.llm.calls[0][-1]["content"])["events"][0]
+        self.assertEqual(event["id"], mid)
+        self.assertNotIn("source_message_id", event)
+        cards = await self.c.memory_repo.recent_cards(self.cid, 10)
+        self.assertEqual(cards[0]["evidence"][0]["source_message_id"], "synthetic-message-1")
+
     async def test_batches_publish_only_when_complete_and_keep_earlier_candidate(self):
         self.daily.config = replace(
             self.daily.config,
