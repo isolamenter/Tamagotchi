@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -220,3 +221,101 @@ class AppTests(unittest.TestCase):
         self.assertTrue(self.c.feishu.closed)
         self.assertTrue(self.c.llm.closed)
         self.assertFalse(self.c.runtime.background_tasks)
+
+
+class JournalTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.c = container(str(Path(self.tmp.name) / "new.db"))
+        with patch("dafeiyu.app.build_container", return_value=self.c):
+            self.app = create_app(self.c.config)
+        self.client = TestClient(self.app, raise_server_exceptions=False)
+        self.headers = {"X-GM-Token": "admin-fixture"}
+        self.cid = asyncio.run(self.c.conversation_repo.get_or_create_conversation("chat-fixture"))
+        send = self.c.services.delivery.send
+        asyncio.run(
+            send(
+                self.cid,
+                "chat-fixture",
+                "梦见白饭山",
+                source="dream",
+                as_card=True,
+                image_key="img-1",
+            )
+        )
+        asyncio.run(send(self.cid, "chat-fixture", "今天的日记", source="diary", as_card=True))
+        asyncio.run(send(self.cid, "chat-fixture", "旧梦", source="dream"))
+        self.date = self.c.state_domain.local_date_hour(time.time())[0]
+        self.c.feishu.calls.clear()
+
+    def tearDown(self):
+        self.client.close()
+        self.tmp.cleanup()
+
+    def journal(self):
+        response = self.client.get(f"/gm/journal?conversation_id={self.cid}", headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        return response.json()["entries"]
+
+    def card_id(self, text):
+        with self.c.db.connect() as conn:
+            return conn.execute(
+                "SELECT card_id FROM published_cards WHERE content=?", (text,)
+            ).fetchone()[0]
+
+    def set_draft(self, text, ready):
+        asyncio.run(
+            self.c.system_repo.set_sys_cache(
+                f"daily_diary:{self.cid}",
+                json.dumps({"date": self.date, "text": text, "evidence": [], "ready": ready}),
+            )
+        )
+
+    def test_journal_lists_recorded_sends_and_unsent_draft_without_side_effects(self):
+        self.set_draft("还没发的日记", False)
+        entries = self.journal()
+        by_text = {e["text"]: e for e in entries}
+        self.assertEqual(
+            {k: by_text["梦见白饭山"][k] for k in ("kind", "status", "date")},
+            {"kind": "dream", "status": "sent", "date": self.date},
+        )
+        self.assertTrue(by_text["梦见白饭山"]["card"]["has_image"])
+        self.assertFalse(by_text["今天的日记"]["card"]["has_image"])
+        self.assertIsNone(by_text["旧梦"]["card"])
+        draft = by_text["还没发的日记"]
+        self.assertEqual((draft["status"], draft["ready"], draft["ts"]), ("draft", False, None))
+        self.assertNotIn("img-1", json.dumps(entries))
+        self.assertEqual(self.c.feishu.calls, [])
+        self.assertEqual(self.c.llm.calls, [])
+
+    def test_sent_draft_is_not_duplicated_and_orphan_card_kind_stays_unknown(self):
+        self.set_draft("今天的日记", True)
+        with self.c.db.connect() as conn:
+            conn.execute(
+                "INSERT INTO published_cards VALUES('orphan',?,'m','只有卡片','',?)",
+                (self.cid, time.time()),
+            )
+        entries = self.journal()
+        self.assertEqual([e["status"] for e in entries if e["text"] == "今天的日记"], ["sent"])
+        orphan = next(e for e in entries if e["text"] == "只有卡片")
+        self.assertEqual((orphan["kind"], orphan["status"]), ("", "sent"))
+
+    def test_card_image_is_read_back_only_for_recorded_cards(self):
+        url = f"/gm/journal/image?conversation_id={self.cid}&card_id="
+        self.c.feishu.uploaded_images["img-1"] = b"\x89PNG fixture"
+        response = self.client.get(url + self.card_id("梦见白饭山"), headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "image/png")
+        self.assertEqual(response.content, b"\x89PNG fixture")
+        self.c.feishu.uploaded_images.clear()
+        response = self.client.get(url + self.card_id("梦见白饭山"), headers=self.headers)
+        self.assertEqual(response.status_code, 502)
+        response = self.client.get(url + self.card_id("今天的日记"), headers=self.headers)
+        self.assertEqual(response.status_code, 404)
+        other = asyncio.run(self.c.conversation_repo.get_or_create_conversation("chat-other"))
+        response = self.client.get(
+            f"/gm/journal/image?conversation_id={other}&card_id={self.card_id('梦见白饭山')}",
+            headers=self.headers,
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(self.c.feishu.calls, [])

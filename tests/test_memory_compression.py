@@ -46,6 +46,42 @@ class MemoryCompressionTests(unittest.IsolatedAsyncioTestCase):
             await self.c.message_repo.append_message(self.cid, "user", f"后续消息{i}")
         return mid, text
 
+    async def test_legacy_names_are_filtered_from_normal_and_fragmented_compression(self):
+        for large in (False, True):
+            with self.subTest(fragmented=large):
+                cid = await self.c.conversation_repo.get_or_create_conversation(f"names-{large}")
+                text = "今天想喝茶" * (20000 if large else 1)
+                mid = await self.c.message_repo.append_message(
+                    cid, "user", text, sender_name="群友-lice", sender_open_id="alice"
+                )
+                await self.c.message_repo.append_message(
+                    cid, "user", "好呀", sender_name="小明", sender_open_id="bob"
+                )
+                await self.c.message_repo.append_message(cid, "user", "保留一条")
+                self.service.config = replace(self.service.config, buffer_keep=0)
+                batches = []
+
+                async def model(messages, batches=batches, **kwargs):
+                    chunk = messages[-1]["content"]
+                    rows = json.JSONDecoder().raw_decode(chunk[chunk.index("["):])[0]
+                    batches.append(rows)
+                    self.assertNotIn("群友-lice", chunk)
+                    return '{"cards": []}'
+
+                self.c.llm.chat_json = model
+                await self.service.compress_conversation_memory(cid)
+                self.assertTrue(batches)
+                self.assertEqual(batches[0][0]["sender_name"], "")
+                if large:
+                    self.assertGreater(len(batches), 1)
+                else:
+                    self.assertEqual(batches[0][1]["sender_name"], "小明")
+                with self.c.db.connect() as conn:
+                    stored = conn.execute(
+                        "SELECT sender_name,content FROM messages WHERE id=?", (mid,)
+                    ).fetchone()
+                self.assertEqual((stored["sender_name"], stored["content"]), ("群友-lice", text))
+
     async def test_oversized_source_is_fully_compressed_then_later_messages_can_progress(self):
         mid, text = await self.oversized_message()
         fragments = []

@@ -124,6 +124,63 @@ class FeishuClient:
             return data
         return data
 
+    async def chat_member_names(self, chat_id: str) -> dict[str, str]:
+        """群成员展示名（open_id → name），需 im:chat.members:read；不返回机器人。"""
+        names: dict[str, str] = {}
+        page_token = ""
+        while True:
+            params = {"member_id_type": "open_id", "page_size": 100}
+            if page_token:
+                params["page_token"] = page_token
+            data = await self._authed_request(
+                "GET",
+                f"{self.config.feishu_base}/im/v1/chats/{chat_id}/members",
+                label="chat members",
+                params=params,
+            )
+            if not data or data.get("code") != 0:
+                raise RuntimeError(
+                    "Feishu chat members failed (code=%s)"
+                    % (data.get("code") if isinstance(data, dict) else "invalid_response")
+                )
+            body = data.get("data") or {}
+            for item in body.get("items") or []:
+                open_id, name = item.get("member_id"), (item.get("name") or "").strip()
+                if open_id and name:
+                    names[open_id] = name
+            page_token = body.get("page_token") or ""
+            if not body.get("has_more") or not page_token:
+                return names
+
+    async def add_reaction(self, message_id: str, emoji_type: str) -> str:
+        """需 im:message.reactions:write_only（或 im:message）；返回 reaction_id。"""
+        data = await self._authed_request(
+            "POST",
+            f"{self.config.feishu_base}/im/v1/messages/{message_id}/reactions",
+            label="add reaction",
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            json={"reaction_type": {"emoji_type": emoji_type}},
+        )
+        reaction_id = ((data or {}).get("data") or {}).get("reaction_id") or ""
+        if not data or data.get("code") != 0 or not reaction_id:
+            raise RuntimeError(
+                "Feishu add reaction failed (code=%s)"
+                % (data.get("code") if isinstance(data, dict) else "invalid_response")
+            )
+        return reaction_id
+
+    async def delete_reaction(self, message_id: str, reaction_id: str) -> None:
+        data = await self._authed_request(
+            "DELETE",
+            f"{self.config.feishu_base}/im/v1/messages/{message_id}/reactions/{reaction_id}",
+            label="delete reaction",
+        )
+        if not data or data.get("code") != 0:
+            raise RuntimeError(
+                "Feishu delete reaction failed (code=%s)"
+                % (data.get("code") if isinstance(data, dict) else "invalid_response")
+            )
+
     async def reply_text(self, message_id: str, text: str) -> None:
         data = await self._authed_request(
             "POST",
@@ -210,6 +267,32 @@ class FeishuClient:
                 )
                 return None
             return data
+        return None
+
+    async def download_uploaded_image(self, image_key: str) -> bytes | None:
+        """读取本应用以 message 类型上传的图片；被删除或非本应用上传时返回 None。"""
+        for attempt in range(2):
+            token = await self.get_tenant_access_token()
+            resp = await self.http.get(
+                f"{self.config.feishu_base}/im/v1/images/{image_key}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code == 200 and not resp.headers.get("content-type", "").startswith(
+                "application/json"
+            ):
+                data = resp.content
+                return data if data and len(data) <= 20 * 1024 * 1024 else None
+            try:
+                code = resp.json().get("code")
+            except Exception:
+                code = None
+            if attempt == 0 and (
+                resp.status_code in (401, 403) or code in self._TOKEN_REFRESH_CODES
+            ):
+                await self.system_repo.delete_sys_cache("tenant_access_token")
+                continue
+            log.warning("download uploaded image failed: status=%s code=%s", resp.status_code, code)
+            return None
         return None
 
     async def upload_image(self, image_bytes: bytes) -> str | None:

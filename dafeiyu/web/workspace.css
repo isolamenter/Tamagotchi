@@ -740,6 +740,17 @@ a {
   font-size: 11px;
   margin-top: 9px;
 }
+.journal-image {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 12px;
+}
+.journal-image img {
+  display: block;
+  max-width: min(100%, 420px);
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
 .inspector {
   background: #f7faff;
   border-left: 1px solid var(--line);

@@ -115,6 +115,7 @@
               >
                 消息</button
               ><button data-view="memories" class="tab">记忆</button
+              ><button data-view="journal" class="tab">日记梦境</button
               ><button data-view="send" class="tab">发言台</button>
             </nav>
 
@@ -174,6 +175,23 @@
               <button id="older-memories" class="load-more" hidden>
                 加载更早的记忆
               </button>
+            </section>
+
+            <section
+              id="view-journal"
+              class="view memory-view"
+              aria-label="历史日记与梦境"
+              hidden
+            >
+              <div class="view-toolbar memory-toolbar">
+                <select id="journal-date" aria-label="日期"></select>
+                <span id="journal-summary" class="subtle"></span>
+              </div>
+              <div class="memory-intro">
+                <h2>她写过的日记和梦。</h2>
+                <p>只读预览：打开这里不会生成或发送任何内容。</p>
+              </div>
+              <div id="journal" class="memories"></div>
             </section>
 
             <section

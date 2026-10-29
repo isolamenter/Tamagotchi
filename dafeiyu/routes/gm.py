@@ -14,6 +14,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     UploadFile,
 )
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,6 +23,7 @@ from dafeiyu import __version__
 from dafeiyu.domain.consolidation import DiaryNotReady
 
 log = logging.getLogger("dafeiyu")
+JOURNAL_LIMIT = 200
 
 
 def require_gm(req: Request, x_gm_token: Annotated[str, Header()] = "") -> None:
@@ -89,7 +91,7 @@ async def help_info():
         "version": __version__,
         "auth": "X-GM-Token header",
         "target": "conversation_id",
-        "read": ["overview", "conversations", "state", "messages", "memories"],
+        "read": ["overview", "conversations", "state", "messages", "memories", "journal"],
         "actions": ["text", "image", "speak", "dream", "diary", "tick", "tick-all"],
     }
 
@@ -143,6 +145,67 @@ async def memories(
         conversation_id, limit, before_id=before_id
     )
     return {"memories": rows, "has_more": len(rows) == limit}
+
+
+@router.get("/journal")
+async def journal(req: Request, conversation_id: int = Query(gt=0)):
+    """Read-only: recorded diary/dream sends plus the saved diary draft; never generates."""
+    c = req.app.state.container
+    await target(req, conversation_id)
+    entries = await c.message_repo.published_journal(conversation_id, JOURNAL_LIMIT)
+    for entry in entries:
+        entry["date"] = c.state_domain.local_date_hour(entry["ts"])[0]
+    draft = await c.services.memory.identities.diary_draft(conversation_id)
+    if (
+        draft
+        and draft.get("text")
+        and not any(
+            e["kind"] == "diary" and e["date"] == draft["date"] and e["text"] == draft["text"]
+            for e in entries
+        )
+    ):
+        entries.insert(
+            0,
+            {
+                "kind": "diary",
+                "status": "draft",
+                "ready": bool(draft.get("ready")),
+                "date": draft["date"],
+                "ts": None,
+                "text": draft["text"],
+                "card": None,
+            },
+        )
+    return {"entries": entries, "limit": JOURNAL_LIMIT}
+
+
+@router.get("/journal/image")
+async def journal_image(
+    req: Request, conversation_id: int = Query(gt=0), card_id: str = Query(max_length=64)
+):
+    c = req.app.state.container
+    await target(req, conversation_id)
+    image_key = await c.message_repo.card_image_key(conversation_id, card_id)
+    if not image_key:
+        raise HTTPException(404, "这张卡片没有记录配图")
+    content = await c.feishu.download_uploaded_image(image_key)
+    if content is None:
+        raise HTTPException(502, "飞书没有返回这张配图，可能已被删除或无法读取")
+    return Response(content, media_type=image_type(content), headers={"Cache-Control": "no-store"})
+
+
+def image_type(content: bytes) -> str:
+    for magic, kind in (
+        (b"\x89PNG", "image/png"),
+        (b"\xff\xd8", "image/jpeg"),
+        (b"GIF8", "image/gif"),
+        (b"BM", "image/bmp"),
+    ):
+        if content.startswith(magic):
+            return kind
+    if content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return "image/webp"
+    return "application/octet-stream"
 
 
 @router.post("/text")

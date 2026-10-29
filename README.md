@@ -32,7 +32,7 @@ python -m uvicorn dafeiyu.app:create_app --factory --env-file .env --host 127.0.
 
 - 健康检查：`http://127.0.0.1:8000/healthz`（仅进程存活，不代表模型/飞书可用）。
 - 管理工作台：`http://127.0.0.1:8000/web`，使用 `GM_TOKEN`；读写 API 均校验 `X-GM-Token`。
-- 飞书订阅 `im.message.receive_v1`，HTTP 回调路径为 `/feishu/webhook`。真实接入还需可达的 HTTPS 地址和飞书侧消息/资源权限；仓库未提供可导入的权限清单，须按实际应用核对。
+- 飞书订阅 `im.message.receive_v1`，HTTP 回调路径为 `/feishu/webhook`。真实接入还需可达的 HTTPS 地址和飞书侧消息/资源权限；仓库未提供可导入的权限清单，须按实际应用核对。群聊称呼需 `im:chat.members:read`（或已有的 `im:chat:readonly`/`im:chat`），处理中表情需 `im:message.reactions:write_only`（或已有的 `im:message`）；缺少时分别退回“名字未知”和无表情，不影响回复。工作台读取梦境配图使用 `GET /im/v1/images/:image_key`，只能读本应用上传的图片，无需额外权限。
 
 配置由 [config.py](dafeiyu/config.py) 读取；Uvicorn 的 `--env-file` 负责加载 `.env`。人设、提示词、运行参数及语料分别在 [`config/`](config/) 的 TOML 文件中，密钥不要写入这些文件。启动会初始化风格索引并开启后台循环，使用真实配置可能产生模型调用和飞书发言。运行单 worker；多进程边界见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 

@@ -7,6 +7,14 @@ from dafeiyu.config import AppConfig
 from dafeiyu.domain.style import StyleDomain
 
 
+def spoken_name(sender_name: str, sender_open_id: str = "") -> str:
+    """A name the model may address; stored rows from before display-name lookup hold a
+    generated "群友-<open_id 后四位>" placeholder, which is not a name."""
+    if sender_open_id and sender_name == f"群友-{sender_open_id[-4:]}":
+        return ""
+    return sender_name
+
+
 class ConversationContext:
     def __init__(self, config: AppConfig):
         self.config = config
@@ -36,16 +44,12 @@ class ConversationContext:
                 ensure_ascii=False,
             )
             text = "【平台身份元数据；仅供归属，不在回复展示ID】" + metadata + "\n" + text
+        speaker = spoken_name(sender_name, sender_open_id)
+        speaker = f"群友 {speaker}" if speaker else "群友（名字未知）"
         if is_observer:
-            return self.config.user_wrap_observer_template.format(
-                sender_name=sender_name or "群友",
-                user_text=text,
-            )
-        if sender_name:
-            return self.config.user_wrap_direct_template.format(
-                sender_name=sender_name,
-                user_text=text,
-            )
+            return self.config.user_wrap_observer_template.format(speaker=speaker, user_text=text)
+        if sender_name or sender_open_id:
+            return self.config.user_wrap_direct_template.format(speaker=speaker, user_text=text)
         return self.config.user_wrap_template.format(user_text=text)
 
     def base_messages(self, system_content: str, history: list[dict]) -> list[dict]:

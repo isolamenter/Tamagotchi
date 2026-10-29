@@ -98,6 +98,29 @@ class FakeFeishu:
         self.calls = []
         self.fail = ""
         self.closed = False
+        # Display names and reactions are recorded apart from delivery calls.
+        self.member_names = {}
+        self.member_calls = []
+        self.reactions = []
+        self.uploaded_images = {}
+
+    async def chat_member_names(self, chat_id):
+        self.member_calls.append(chat_id)
+        if self.fail == "members":
+            raise RuntimeError("fixture member lookup failure")
+        return dict(self.member_names)
+
+    async def add_reaction(self, message_id, emoji_type):
+        if self.fail == "reaction":
+            raise RuntimeError("fixture reaction failure")
+        self.reactions.append(("add", message_id, emoji_type))
+        return f"reaction-{message_id}"
+
+    async def delete_reaction(self, message_id, reaction_id):
+        self.reactions.append(("delete", message_id, reaction_id))
+
+    async def download_uploaded_image(self, image_key):
+        return self.uploaded_images.get(image_key)
 
     def record(self, name, *args):
         if self.fail == name:

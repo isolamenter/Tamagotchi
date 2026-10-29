@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -10,6 +11,9 @@ from dafeiyu.domain.conversation import ConversationContext
 from dafeiyu.integrations.feishu_client import FeishuClient
 from dafeiyu.integrations.llm_client import LLMClient
 from dafeiyu.repositories.system_repo import SystemRepository
+
+MEMBER_NAMES_TTL_SEC = 600
+MEMBER_NAMES_TIMEOUT_SEC = 0.5
 
 
 @dataclass(frozen=True)
@@ -40,11 +44,32 @@ class IncomingService:
     ):
         self.context, self.system, self.feishu, self.llm = context, system, feishu, llm
 
-    async def user_name(self, open_id: str) -> str:
-        if not open_id:
-            return "群友"
-        # Global legacy name guesses are audit-only, never cross-chat identity facts.
-        return f"群友-{open_id[-4:]}"
+    async def display_name(self, chat_id: str, chat_type: str, open_id: str) -> str:
+        """Feishu group display name for presentation only; "" when unavailable.
+
+        Cached per chat, never written as an alias or personal fact. p2p chats are not
+        looked up: the member-list API is documented for groups, and "你" suffices there.
+        """
+        if not open_id or chat_type == "p2p":
+            return ""
+        key = f"chat_member_names:{chat_id}"
+        cached = await self.system.get_sys_cache(key)
+        if cached is None:
+            try:
+                async with asyncio.timeout(MEMBER_NAMES_TIMEOUT_SEC):
+                    names = await self.feishu.chat_member_names(chat_id)
+            except Exception as exc:
+                logging.getLogger("dafeiyu").warning(
+                    "chat member names unavailable: %s", type(exc).__name__
+                )
+                names = {}
+            # Failures are cached too, so a missing scope is not retried on every message.
+            await self.system.set_sys_cache(
+                key, json.dumps(names, ensure_ascii=False), MEMBER_NAMES_TTL_SEC
+            )
+        else:
+            names = json.loads(cached)
+        return names.get(open_id, "")
 
     async def caption(self, message_id: str, key: str) -> str:
         try:
@@ -78,7 +103,7 @@ class IncomingService:
             and any((m.get("id") or {}).get("open_id") == bot_id for m in mentions)
         )
         sender_id = ((event.get("sender") or {}).get("sender_id") or {}).get("open_id") or ""
-        sender_name = await self.user_name(sender_id)
+        sender_name = await self.display_name(chat_id, chat_type, sender_id)
         try:
             data = json.loads(message.get("content") or "{}")
         except (TypeError, json.JSONDecodeError):
@@ -140,8 +165,9 @@ class IncomingService:
             open_id = (mention.get("id") or {}).get("open_id") or ""
             if open_id in {bot_id, sender_id}:
                 continue
-            name = mention.get("name") or await self.user_name(open_id)
-            if f"@{name}" not in text:
+            # Only platform mention names enter content; looked-up names never become evidence.
+            name = mention.get("name") or ""
+            if name and f"@{name}" not in text:
                 text = (text + " @" + name).strip()
         if not text and not fallback:
             fallback = "empty_text"

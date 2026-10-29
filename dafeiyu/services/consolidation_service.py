@@ -6,6 +6,7 @@ import logging
 import time
 
 from dafeiyu.domain.consolidation import PROMPT, validate_result
+from dafeiyu.domain.conversation import spoken_name
 
 log = logging.getLogger("dafeiyu")
 
@@ -92,6 +93,7 @@ class ConsolidationService:
                         )
                     }
                     record.update(
+                        sender_name=spoken_name(row["sender_name"], row["sender_open_id"]),
                         mentions=json.loads(row["mentions_json"]),
                         start_offset=start,
                         legacy_unverified=row["evidence_text"] is None,

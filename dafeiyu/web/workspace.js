@@ -17,6 +17,10 @@ const state = {
   hasMessages: false,
   hasMemories: false,
   messageSignature: "",
+  journal: [],
+  journalDate: "",
+  journalSignature: "",
+  journalImages: new Map(),
   imageURL: null,
   action: "",
   actionId: null,
@@ -33,6 +37,7 @@ const sourceNames = {
   diary: "日记",
   manual: "手动发送",
 };
+const journalKinds = { diary: "日记", dream: "梦境", "": "类型未记录" };
 const roomName = (room) => room.title || `群聊 ${room.id}`;
 const currentRoom = () =>
   state.rooms.find((room) => room.id === state.selected);
@@ -141,6 +146,7 @@ function logout(message = "") {
   state.messages.clear();
   state.memories.clear();
   state.drafts.clear();
+  clearJournal();
   if (state.imageURL) URL.revokeObjectURL(state.imageURL);
   state.imageURL = null;
   state.messageSignature = "";
@@ -239,6 +245,7 @@ async function selectRoom(id) {
   state.detailRequest++;
   state.messages.clear();
   state.memories.clear();
+  clearJournal();
   state.messageSignature = "";
   state.hasMessages = state.hasMemories = false;
   $("workspace-error").hidden = true;
@@ -248,6 +255,7 @@ async function selectRoom(id) {
   restoreDraft();
   $("messages").innerHTML = '<div class="empty-content">正在载入消息…</div>';
   $("memories").innerHTML = '<div class="empty-content">正在载入记忆…</div>';
+  $("journal").innerHTML = '<div class="empty-content">正在载入日记梦境…</div>';
   document.querySelector(".inspector").classList.remove("open");
   $("toggle-info").setAttribute("aria-expanded", "false");
   await loadDetails(id, true);
@@ -331,7 +339,99 @@ function renderMemories() {
     : '<div class="empty-content"><strong>暂时没有这类记忆。</strong><span>值得留下的人和事，会慢慢记在这里。</span></div>';
   $("older-memories").hidden = !state.hasMemories;
 }
+function clearJournal() {
+  for (const image of state.journalImages.values())
+    image.then((result) => result.url && URL.revokeObjectURL(result.url));
+  state.journalImages.clear();
+  state.journal = [];
+  state.journalDate = "";
+  state.journalSignature = "";
+}
+function journalStatus(entry) {
+  if (entry.status === "draft")
+    return entry.ready
+      ? "草稿 · 当日整理已完成，没有发送记录"
+      : "草稿 · 当日整理尚未完成，没有发送记录";
+  return entry.card ? "已发送（卡片）" : "已发送";
+}
+function renderJournal() {
+  const dates = [...new Set(state.journal.map((entry) => entry.date))]
+    .sort()
+    .reverse();
+  if (!dates.includes(state.journalDate)) state.journalDate = dates[0] || "";
+  $("journal-date").innerHTML = dates
+    .map(
+      (date) =>
+        `<option value="${esc(date)}"${date === state.journalDate ? " selected" : ""}>${esc(date)}</option>`,
+    )
+    .join("");
+  $("journal-date").disabled = !dates.length;
+  $("journal-summary").textContent = dates.length
+    ? `${dates.length} 天有记录`
+    : "";
+  const entries = state.journal.filter(
+    (entry) => entry.date === state.journalDate,
+  );
+  $("journal").innerHTML = entries.length
+    ? entries
+        .map(
+          (entry) =>
+            `<article class="memory-item"><div class="memory-item-top"><span class="kind-badge ${entry.kind === "dream" ? "imagination" : entry.kind ? "" : "hearsay"}">${journalKinds[entry.kind] ?? "类型未记录"}</span><span>${esc(entry.ts ? time(entry.ts) : entry.date)}</span></div><div class="memory-who">${esc(journalStatus(entry))}</div><p class="memory-content">${esc(entry.text)}</p>${entry.card?.has_image ? `<div class="journal-image" data-card="${esc(entry.card.card_id)}">正在读取配图…</div>` : entry.kind === "dream" ? '<p class="memory-vibe">没有配图记录</p>' : ""}</article>`,
+        )
+        .join("")
+    : '<div class="empty-content"><strong>还没有日记或梦境。</strong><span>发送过的日记、梦境和当前日记草稿会出现在这里。</span></div>';
+  document.querySelectorAll("#journal [data-card]").forEach(showJournalImage);
+}
+async function fetchJournalImage(id, cardId) {
+  try {
+    const response = await fetch(
+      `/gm/journal/image?conversation_id=${id}&card_id=${encodeURIComponent(cardId)}`,
+      { headers: { "X-GM-Token": state.token }, cache: "no-store" },
+    );
+    if (!response.ok) {
+      const detail = await response.json().then(
+        (data) => data.detail,
+        () => "",
+      );
+      return {
+        error: typeof detail === "string" && detail ? detail : "读取失败",
+      };
+    }
+    return { url: URL.createObjectURL(await response.blob()) };
+  } catch {
+    return { error: "连接中断，请稍后刷新重试" };
+  }
+}
+async function showJournalImage(box) {
+  const cardId = box.dataset.card;
+  if (!state.journalImages.has(cardId))
+    state.journalImages.set(cardId, fetchJournalImage(state.selected, cardId));
+  const result = await state.journalImages.get(cardId);
+  if (!box.isConnected) return;
+  box.innerHTML = result.url
+    ? `<img src="${result.url}" alt="梦境配图">`
+    : `配图无法显示：${esc(result.error)}（只保存了飞书图片标识）`;
+}
+async function loadJournal(id) {
+  const generation = state.generation;
+  try {
+    const data = await api(`journal?conversation_id=${id}`);
+    if (id !== state.selected || generation !== state.generation) return;
+    // Polling must not re-render (and flash images) when nothing changed.
+    const signature = JSON.stringify(data.entries);
+    if (signature === state.journalSignature) return;
+    state.journalSignature = signature;
+    state.journal = data.entries;
+    renderJournal();
+  } catch (error) {
+    if (id !== state.selected || generation !== state.generation) return;
+    state.journalSignature = "";
+    $("journal").innerHTML =
+      `<div class="empty-content">${esc(error.message)}</div>`;
+  }
+}
 async function loadDetails(id, first = false) {
+  if (state.view === "journal") loadJournal(id);
   const generation = state.generation,
     request = ++state.detailRequest;
   try {
@@ -433,9 +533,10 @@ function setView(view) {
       button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   });
-  for (const name of ["messages", "memories", "send"])
+  for (const name of ["messages", "memories", "journal", "send"])
     $(`view-${name}`).hidden = view !== name;
   if (view === "messages") renderMessages({ force: true });
+  if (view === "journal" && state.selected) loadJournal(state.selected);
 }
 function renderImage() {
   if (state.imageURL) URL.revokeObjectURL(state.imageURL);
@@ -545,6 +646,10 @@ document.querySelectorAll("[data-filter]").forEach((button) =>
 );
 $("memory-search").addEventListener("input", renderMemories);
 $("memory-kind").addEventListener("change", renderMemories);
+$("journal-date").addEventListener("change", () => {
+  state.journalDate = $("journal-date").value;
+  renderJournal();
+});
 $("messages").addEventListener("scroll", () => {
   const box = $("messages");
   if (box.scrollHeight - box.scrollTop - box.clientHeight < 80)

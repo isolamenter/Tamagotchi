@@ -6,7 +6,7 @@ import logging
 import time
 
 from dafeiyu.config import AppConfig
-from dafeiyu.domain.conversation import ConversationContext
+from dafeiyu.domain.conversation import ConversationContext, spoken_name
 from dafeiyu.domain.memory import MemoryDomain
 from dafeiyu.integrations.llm_client import LLMClient
 from dafeiyu.repositories.memory_repo import MemoryRepository
@@ -119,7 +119,9 @@ class MemoryService:
                 {
                     "kind": "imagination" if row.get("source") == "dream" else "hearsay",
                     "when": "聊天记录",
-                    "who": row.get("sender_name")
+                    "who": spoken_name(
+                        row.get("sender_name") or "", row.get("sender_open_id") or ""
+                    )
                     or (self.config.character_name if row.get("role") == "assistant" else "群友"),
                     "what": ("梦境原文：" if row.get("source") == "dream" else "聊天原文：")
                     + (row.get("content") or "").strip(),
@@ -194,6 +196,13 @@ class MemoryService:
                 - len(self.config.compress_prompt)
                 - len(self.config.compress_user_message_template.format(chunk=""))
             )
+            to_compress = [
+                {
+                    **row,
+                    "sender_name": spoken_name(row["sender_name"], row["sender_open_id"]),
+                }
+                for row in to_compress
+            ]
             chunk = json.dumps(to_compress, ensure_ascii=False)
             while len(to_compress) > 1 and len(chunk) > budget:
                 to_compress.pop()

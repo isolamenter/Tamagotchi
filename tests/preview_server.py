@@ -87,6 +87,26 @@ def create_preview():
                         now - i * 3600,
                     ),
                 )
+        # Recorded diary/dream sends for the journal tab; one image key is unreadable on purpose.
+        for index, (source, text, image_key) in enumerate(
+            [
+                ("dream", "梦见一座白饭山，尾巴差点变成饭勺。", "preview-dream"),
+                ("diary", "昨天大家一起追超时问题，我在旁边也跟着紧张。", ""),
+                ("dream", "梦里在海底开了一家只卖白饭的小店。", "preview-missing"),
+            ]
+        ):
+            sent = now - 3600 - index * 86400
+            conn.execute(
+                "INSERT INTO published_cards VALUES(?,?,?,?,?,?)",
+                (f"preview-card-{index}", 1, f"card-message-{index}", text, image_key, sent),
+            )
+            conn.execute(
+                "INSERT INTO messages(conversation_id,role,content,ts,source) VALUES(1,'assistant',?,?,?)",
+                (text, sent + 0.01, source),
+            )
+    c.feishu.uploaded_images["preview-dream"] = (
+        Path(__file__).parents[1] / "dafeiyu/web/character.png"
+    ).read_bytes()
     with patch("dafeiyu.app.build_container", return_value=c):
         app = create_app(c.config)
     app.state.preview_temporary = temporary

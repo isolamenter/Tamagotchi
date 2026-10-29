@@ -6,6 +6,8 @@ import time
 
 from dafeiyu.repositories.sqlite import Database
 
+CARD_LINK_WINDOW_SEC = 60
+
 
 class MessageRepository:
     def __init__(self, db: Database):
@@ -159,3 +161,71 @@ class MessageRepository:
 
     async def set_meme_tag(self, message_id: int, tag: str) -> None:
         await asyncio.to_thread(self._set_meme_tag, message_id, tag)
+
+    def _published_journal(self, conversation_id: int, limit: int) -> list[dict]:
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT id, source, content, ts FROM messages WHERE conversation_id=? "
+                "AND role='assistant' AND source IN ('diary','dream') ORDER BY id DESC LIMIT ?",
+                (conversation_id, limit),
+            ).fetchall()
+            cards = conn.execute(
+                "SELECT card_id, content, image_key, created_at FROM published_cards "
+                "WHERE conversation_id=? ORDER BY created_at",
+                (conversation_id,),
+            ).fetchall()
+        # DeliveryService writes the card row, then the message row, for one successful send;
+        # a card links only to the message with identical text recorded right after it.
+        unmatched = [dict(card) for card in cards]
+        entries = []
+        for row in reversed(rows):
+            card = next(
+                (
+                    c
+                    for c in reversed(unmatched)
+                    if c["content"] == row["content"]
+                    and 0 <= row["ts"] - c["created_at"] <= CARD_LINK_WINDOW_SEC
+                ),
+                None,
+            )
+            if card is not None:
+                unmatched.remove(card)
+            entries.append(
+                {
+                    "kind": row["source"],
+                    "status": "sent",
+                    "ts": row["ts"],
+                    "text": row["content"],
+                    "card": card,
+                }
+            )
+        oldest = rows[-1]["ts"] if len(rows) == limit else float("-inf")
+        # A recorded card is a confirmed send even if the message row is missing; its kind
+        # (diary or dream) was never stored, so it stays unknown.
+        entries += [
+            {"kind": "", "status": "sent", "ts": c["created_at"], "text": c["content"], "card": c}
+            for c in unmatched
+            if c["created_at"] >= oldest
+        ]
+        for entry in entries:
+            if entry["card"] is not None:
+                entry["card"] = {
+                    "card_id": entry["card"]["card_id"],
+                    "has_image": bool(entry["card"]["image_key"]),
+                }
+        entries.sort(key=lambda e: e["ts"], reverse=True)
+        return entries
+
+    async def published_journal(self, conversation_id: int, limit: int) -> list[dict]:
+        return await asyncio.to_thread(self._published_journal, conversation_id, limit)
+
+    def _card_image_key(self, conversation_id: int, card_id: str) -> str:
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT image_key FROM published_cards WHERE conversation_id=? AND card_id=?",
+                (conversation_id, card_id),
+            ).fetchone()
+        return row["image_key"] if row else ""
+
+    async def card_image_key(self, conversation_id: int, card_id: str) -> str:
+        return await asyncio.to_thread(self._card_image_key, conversation_id, card_id)

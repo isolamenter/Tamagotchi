@@ -15,6 +15,8 @@ identity_resolve_timeout_sec = 8
 [reply]
 # 连续 @ 消息合并窗口（秒）。在该窗口内到达的同一群连续 @ 消息会合并处理，不漏答。
 debounce_sec = 1.5
+# 私聊/@ 消息开始生成时加上的飞书表情回应（emoji_type），回复完成或失败后移除；留空关闭。
+processing_reaction = "Typing"
 
 [meme]
 # 候选复核超时后只发文字；梗图没有时间冷却或回复间隔。

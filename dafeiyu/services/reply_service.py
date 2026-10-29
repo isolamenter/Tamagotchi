@@ -21,6 +21,7 @@ from dafeiyu.services.observer_service import ObserverService
 from dafeiyu.services.style_service import StyleService
 
 log = logging.getLogger("dafeiyu")
+REACTION_TIMEOUT_SEC = 2
 
 
 class ReplyService:
@@ -50,13 +51,9 @@ class ReplyService:
             autonomous,
         )
 
-    async def generate(
-        self, conversation_id: int, items: list[IncomingMessage], current_ids: set[int]
-    ) -> GeneratedReply:
-        web_search = self.config.llm_provider == "gemini"
-        history, _ = await self.conversations.load_conversation_context(conversation_id)
-        history = [row for row in history if row["id"] not in current_ids]
-        query = "\n".join(item.text for item in items)
+    async def _recall(
+        self, conversation_id: int, items: list[IncomingMessage], history: list[dict], query: str
+    ) -> str:
         subjects = {item.sender_open_id for item in items if item.sender_open_id}
         subjects.update(m["open_id"] for item in items for m in item.mentions)
         resolution = ""
@@ -83,13 +80,32 @@ class ReplyService:
         recall = await self.memory.build_recall_block(
             conversation_id, query=query, subject_ids=subjects
         )
-        recall += resolution
-        style_text, example_ids = await self.style.render_examples_block(
-            query,
-            scope="reply",
-            history=history,
-            exclude_ids=self.runtime.last_style_ids.get(conversation_id, set()),
+        return recall + resolution
+
+    async def generate(
+        self, conversation_id: int, items: list[IncomingMessage], current_ids: set[int]
+    ) -> GeneratedReply:
+        web_search = self.config.llm_provider == "gemini"
+        history, _ = await self.conversations.load_conversation_context(conversation_id)
+        history = [row for row in history if row["id"] not in current_ids]
+        query = "\n".join(item.text for item in items)
+        # Style examples are independent of who is being discussed; recall is not.
+        style_task = asyncio.create_task(
+            self.style.render_examples_block(
+                query,
+                scope="reply",
+                history=history,
+                exclude_ids=self.runtime.last_style_ids.get(conversation_id, set()),
+            )
         )
+        recall_task = asyncio.create_task(self._recall(conversation_id, items, history, query))
+        try:
+            recall, (style_text, example_ids) = await asyncio.gather(recall_task, style_task)
+        except BaseException:
+            style_task.cancel()
+            recall_task.cancel()
+            await asyncio.gather(recall_task, style_task, return_exceptions=True)
+            raise
         messages = self.context.base_messages(self.config.system_prompt + recall, history)
         messages.append(
             {
@@ -196,7 +212,42 @@ class ReplyService:
                 await self.observer.flush_observer_buffer(conversation_id)
                 await self._reply_batch(conversation_id, items)
 
+    async def _acknowledge(self, message_id: str) -> str:
+        emoji = self.config.settings.get("reply", {}).get("processing_reaction", "")
+        if not emoji or not message_id:
+            return ""
+        try:
+            async with asyncio.timeout(REACTION_TIMEOUT_SEC):
+                return await self.delivery.feishu.add_reaction(message_id, emoji)
+        except Exception as exc:
+            log.warning("processing reaction unavailable: %s", type(exc).__name__)
+            return ""
+
+    async def _clear_acknowledgement(self, message_id: str, task: asyncio.Task) -> None:
+        reaction_id = await task
+        if not reaction_id:
+            return
+        try:
+            async with asyncio.timeout(REACTION_TIMEOUT_SEC):
+                await self.delivery.feishu.delete_reaction(message_id, reaction_id)
+        except Exception as exc:
+            log.warning("processing reaction cleanup failed: %s", type(exc).__name__)
+
     async def _reply_batch(self, conversation_id: int, items: list[IncomingMessage]) -> None:
+        # Only messages awaiting generation show a "working" reaction; it never gates the reply.
+        acks = [
+            (item.message_id, asyncio.create_task(self._acknowledge(item.message_id)))
+            for item in items
+            if not item.fallback
+        ]
+        try:
+            await self._reply_batch_inner(conversation_id, items)
+        finally:
+            # Cleanup is tracked for shutdown but must not hold the conversation lock.
+            for mid, task in acks:
+                self.runtime.spawn(self._clear_acknowledgement(mid, task))
+
+    async def _reply_batch_inner(self, conversation_id: int, items: list[IncomingMessage]) -> None:
         current_ids = set()
         for item in items:
             if item.text:

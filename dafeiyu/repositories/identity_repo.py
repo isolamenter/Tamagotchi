@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+from dafeiyu.domain.conversation import spoken_name
 from dafeiyu.repositories.sqlite import Database
 
 HUMAN_SOURCES = (
@@ -102,21 +103,24 @@ class IdentityRepository:
 
         await asyncio.to_thread(write)
 
-    async def diary(self, cid: int, date: str) -> dict | None:
-        """Only the current day's completed snapshot may be published."""
+    async def diary_draft(self, cid: int) -> dict | None:
+        """The single saved draft (latest consolidation date), whatever its readiness."""
 
         def read():
             with self.db.connect() as conn:
                 row = conn.execute(
                     "SELECT val FROM sys_cache WHERE key=?", (f"daily_diary:{cid}",)
                 ).fetchone()
-            if row:
-                value = json.loads(row["val"])
-                if value["date"] == date and value["ready"] and value["text"]:
-                    return value
-            return None
+            return json.loads(row["val"]) if row else None
 
         return await asyncio.to_thread(read)
+
+    async def diary(self, cid: int, date: str) -> dict | None:
+        """Only the current day's completed snapshot may be published."""
+        value = await self.diary_draft(cid)
+        if value and value["date"] == date and value["ready"] and value["text"]:
+            return value
+        return None
 
     async def commit(
         self,
@@ -310,6 +314,7 @@ class IdentityRepository:
         ]
         for row in recent:
             row["content"] = row["content"][:500]
+            row["sender_name"] = spoken_name(row["sender_name"], row["sender_open_id"])
         candidates = set(fallback)
         candidates.update(r["subject_open_id"] for r in aliases)
         candidates.update(r["sender_open_id"] for r in recent if r["sender_open_id"])

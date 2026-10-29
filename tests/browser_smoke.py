@@ -68,6 +68,24 @@ async def main():
         await expect(page.locator("#memories")).to_contain_text("梦里的事")
         await page.locator("#memory-kind").select_option("all")
         await page.screenshot(path=str(output / "memories.png"), full_page=True)
+        # The journal is read-only: browsing dates and images issues no POST.
+        posts = []
+
+        def record_write(request):
+            if request.method != "GET":
+                posts.append(request.url)
+
+        page.on("request", record_write)
+        await page.locator('[data-view="journal"]').click()
+        await expect(page.locator("#journal .memory-item")).to_have_count(2)
+        await expect(page.locator("#journal")).to_contain_text("没有发送记录")
+        await expect(page.locator("#journal .journal-image img")).to_be_visible()
+        await page.screenshot(path=str(output / "journal.png"), full_page=True)
+        dates = await page.locator("#journal-date option").all_inner_texts()
+        await page.locator("#journal-date").select_option(dates[-1])
+        await expect(page.locator("#journal")).to_contain_text("配图无法显示")
+        assert not posts, posts
+        page.remove_listener("request", record_write)
 
         # Slow old requests must not repaint a newly selected conversation.
         async def delayed(route):
@@ -86,7 +104,7 @@ async def main():
         await page.locator('[data-room="1"]').click()
         await expect(page.locator(".message-row")).to_have_count(60)
         await page.locator("#older-messages").click()
-        await expect(page.locator(".message-row")).to_have_count(92)
+        await expect(page.locator(".message-row")).to_have_count(95)
         # Every legacy operation remains reachable, with an explicit target.
         await page.locator('[data-action="speak"]').click()
         await expect(page.locator("#action-target")).to_contain_text("摸鱼研究所")
@@ -136,7 +154,7 @@ async def main():
                 {
                     "browser_checks": "passed",
                     "page_errors": errors,
-                    "screenshots": 5,
+                    "screenshots": 6,
                     "data": "synthetic; isolated database and fake integrations",
                 }
             )
