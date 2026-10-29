@@ -42,7 +42,10 @@ class IdentityRepository:
                 if (
                     state["until_id"] >= state["target_id"]
                     or state["calls_today"] >= budget
-                    or now - state["last_attempt"] < retry
+                    or (
+                        state["last_attempt"] > state["last_success"]
+                        and now - state["last_attempt"] < retry
+                    )
                 ):
                     return None
                 conn.execute(

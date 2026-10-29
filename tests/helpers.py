@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from dafeiyu.app import build_container
 from dafeiyu.config import load_config
+from dafeiyu.integrations.feishu_client import DeliveryRejected
 
 
 def evidence(mid, quote, relation="self"):
@@ -124,6 +125,8 @@ class FakeFeishu:
 
     def record(self, name, *args):
         if self.fail == name:
+            if name in {"card", "text"}:
+                raise DeliveryRejected("fixture delivery rejected")
             raise RuntimeError("fixture delivery failure")
         self.calls.append((name, *args))
 

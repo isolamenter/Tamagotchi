@@ -63,6 +63,9 @@ timezone_offset_hours = 8.0
 quiet_weekends = false
 # 梦境/日记窗口补发宽限（秒）
 scheduled_grace_sec = 3600
+# 定时内容评估与正文准备超时；生图另受 card.image_timeout_sec 限制。
+scheduled_evaluation_timeout_sec = 15
+scheduled_generation_timeout_sec = 90
 # 触发主动发言评估所需的最少新人类旁听消息数
 proactive_min_new_msgs = 1
 # 对外发言只考虑仍在进行的讨论，不把维护心跳长度当活跃证据。
@@ -87,5 +90,6 @@ max_messages = 300
 max_context_chars = 64000
 max_output_tokens = 6000
 max_calls_per_day = 4
+# 失败/中断的退避；成功批次可在下一次心跳继续。
 retry_sec = 900
 timeout_sec = 90

@@ -307,4 +307,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         raise ValueError("Identity routing timeout must be in (0,30]")
     if not 0 < float(autonomous_config.get("fresh_activity_sec", 180)) <= 3600:
         raise ValueError("Fresh activity window must be in (0,3600]")
+    for key in ("scheduled_evaluation_timeout_sec", "scheduled_generation_timeout_sec"):
+        if not 0 < float(autonomous_config[key]) <= 300:
+            raise ValueError("Invalid scheduled timeout")
     return config

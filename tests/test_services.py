@@ -225,7 +225,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(self.c.llm.calls)
         state["last_reply_ts"] = time.time()
-        self.assertTrue(self.c.services.autonomous._cooling_down(state, time.time()))
+        self.assertTrue(self.c.services.autonomous.cooling_down(state, time.time()))
 
     async def test_evaluator_sees_own_reply_and_honors_unanswered_topic(self):
         for role, text in [

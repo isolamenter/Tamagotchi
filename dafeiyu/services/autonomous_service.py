@@ -6,7 +6,6 @@ import logging
 import time
 
 from dafeiyu.config import AppConfig
-from dafeiyu.domain.consolidation import DiaryNotReady
 from dafeiyu.domain.conversation import ConversationContext
 from dafeiyu.domain.reply import GeneratedReply
 from dafeiyu.domain.state import StateDomain
@@ -49,22 +48,10 @@ class AutonomousService:
         self.llm, self.style, self.delivery = llm, style, delivery
         self.consolidation = None
         self.consolidation_tasks = {}
+        self.conversation_tasks = {}
+        self.scheduled = None
 
-    def scheduled_event_due(self, state: dict, now: float) -> tuple[dict, str] | None:
-        if self.state_domain.is_weekend_rest(now):
-            return None
-        local = self.state_domain.local_time(now)
-        date = time.strftime("%Y-%m-%d", local)
-        seconds = local.tm_hour * 3600 + local.tm_min * 60 + local.tm_sec
-        for event in self.config.scheduled_events:
-            if (
-                0 <= seconds - event["hour"] * 3600 <= self.config.scheduled_grace_sec
-                and state[event["state_key"]] != date
-            ):
-                return event, date
-        return None
-
-    def _cooling_down(self, state: dict, now: float) -> bool:
+    def cooling_down(self, state: dict, now: float) -> bool:
         delay = (
             self.config.proactive_cooldown_sec
             if state["last_proactive_answered"]
@@ -75,18 +62,14 @@ class AutonomousService:
             or now - state["last_reply_ts"] < self.config.proactive_reply_cooldown_sec
         )
 
-    async def _speak(
+    async def prepare_reply(
         self,
         conversation_id: int,
-        chat_id: str,
         prompt: str,
         query: str,
         *,
-        source: str,
         max_tokens: int,
-        extra_state: dict,
-        gen_image: bool = False,
-    ) -> tuple[str, dict]:
+    ) -> tuple[GeneratedReply, frozenset[str]]:
         history, _ = await self.conversations.load_conversation_context(conversation_id)
         recall = await self.memory.build_recall_block(conversation_id, query=query, k_recent=3)
         examples, ids = await self.style.render_examples_block(
@@ -117,28 +100,30 @@ class AutonomousService:
                 temperature=self.config.autonomous_temperature,
             )
         )
-        image_key = ""
-        if gen_image and self.config.image_model:
-            try:
-                image = await asyncio.wait_for(
-                    self.llm.generate_image(reply.image_prompt or reply.text),
-                    timeout=self.config.card_image_timeout_sec,
-                )
-                if image:
-                    image_key = await self.delivery.feishu.upload_image(image) or ""
-            except Exception as exc:
-                log.warning("dream image generation failed: %s", type(exc).__name__)
-        return await self._send_reply(
+        return reply, frozenset(ids)
+
+    async def _speak(
+        self,
+        conversation_id: int,
+        chat_id: str,
+        prompt: str,
+        query: str,
+        *,
+        source: str,
+        max_tokens: int,
+        extra_state: dict,
+    ) -> tuple[str, dict]:
+        reply, ids = await self.prepare_reply(conversation_id, prompt, query, max_tokens=max_tokens)
+        return await self.send_reply(
             conversation_id,
             chat_id,
             reply,
             source=source,
             extra_state=extra_state,
-            example_ids=frozenset(ids),
-            image_key=image_key,
+            example_ids=ids,
         )
 
-    async def _send_reply(
+    async def send_reply(
         self,
         conversation_id: int,
         chat_id: str,
@@ -173,27 +158,24 @@ class AutonomousService:
             self.runtime.spawn(self.memory.compress_conversation_memory(conversation_id))
         return reply.text, state
 
-    async def evaluate_proactive_speaking(
-        self, conversation_id: int, state: dict, *, scheduled_context: str = ""
-    ) -> tuple[str, str] | None:
+    async def fresh_activity(self, conversation_id: int, state: dict, until_id: int, now: float):
         rows = await self.messages.recent_messages(conversation_id, limit=15)
         last_activity = max(state["last_reply_ts"], state["last_proactive_ts"])
-        status = await self.conversations.evaluation_status(conversation_id)
-        now = time.time()
-        if now - status["last_attempt"] < 60:
-            return None
         fresh = [
             r
             for r in rows
             if r["role"] == "user"
-            and r["id"] > status["until_id"]
+            and r["id"] > until_id
             and r["ts"] > last_activity
             and 0
             <= now - r["ts"]
             <= float(self.config.settings.get("autonomous", {}).get("fresh_activity_sec", 180))
         ]
-        if len(fresh) < self.config.proactive_min_new_msgs:
-            return None
+        return rows, fresh if len(fresh) >= self.config.proactive_min_new_msgs else []
+
+    async def participation_decision(
+        self, rows: list[dict], state: dict, *, scheduled_context: str = ""
+    ) -> tuple[str, str] | None:
         lines = [
             self.context.wrap_user(
                 r["content"],
@@ -206,55 +188,68 @@ class AutonomousService:
             else self.config.character_name + ": " + r["content"]
             for r in rows[-8:]
         ]
+        data = json.loads(
+            await self.llm.chat_json(
+                [
+                    {
+                        "role": "system",
+                        "content": self.config.proactive_eval_prompt,
+                    },
+                    {
+                        "role": "user",
+                        "content": "最近群聊：\n"
+                        + "\n".join(lines)
+                        + "\n上次主动话题："
+                        + state["last_proactive_topic"]
+                        + "\n上次主动话题是否已被人回应："
+                        + str(state["last_proactive_answered"])
+                        + (
+                            "\n【本次拟发布的定时内容】\n"
+                            + scheduled_context
+                            + "\n只判断这项内容是否适合此刻发布；适合普通接话不代表适合发布它。"
+                            if scheduled_context
+                            else ""
+                        )
+                        + "\n若上次未获回应，避免语义重复；不要只比话题字面。只有新消息提供自然参与价值才说话。",
+                    },
+                ],
+                max_tokens=250,
+                temperature=0.3,
+            )
+        )
+        if not isinstance(data, dict) or type(data.get("should_speak")) is not bool:
+            raise ValueError("invalid participation decision")
+        if data["should_speak"] and (
+            not isinstance(data.get("reason"), str) or not isinstance(data.get("topic"), str)
+        ):
+            raise ValueError("invalid participation reason/topic")
+        if data["should_speak"] is not True:
+            return None
+        reason, topic = (
+            str(data.get("reason") or "").strip(),
+            str(data.get("topic") or "").strip(),
+        )
+        if not reason or not topic:
+            raise ValueError("empty participation reason/topic")
+        return reason, topic
+
+    async def evaluate_proactive_speaking(
+        self, conversation_id: int, state: dict
+    ) -> tuple[str, str] | None:
+        status = await self.conversations.evaluation_status(conversation_id)
+        now = time.time()
+        if now - status["last_attempt"] < 60:
+            return None
+        rows, fresh = await self.fresh_activity(conversation_id, state, status["until_id"], now)
+        if not fresh:
+            return None
         await self.conversations.record_evaluation(conversation_id, None, now)
         try:
-            data = json.loads(
-                await self.llm.chat_json(
-                    [
-                        {
-                            "role": "system",
-                            "content": self.config.proactive_eval_prompt,
-                        },
-                        {
-                            "role": "user",
-                            "content": "最近群聊：\n"
-                            + "\n".join(lines)
-                            + "\n上次主动话题："
-                            + state["last_proactive_topic"]
-                            + "\n上次主动话题是否已被人回应："
-                            + str(state["last_proactive_answered"])
-                            + (
-                                "\n【本次拟发布的定时内容】\n"
-                                + scheduled_context
-                                + "\n只判断这项内容是否适合此刻发布；适合普通接话不代表适合发布它。"
-                                if scheduled_context
-                                else ""
-                            )
-                            + "\n若上次未获回应，避免语义重复；不要只比话题字面。只有新消息提供自然参与价值才说话。",
-                        },
-                    ],
-                    max_tokens=250,
-                    temperature=0.3,
-                )
-            )
-            if not isinstance(data, dict) or type(data.get("should_speak")) is not bool:
-                raise ValueError("invalid participation decision")
-            if data["should_speak"] and (
-                not isinstance(data.get("reason"), str) or not isinstance(data.get("topic"), str)
-            ):
-                raise ValueError("invalid participation reason/topic")
+            decision = await self.participation_decision(rows, state)
             await self.conversations.record_evaluation(
                 conversation_id, max(r["id"] for r in fresh), now
             )
-            if data["should_speak"] is not True:
-                return None
-            reason, topic = (
-                str(data.get("reason") or "").strip(),
-                str(data.get("topic") or "").strip(),
-            )
-            if not reason or not topic:
-                return None
-            return reason, topic
+            return decision
         except Exception as exc:
             log.warning(
                 "interjection evaluation failed conversation=%d error=%s",
@@ -286,61 +281,10 @@ class AutonomousService:
             await self.observer.flush_observer_buffer(conversation_id)
             return await self._proactive_locked(conversation_id, chat_id, trigger, topic)
 
-    async def _scheduled_locked(
-        self,
-        conversation_id: int,
-        chat_id: str,
-        event: dict,
-        date: str,
-        mark_date: bool,
-    ) -> tuple[str, dict]:
-        if event["kind"] == "diary":
-            diary = await self.consolidation.identities.diary(conversation_id, date)
-            if diary is None:
-                raise DiaryNotReady("今天的每日整理尚未产生日记，或没有合适内容")
-            return await self._send_reply(
-                conversation_id,
-                chat_id,
-                GeneratedReply(diary["text"], "normal"),
-                source="diary",
-                extra_state={event["state_key"]: date} if mark_date else {},
-            )
-        prompt = self.config.scheduled_event_prompt.format(
-            event_name=event["name"],
-            scheduled_hour=event["hour"],
-            instruction=event["instruction"],
-        )
-        prompt += "\n" + event.get("extra_prompt", "")
-        return await self._speak(
-            conversation_id,
-            chat_id,
-            prompt,
-            event["instruction"],
-            source=event["kind"],
-            max_tokens=self.config.scheduled_max_tokens,
-            extra_state={event["state_key"]: date} if mark_date else {},
-            gen_image=bool(event.get("gen_image")),
-        )
-
-    async def scheduled_speak(
-        self,
-        conversation_id: int,
-        chat_id: str,
-        event: dict,
-        date_key: str,
-        *,
-        mark_date: bool = True,
-    ) -> tuple[str, dict]:
-        async with self.runtime.chat_lock(conversation_id):
-            await self.observer.flush_observer_buffer(conversation_id)
-            return await self._scheduled_locked(
-                conversation_id, chat_id, event, date_key, mark_date
-            )
-
     async def _maybe_interject_locked(
         self, conversation_id: int, chat_id: str, state: dict, now: float
     ) -> bool:
-        if self.state_domain.is_weekend_rest(now) or self._cooling_down(state, now):
+        if self.state_domain.is_weekend_rest(now) or self.cooling_down(state, now):
             return False
         evaluation = await self.evaluate_proactive_speaking(conversation_id, state)
         if evaluation is None or self.runtime.chat_pending_messages.get(conversation_id):
@@ -354,6 +298,9 @@ class AutonomousService:
             or self.runtime.chat_lock(conversation_id).locked()
         ):
             return False
+        handled, sent = await self.scheduled.maybe_publish(conversation_id, chat_id)
+        if handled:
+            return sent
         async with self.runtime.chat_lock(conversation_id):
             state = await self.conversations.load_conversation_state(conversation_id)
             return await self._maybe_interject_locked(conversation_id, chat_id, state, time.time())
@@ -370,38 +317,12 @@ class AutonomousService:
         if run_internal and self.consolidation is not None:
             await self.observer.flush_observer_buffer(conversation_id)
             await self.consolidation.maybe_consolidate(conversation_id, now)
-        if (
-            self.runtime.chat_pending_messages.get(conversation_id)
-            or self.runtime.chat_lock(conversation_id).locked()
-        ):
-            return False
-        async with self.runtime.chat_lock(conversation_id):
-            await self.observer.flush_observer_buffer(conversation_id)
-            state = await self.conversations.load_conversation_state(conversation_id)
-            due = self.scheduled_event_due(state, now)
-            scheduled_context = ""
-            if due and due[0]["kind"] == "diary":
-                diary = await self.consolidation.identities.diary(conversation_id, due[1])
-                if diary is None:
-                    due = None  # A pending/empty diary does not block ordinary conversation.
-                else:
-                    scheduled_context = "日记：" + diary["text"]
-            if due:
-                event, date = due
-                if event["kind"] == "dream":
-                    scheduled_context = "梦境分享：" + event["instruction"]
-                if (
-                    self._cooling_down(state, now)
-                    or await self.evaluate_proactive_speaking(
-                        conversation_id, state, scheduled_context=scheduled_context
-                    )
-                    is None
-                ):
-                    # Skipped is not sent: fresh activity may qualify later inside the grace window.
-                    return False
-                await self._scheduled_locked(conversation_id, chat_id, event, date, True)
-                return True
-            return await self._maybe_interject_locked(conversation_id, chat_id, state, now)
+        await self.observer.flush_observer_buffer(conversation_id)
+        return await self.maybe_interject(conversation_id, chat_id)
+
+    async def _consolidate_and_publish(self, conversation_id: int, chat_id: str) -> None:
+        if await self.consolidation.maybe_consolidate(conversation_id):
+            await self.scheduled.maybe_publish(conversation_id, chat_id)
 
     async def tick_all_conversations(self) -> None:
         await self.system.clean_old_events()
@@ -412,9 +333,13 @@ class AutonomousService:
                 task = self.consolidation_tasks.get(cid)
                 if self.consolidation is not None and (task is None or task.done()):
                     self.consolidation_tasks[cid] = self.runtime.spawn(
-                        self.consolidation.maybe_consolidate(cid)
+                        self._consolidate_and_publish(cid, row["chat_id"])
                     )
-                await self.tick_conversation(cid, row["chat_id"], run_internal=False)
+                task = self.conversation_tasks.get(cid)
+                if task is None or task.done():
+                    self.conversation_tasks[cid] = self.runtime.spawn(
+                        self.tick_conversation(cid, row["chat_id"], run_internal=False)
+                    )
             except Exception as exc:
                 log.error(
                     "autonomous task failed conversation=%d error=%s",

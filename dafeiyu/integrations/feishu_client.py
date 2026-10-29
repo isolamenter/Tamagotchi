@@ -16,6 +16,10 @@ from dafeiyu.runtime import RuntimeState
 log = logging.getLogger("dafeiyu")
 
 
+class DeliveryRejected(RuntimeError):
+    """The platform explicitly rejected a message; no delivery took place."""
+
+
 class FeishuClient:
     # 飞书 tenant_access_token 失效/过期的业务码，命中则刷新缓存重试一次。
     _TOKEN_EXPIRED_CODES = {99991661, 99991663, 99991668}
@@ -212,6 +216,9 @@ class FeishuClient:
                 "content": json.dumps({"text": text}, ensure_ascii=False),
             },
         )
+        if isinstance(data, dict) and data.get("code") not in (None, 0):
+            log.error("message rejected (code=%s)", data["code"])
+            raise DeliveryRejected("Feishu message rejected")
         if not data or data.get("code") != 0:
             log.error(
                 "send failed (code=%s)",
@@ -349,6 +356,9 @@ class FeishuClient:
                 "content": json.dumps(card, ensure_ascii=False),
             },
         )
+        if isinstance(data, dict) and data.get("code") not in (None, 0):
+            log.error("message rejected (code=%s)", data["code"])
+            raise DeliveryRejected("Feishu message rejected")
         if not data or data.get("code") != 0:
             log.error(
                 "send card failed (code=%s)",

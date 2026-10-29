@@ -8,7 +8,7 @@
 | --- | --- |
 | [`app.py`](dafeiyu/app.py)、[`config.py`](dafeiyu/config.py) | 组合根：读取环境/TOML、创建数据库与服务、注册路由、管理生命周期。导入模块本身不开库，创建应用时才初始化。 |
 | [`routes/`](dafeiyu/routes/) | 飞书回调、健康检查、管理鉴权/API、静态工作台入口；调用容器，不承担模型业务编排。 |
-| [`services/`](dafeiyu/services/) | `incoming` 归一化输入；`reply` 直接回复；`observer` 批量旁听；`autonomous` 调度；`consolidation` 整理记忆并生成日记草稿；`memory` 压缩/人物定向召回；`style` 选例；`delivery` 对外发送与发送后记录。 |
+| [`services/`](dafeiyu/services/) | `incoming` 归一化输入；`reply` 直接回复；`observer` 批量旁听；`autonomous` 编排周期/事件检查与普通插话；`scheduled` 独立调度日记/梦境及持久化准备、发送状态；`consolidation` 整理记忆并生成日记草稿；`memory` 压缩/人物定向召回；`style` 选例；`delivery` 对外发送与发送后记录。 |
 | [`domain/`](dafeiyu/domain/) | 上下文包装、回复解析、状态规则、记忆格式/向量运算、风格与梗图选择规则；不直接访问飞书或数据库。 |
 | [`repositories/`](dafeiyu/repositories/) | 会话、消息、记忆/向量、风格索引、系统缓存的 SQL 与事务；表结构见 `schema.sql`。 |
 | [`integrations/`](dafeiyu/integrations/) | `FeishuClient` 封装飞书 API；`LLMClient` 封装聊天、embedding、识图和生图的 provider 差异。 |
@@ -24,11 +24,15 @@
 3. **记忆与日记**：较旧消息经压缩形成未归属上下文卡片；另一路每日先落库旁听缓冲，再按原始消息 ID/分段偏移整理身份别名、带主体/报告人/证据的个人卡片与日记草稿 → 同事务保存 → 后台生成记忆向量。召回按真实主体与主题选择，日记只供后续发布。原文、处理位置、卡片和向量是不同数据层，详见[记忆规格](docs/specs/memory.md)。
 4. **管理**：浏览器携带独立 `X-GM-Token` → GM 路由校验明确的 `conversation_id` → 查询 repository 或调用相同发送/主动服务。界面是管理工具，不是独立聊天后端。日记梦境预览（`/gm/journal`）只读：已发送项来自发送成功后才写入的 `messages`（source 为 diary/dream），配图按“同会话、同正文、60 秒内先写入”关联 `published_cards`，未关联的卡片保留但类型标为未记录；未发送项只有 `daily_diary` 中最近一天的草稿。配图通过飞书按 image_key 实时读取，读不到时如实提示，不在本地另存图片。
 
-人物数据没有第二套事实副本：`identity_aliases` 保存按会话的别名断言历史，`memories` 保存个人信息键/证据/置信度/过期与 supersession。`consolidation_state` 管理独立固定快照水位、长消息偏移和每日调用预算；`proactive_evaluations` 记录包括“不说话”在内的评估水位。它们不混进对话状态的全量读改写。
+人物数据没有第二套事实副本：`identity_aliases` 保存按会话的别名断言历史，`memories` 保存个人信息键/证据/置信度/过期与 supersession。`consolidation_state` 管理独立固定快照水位、长消息偏移和每日调用预算；`proactive_evaluations` 仅记录普通插话（包括“不说话”）的评估水位；`sys_cache` 的 `scheduled:<conversation_id>:<kind>` 分别保存日记、梦境最近一天的评估水位、尝试时间、正文/配图和发送状态。它们不混进对话状态的全量读改写。
 
 整理使用独立会话锁与全局单个整理调用并发槽，不持 `chat_lock`。同一调用返回别名、记忆和可为空的日记，先整批引用/类型校验，再在一个 SQLite 事务提交别名、个人事实版本、日记草稿与处理位置；向量异步失败不撤销事实，既有 reembed 可补建。日记复用 `sys_cache` 的 `daily_diary:<conversation_id>` 保存最近一日的日期、正文、证据与快照完成标记，不改 schema。分批中有新候选就替换草稿，为空则保留同日已有候选；固定快照全部完成后才可发送。
 
-周期循环仍并行排队整理与发言检查，但日记只读取当日已完成快照的保存结果，发送阶段不重新生成。没有可发送日记时普通参与仍独立评估。日记与事实共同使用原始人类消息，日记文字不进入人物证据；旧积压可整理记忆，但不作为今日日记素材。
+周期循环分别跟踪每会话的整理任务与发言任务，不再串行等待其他会话的完整发言链路；整理成功后立即检查日记发布，成功批次不受失败退避间隔限制。日记只读取当日已完成快照的保存结果，发送阶段不重新生成。事件路径也先检查定时内容；没有可发送日记或语义否决时普通参与仍独立评估。
+
+`ScheduledService` 按会话/类型串行任务，梦境昂贵准备全局限并发 1，等待后复查活动和窗口；正文与图片准备不持聊天锁。最终发送在会话锁内复查日期、窗口、活动、冷却及待回复消息；定时发言更新本次话题并标为尚未获回应。发送前持久写入 `sending`，成功后记 `sent`；飞书明确拒绝恢复 `ready`，结果不明记 `uncertain`。崩溃遗留的 `sending` 同样禁止自动/GM 重发；这是一项保守防重保护，不是持久后台任务队列或 exactly-once 保证。
+
+日记与事实共同使用原始人类消息，日记文字不进入人物证据；旧积压可整理记忆，但不作为今日日记素材。
 
 ## 架构边界
 

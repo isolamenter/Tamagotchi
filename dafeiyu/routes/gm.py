@@ -116,6 +116,7 @@ async def state(req: Request, conversation_id: int = Query(gt=0)):
         "state": await req.app.state.container.conversation_repo.load_conversation_state(
             conversation_id
         ),
+        "scheduled": await req.app.state.container.services.scheduled.status(conversation_id),
     }
 
 
@@ -263,7 +264,7 @@ async def scheduled(req: Request, body: ScheduledRequest, kind: str):
         raise HTTPException(404, "没有配置这项定时内容")
     date, _ = c.state_domain.local_date_hour(time.time())
     try:
-        reply, _ = await c.services.autonomous.scheduled_speak(
+        reply, _ = await c.services.scheduled.speak(
             conversation_id, chat_id, event, date, mark_date=body.mark
         )
     except DiaryNotReady as exc:
@@ -302,4 +303,4 @@ async def tick(req: Request, body: Target):
 @router.post("/tick-all")
 async def tick_all(req: Request):
     await req.app.state.container.services.autonomous.tick_all_conversations()
-    return {"ok": True, "message": "所有会话检查完成"}
+    return {"ok": True, "message": "已安排所有会话后台检查"}

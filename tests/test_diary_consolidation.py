@@ -143,11 +143,10 @@ class DiaryConsolidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.consolidate(self.draft(mid)))
         restarted = container(self.path)
         try:
-            auto = restarted.services.autonomous
             other = await restarted.conversation_repo.get_or_create_conversation("other")
             with self.assertRaises(ValueError):
-                await auto.scheduled_speak(other, "other", self.event, DATE)
-            text, _ = await auto.scheduled_speak(
+                await restarted.services.scheduled.speak(other, "other", self.event, DATE)
+            text, _ = await restarted.services.scheduled.speak(
                 self.cid, "diary-fixture", self.event, DATE, mark_date=False
             )
             self.assertEqual(text, self.draft(mid)["text"])
@@ -177,7 +176,7 @@ class DiaryConsolidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.consolidate(self.draft(mid)))
         self.c.feishu.fail = "card"
         with self.assertRaises(RuntimeError):
-            await self.c.services.autonomous.scheduled_speak(
+            await self.c.services.scheduled.speak(
                 self.cid, "diary-fixture", self.event, DATE
             )
         self.assertIsNotNone(await self.daily.identities.diary(self.cid, DATE))
@@ -190,7 +189,7 @@ class DiaryConsolidationTests(unittest.IsolatedAsyncioTestCase):
     async def test_diary_is_never_new_identity_evidence(self):
         mid = await self.add()
         self.assertTrue(await self.consolidate(self.draft(mid)))
-        await self.c.services.autonomous.scheduled_speak(
+        await self.c.services.scheduled.speak(
             self.cid, "diary-fixture", self.event, DATE, mark_date=False
         )
         next_mid = await self.add("今天继续聊天", ts=NOW + 86400 - 30)
@@ -254,7 +253,7 @@ class DiaryConsolidationTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(
                 await self.c.services.autonomous.tick_conversation(self.cid, "diary-fixture", NOW)
             )
-        prompt = self.c.llm.calls[-1][-1]["content"]
+        prompt = self.c.llm.calls[1][-1]["content"]
         self.assertIn(self.draft(mid)["text"], prompt)
         self.assertIn("只判断这项内容是否适合此刻发布", prompt)
         self.assertFalse(self.c.feishu.calls)

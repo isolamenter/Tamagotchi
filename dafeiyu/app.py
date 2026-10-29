@@ -33,6 +33,7 @@ from dafeiyu.services.incoming import IncomingService
 from dafeiyu.services.memory_service import MemoryService
 from dafeiyu.services.observer_service import ObserverService
 from dafeiyu.services.reply_service import ReplyService
+from dafeiyu.services.scheduled_service import ScheduledService
 from dafeiyu.services.style_service import StyleService
 
 log = logging.getLogger("dafeiyu")
@@ -48,6 +49,7 @@ class AppServices:
     incoming: IncomingService
     delivery: DeliveryService
     consolidation: ConsolidationService
+    scheduled: ScheduledService
 
 
 @dataclass
@@ -108,6 +110,10 @@ def build_container(config: AppConfig) -> AppContainer:
         delivery,
     )
     autonomous.consolidation = consolidation
+    scheduled = ScheduledService(
+        config, runtime, state, conversations, system, identities, autonomous
+    )
+    autonomous.scheduled = scheduled
     reply = ReplyService(
         config,
         runtime,
@@ -123,7 +129,9 @@ def build_container(config: AppConfig) -> AppContainer:
         style,
         autonomous,
     )
-    services = AppServices(reply, observer, autonomous, memory, style, incoming, delivery, consolidation)
+    services = AppServices(
+        reply, observer, autonomous, memory, style, incoming, delivery, consolidation, scheduled
+    )
     return AppContainer(
         config,
         runtime,

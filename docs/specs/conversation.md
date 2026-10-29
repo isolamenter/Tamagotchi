@@ -17,10 +17,13 @@
 
 - 旁听先缓冲，再批量写入；可能触发事件插话评估，周期循环也会检查已存会话。
 - 普通主动插话不限制每天的钟点，受可选周末静默、直接回复冷却、主动发言冷却和新增人类消息门槛（默认 1 条即可评估，不强制凑 2 条）约束；模型评估可决定不说话；未回应的话题是否重复由上下文语义判断，不只比较话题字符串。无人回应时采用更长冷却。
-- 梦境/日记有本地日期标记和补发窗口，优先于普通插话；它们保留独立配置窗口（包括日记 19:00 的显式窗口），遵循周末静默、冷却和新增活跃/语义批准。
+- 事件消息和周期检查均先检查梦境/日记；定时任务进行中保留发布优先级，尚无可发送日记或语义否决时允许普通参与独立评估。梦境/日记有本地日期标记和补发窗口；它们保留独立配置窗口（包括日记 19:00 的显式窗口），遵循周末静默、冷却和新增活跃/语义批准。
 - 日记由每日整理同批生成并保存，只有当天固定快照全部完成且日记非空才能发布；发送阶段不另做写作调用。尚未完成或没有内容时不标记已发，也不阻塞普通插话。
 - 定时内容的语义判断明确针对本次发布：日记传入已保存正文，梦境传入分享意图；适合普通接话不等于适合此刻发布日记/梦境。
-- 定时发布与普通插话都要求未评估的近期人类活动（默认 180 秒，不与维护心跳长度绑定）、冷却和语义参与批准；不是“24 小时内聊过就能发”。无活动或模型否决不冒充已发送；窗口内新活动仍可重新判断。已评估消息的否决水位持久化，重启不反复为旧消息调用模型。
+- 定时发布与普通插话都要求未评估的近期人类活动（默认 180 秒，不与维护心跳长度绑定）、冷却和语义参与批准；不是“24 小时内聊过就能发”。无活动或模型否决不冒充已发送；窗口内新活动仍可重新判断。普通插话、日记、梦境各自持久保存否决水位，互不消耗新消息。定时任务只有明确否决或成功发送才消耗对应活动；生成失败、明确发送拒绝、等待 @ 或窗口关闭不消耗活动。失败保留至少 60 秒尝试间隔，重试仍须满足活跃和窗口限制。
+- 梦境正文与配图在聊天锁外准备；文本先持久保存，生成/发送明确失败或进程重启后可复用。梦境昂贵准备全局限并发 1，排队后再次检查门槛；关闭卡片时不生图、不上传。配图失败可以只发正文。
+- 定时发送在会话锁内复查当前日期、窗口、共享冷却、新活动及待回复消息；评估期间已有其他发言则重新等待，不使用旧批准抢先发送。定时发言记录本次话题并将回应状态设为未回应。
+- 对定时内容，飞书明确拒绝后恢复待发送；超时、响应不完整、取消或已发送但本地落库失败均视为发送状态不明，禁止自动和 GM 重发。发送前持久写入的 `sending` 在重启后也按不明状态处理。可通过已鉴权 `/gm/state` 的 `scheduled` 元数据查看，当前没有管理端解除入口；先核对群聊及持久记录，不能盲目重置。
 - 时间使用配置中的固定 UTC offset，不是带夏令时规则的时区。日期边界、窗口和数值均以 [`settings.toml`](../../config/settings.toml)、[`config.py`](../../dafeiyu/config.py) 为准。
 - 周期检查遍历所有已存会话，代码未按群聊/私聊类型排除；不要把自动发言描述成仅限群聊。
 - GM 手动 `speak`、`dream`、`diary` 不经过上述自动触发门槛；手动梦境/日记默认不占用当日标记，除非指定 `mark`。
@@ -36,10 +39,10 @@
 ## 依据与验证入口
 
 - 输入和直接回复：[`incoming.py`](../../dafeiyu/services/incoming.py)、[`reply_service.py`](../../dafeiyu/services/reply_service.py)
-- 调度与落库：[`autonomous_service.py`](../../dafeiyu/services/autonomous_service.py)、[`observer_service.py`](../../dafeiyu/services/observer_service.py)
+- 调度与落库：[`autonomous_service.py`](../../dafeiyu/services/autonomous_service.py)、[`scheduled_service.py`](../../dafeiyu/services/scheduled_service.py)、[`observer_service.py`](../../dafeiyu/services/observer_service.py)
 - 发送/梗图/风格：[`delivery.py`](../../dafeiyu/services/delivery.py)、[`domain/meme.py`](../../dafeiyu/domain/meme.py)、[`style_service.py`](../../dafeiyu/services/style_service.py)
 - 管理手动操作：[`routes/gm.py`](../../dafeiyu/routes/gm.py)
-- 回归：[`test_conversation_policy.py`](../../tests/test_conversation_policy.py)、[`test_services.py`](../../tests/test_services.py)、[`test_meme_policy.py`](../../tests/test_meme_policy.py)、[`test_style.py`](../../tests/test_style.py)
+- 回归：[`test_conversation_policy.py`](../../tests/test_conversation_policy.py)、[`test_services.py`](../../tests/test_services.py)、[`test_meme_policy.py`](../../tests/test_meme_policy.py)、[`test_style.py`](../../tests/test_style.py)、[`test_scheduled_isolation.py`](../../tests/test_scheduled_isolation.py)
 
 离线测试验证控制流与规则；人设自然度、真实模型决策和群聊体验需另外验收。
 

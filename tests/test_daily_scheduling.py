@@ -207,7 +207,7 @@ class DailySchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.c.llm.responses.append('{"should_speak":false}')
         self.assertFalse(await self.tick(now))
         dream = next(e for e in self.c.config.scheduled_events if e["kind"] == "dream")
-        prompt = self.c.llm.calls[-1][-1]["content"]
+        prompt = self.c.llm.calls[0][-1]["content"]
         self.assertIn(dream["instruction"], prompt)
         self.assertIn("只判断这项内容是否适合此刻发布", prompt)
         self.assertFalse(self.c.feishu.calls)
