@@ -5,8 +5,9 @@ import random
 import unittest
 from collections import Counter
 from dataclasses import replace
+from unittest.mock import patch
 
-from dafeiyu.config import load_config
+from dafeiyu.config import _load_toml, load_config
 from dafeiyu.domain.conversation import ConversationContext
 from dafeiyu.domain.memory import MemoryDomain
 from dafeiyu.domain.state import StateDomain
@@ -418,6 +419,26 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(config.llm_provider, "gemini")
         self.assertEqual(config.openai_api_key, "")
+
+    def test_reply_timeout_must_be_bounded(self):
+        from tests.helpers import make_config
+
+        self.assertEqual(make_config().reply_timeout_sec, 60)
+        real = _load_toml
+
+        def settings(path):
+            data = real(path)
+            if path.name == "settings.toml":
+                data["llm"]["reply_timeout_sec"] = value
+            return data
+
+        for value in (0, 121):
+            with (
+                self.subTest(value=value),
+                patch("dafeiyu.config._load_toml", side_effect=settings),
+                self.assertRaises(ValueError),
+            ):
+                make_config()
 
 
 class MentionRenderTests(unittest.TestCase):

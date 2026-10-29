@@ -526,6 +526,22 @@ class ScheduledIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.c.llm.responses.extend([YES, DREAM])
         self.assertTrue(await self.auto.maybe_interject(self.cid, "chat-fixture"))
 
+    async def test_reply_timeout_does_not_limit_scheduled_preparation(self):
+        await self.add()
+        config = replace(self.c.config, reply_timeout_sec=0.01)
+        self.auto.config = self.scheduled.config = config
+        original = self.c.llm.chat_json
+
+        async def slow(*args, **kwargs):
+            await asyncio.sleep(0.05)
+            return await original(*args, **kwargs)
+
+        self.c.llm.chat_json = slow
+        self.c.llm.responses.extend([YES, DREAM])
+        self.assertTrue(await self.auto.maybe_interject(self.cid, "chat-fixture"))
+        rows = await self.c.message_repo.recent_messages(self.cid, 10)
+        self.assertEqual(rows[-1]["source"], "dream")
+
     async def test_dream_waiting_for_preparation_slot_rechecks_window(self):
         await self.add()
         self.c.llm.responses.append(YES)

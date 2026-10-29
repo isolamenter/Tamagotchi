@@ -269,7 +269,8 @@ class ReplyService:
         valid = [item for item in items if not item.fallback]
         if valid:
             try:
-                reply = await self.generate(conversation_id, valid, current_ids)
+                async with asyncio.timeout(self.config.reply_timeout_sec):
+                    reply = await self.generate(conversation_id, valid, current_ids)
             except Exception as exc:
                 reason = ""
                 if isinstance(exc, json.JSONDecodeError):

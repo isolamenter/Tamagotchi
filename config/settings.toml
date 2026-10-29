@@ -36,6 +36,8 @@ autonomous_temperature = 0.5
 scheduled_max_tokens = 1000
 # 记忆压缩输出（一组卡片 JSON）的 token 上限。
 compress_max_tokens = 2000
+# 普通回复 / 插话生成阶段（召回、风格检索、模型调用）的总时限，不含发送；定时内容另有超时。
+reply_timeout_sec = 60
 
 [style_retrieval]
 # 语义分达到这个门槛，或当前消息直接命中关键词时，才允许注入风格语料。

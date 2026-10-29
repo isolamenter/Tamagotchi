@@ -259,6 +259,52 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertFalse(self.c.llm.calls)
 
+    def short_reply_timeout(self):
+        config = replace(self.c.config, reply_timeout_sec=0.05)
+        self.c.services.reply.config = self.c.services.autonomous.config = config
+
+    async def test_hung_embedding_or_model_falls_back_and_releases_lock(self):
+        self.short_reply_timeout()
+        original = self.c.llm.embed_text, self.c.llm.chat_json
+
+        async def hang(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        for name in ("embed_text", "chat_json"):
+            with self.subTest(hung=name):
+                self.c.feishu.calls.clear()
+                self.c.llm.embed_text, self.c.llm.chat_json = original
+                setattr(self.c.llm, name, hang)
+                await self.c.services.reply.handle_message_event(
+                    event("@_bot 你好", message_id=f"hung-{name}")
+                )
+                self.assertFalse(self.c.runtime.chat_lock(self.cid).locked())
+                self.assertEqual(
+                    self.c.feishu.calls[-1][-1],
+                    self.c.config.fallback_replies["empty_llm"],
+                )
+        self.c.llm.embed_text, self.c.llm.chat_json = original
+        await self.c.services.reply.handle_message_event(event("@_bot 还在吗", message_id="next"))
+        self.assertEqual(self.c.feishu.calls[-1][-1], "在呢")
+
+    async def test_hung_interjection_evaluation_and_generation_release_lock(self):
+        self.short_reply_timeout()
+        await self.c.message_repo.append_message(self.cid, "user", "聊点什么")
+        state = await self.c.conversation_repo.load_conversation_state(self.cid)
+
+        async def hang(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        self.c.llm.chat_json = hang
+        self.assertIsNone(
+            await self.c.services.autonomous.evaluate_proactive_speaking(self.cid, state)
+        )
+        self.c.llm.embed_text = hang
+        with self.assertRaises(TimeoutError):
+            await self.c.services.autonomous.proactive_speak(self.cid, "chat-fixture", "测试")
+        self.assertFalse(self.c.runtime.chat_lock(self.cid).locked())
+        self.assertFalse(self.c.feishu.calls)
+
     async def test_background_tasks_are_cancelled_on_close(self):
         task = self.c.runtime.spawn(asyncio.sleep(100))
         await self.c.runtime.close()

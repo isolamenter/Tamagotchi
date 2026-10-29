@@ -74,6 +74,7 @@ class AppConfig:
     autonomous_temperature: float
     scheduled_max_tokens: int
     compress_max_tokens: int
+    reply_timeout_sec: float
 
     tick_interval_sec: int
     proactive_cooldown_sec: int
@@ -234,6 +235,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         autonomous_temperature=float(llm_config.get("autonomous_temperature", 0.5)),
         scheduled_max_tokens=int(llm_config.get("scheduled_max_tokens", 1000)),
         compress_max_tokens=int(llm_config.get("compress_max_tokens", 2000)),
+        reply_timeout_sec=float(llm_config.get("reply_timeout_sec", 60)),
         tick_interval_sec=int(autonomous_config.get("tick_interval_sec", 600)),
         proactive_cooldown_sec=int(autonomous_config.get("cooldown_sec", 600)),
         unanswered_cooldown_sec=int(autonomous_config.get("unanswered_cooldown_sec", 1800)),
@@ -282,6 +284,8 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         raise ValueError("Intervals, limits and token budgets must be positive")
     if config.reply_debounce_sec < 0 or config.event_interject_debounce_sec < 0:
         raise ValueError("Debounce cannot be negative")
+    if not 0 < config.reply_timeout_sec <= 120:
+        raise ValueError("llm.reply_timeout_sec must be in (0, 120]")
     if not 0 < config.meme_review_timeout_sec <= 60:
         raise ValueError("meme.review_timeout_sec must be in (0, 60]")
     if not all(0 <= event["hour"] < 24 for event in config.scheduled_events):

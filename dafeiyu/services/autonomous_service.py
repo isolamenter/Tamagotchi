@@ -113,7 +113,11 @@ class AutonomousService:
         max_tokens: int,
         extra_state: dict,
     ) -> tuple[str, dict]:
-        reply, ids = await self.prepare_reply(conversation_id, prompt, query, max_tokens=max_tokens)
+        # Scheduled content calls prepare_reply directly under its own longer limit.
+        async with asyncio.timeout(self.config.reply_timeout_sec):
+            reply, ids = await self.prepare_reply(
+                conversation_id, prompt, query, max_tokens=max_tokens
+            )
         return await self.send_reply(
             conversation_id,
             chat_id,
@@ -245,7 +249,8 @@ class AutonomousService:
             return None
         await self.conversations.record_evaluation(conversation_id, None, now)
         try:
-            decision = await self.participation_decision(rows, state)
+            async with asyncio.timeout(self.config.reply_timeout_sec):
+                decision = await self.participation_decision(rows, state)
             await self.conversations.record_evaluation(
                 conversation_id, max(r["id"] for r in fresh), now
             )
