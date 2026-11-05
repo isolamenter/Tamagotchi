@@ -141,7 +141,7 @@ class StyleDomainTests(unittest.TestCase):
         block = self.style.render_selected(catchphrases, example_cards=cards)
         self.assertLess(block.index("第一环节"), block.index("第二环节"))
         self.assertIn("群友：接口一直超时", block)
-        self.assertIn("我的回复：不一定是服务器性能的问题哦。", block)
+        self.assertIn("我的回复：不一定怪服务器啦。", block)
         self.assertNotIn("source_message_id", block)
         self.assertIn("虚构的写作示例", block)
 
@@ -248,7 +248,8 @@ class StyleDomainTests(unittest.TestCase):
         self.assertIn("蓝白女仆裙", config.persona_style_prompt)
         self.assertIn("服装是角色识别锚点", config.persona_style_prompt)
         self.assertIn("几个字或一两句话说完直接停", config.persona_style_prompt)
-        self.assertIn("条理清晰地讲清原因和关键步骤", config.persona_style_prompt)
+        self.assertIn("对方点名要的内容一个都不漏", config.persona_style_prompt)
+        self.assertIn("不用 Markdown", config.persona_style_prompt)
         self.assertIn('"reply_mode": "normal"', config.json_output_prompt)
         self.assertIn("reaction", config.json_output_prompt)
         self.assertIn("substantive", config.json_output_prompt)

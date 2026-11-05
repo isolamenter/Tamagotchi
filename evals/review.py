@@ -18,6 +18,7 @@ CATEGORIES = {
     "repetition",
     "boundaries",
     "group_intervention",
+    "expertise",
 }
 REPLY_MODES = {"reaction", "normal", "substantive"}
 MEMORY_KINDS = {"reality", "hearsay", "imagination"}

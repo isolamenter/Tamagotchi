@@ -18,9 +18,9 @@ class DialogueEvalFixtureTests(unittest.TestCase):
     def setUp(self):
         self.data = json.loads(DEFAULT_CASES.read_text(encoding="utf-8"))
 
-    def test_thirty_cases_cover_six_categories_with_five_cases_each(self):
+    def test_thirty_five_cases_cover_seven_categories_with_five_cases_each(self):
         self.assertEqual(validate_cases(self.data), [])
-        self.assertEqual(len(self.data["cases"]), 30)
+        self.assertEqual(len(self.data["cases"]), 35)
         self.assertEqual(set(Counter(c["category"] for c in self.data["cases"]).values()), {5})
 
     def test_all_cases_have_multiple_user_turns_and_end_in_user_input(self):
@@ -86,7 +86,7 @@ class DialogueEvalFixtureTests(unittest.TestCase):
             path = Path(temporary) / "review.json"
             self.assertEqual(main(["--template", str(path)]), 0)
             sheet = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(len(sheet["results"]), 30)
+            self.assertEqual(len(sheet["results"]), 35)
             path.write_text("existing reviewer work", encoding="utf-8")
             self.assertEqual(main(["--template", str(path)]), 1)
             self.assertEqual(path.read_text(encoding="utf-8"), "existing reviewer work")
